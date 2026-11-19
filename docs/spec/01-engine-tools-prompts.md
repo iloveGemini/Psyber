@@ -57,7 +57,7 @@ export interface ModelRef {
 | :--- | :--- | :--- |
 | `chat`（主对话） | OAuth 失效 / Key 无效 | SSE 推 `turn.error { code: "AUTH_EXPIRED", retryable: false }`，引导进设置/OAuth 重登 |
 | `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；仍失败则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` |
-| `chat`（主对话） | 上下文超限 | 切入**系统级换段整理忙态**（绝不修改 `door_state`），先释放 `ChatTurnLock` 再跑 `daily_wrapup`（拉取截止到当前待回复消息之前，不吞待回复消息）；收完切新 `session_id`（顺接最近 4 轮原始对话）并自动回复排队消息；若整理轮失败或换段后仍超限，退出忙态并推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
+| `chat`（主对话） | 上下文超限 | 切入**系统级换段整理忙态**（绝不修改 `door_state`），先释放 `ChatTurnLock` 再跑 `daily_wrapup`（拉取截止到当前待回复消息之前，不吞待回复消息）；收完切新 `session_id`（顺接最近 6 轮原始对话）并自动回复排队消息；若整理轮失败或换段后仍超限，退出忙态并推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
 | `memory_task`（写/复核） | 任意模型错误 / 超时 / 复核输出不可解析 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
 | `embedding` / `reranker` | 未配置 / 超时（`> 2500ms`）/ 报错 | 静默降级为 SQLite FTS5 + `when_to_recall` + IDF 字面打分，绝不阻塞主对话 |
@@ -166,7 +166,7 @@ export interface ModelRef {
 2. **换段时自动触发「结晶整理轮」（含 `CONTEXT_OVERFLOW` 无死锁忙态协议）**：
    - 触发换段时，Direct Engine **绝不调用任何通用摘要提示词压缩历史**；
    - 引擎自动派发一次静默 **`memory_task`（`daily_wrapup` 结晶整理轮）**，由住户模型以第一人称回顾上一段未整理的原话事件流，使用原生 5 工具将值得记住的认知、承诺与切片写入 `daily/`、`shelf/`、`activities/`、`favorite/`（值得逐字保留的原话）或 `entities/`（新收录的实体档案），完成 C2.7 复核并 Git Commit；
-   - **`CONTEXT_OVERFLOW` 紧急换段无死锁约定**：若在主对话持 `ChatTurnLock` 期间撞上 `CONTEXT_OVERFLOW`，**绝不持锁同步等待整理轮、也绝不改动 `door_state`**；服务端切入**系统级换段整理忙态**（前端输入框文案切换为「正在整理记忆，发出的消息会先留在这里，收完就回」，期间新消息仍以 `chat` 正常入待回复队列），**先释放 `ChatTurnLock`** 再启动 `daily_wrapup`（拉取上限截止到当前待回复消息之前，绝不吞掉待回复消息）；整理完成并切新 `session_id`（顺接最近 4 轮原始对话）后退出忙态，自动按序回复排队消息；若整理轮本身失败，立即退出忙态并推送 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` 防止卡死。
+   - **`CONTEXT_OVERFLOW` 紧急换段无死锁约定**：若在主对话持 `ChatTurnLock` 期间撞上 `CONTEXT_OVERFLOW`，**绝不持锁同步等待整理轮、也绝不改动 `door_state`**；服务端切入**系统级换段整理忙态**（前端输入框文案切换为「正在整理记忆，发出的消息会先留在这里，收完就回」，期间新消息仍以 `chat` 正常入待回复队列），**先释放 `ChatTurnLock`** 再启动 `daily_wrapup`（拉取上限截止到当前待回复消息之前，绝不吞掉待回复消息）；整理完成并切新 `session_id`（顺接最近 6 轮原始对话）后退出忙态，自动按序回复排队消息；若整理轮本身失败，立即退出忙态并推送 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` 防止卡死。
    - 整理完成后关闭旧 `session_id`，开启全新 `session_id`。
 3. **新会话首条助手锚点：完整多尺度自传骨架 `<gist>`**：
    - 新会话的历史首条不再放生硬的摘要，而是注入由住户本人历次睡前与整理轮亲自写下的 **完整自传骨架**，越远越粗，层层嵌套：
@@ -176,7 +176,7 @@ export interface ModelRef {
      - **天（`days/`）**：过去最多 7 天（`GIST_LIMIT.day = 300` 字/天）；
      - **待入梗概情节**：取自 `updated_at > bedtime.last_run_at`（首次取当日零点，与 `Spec 02` §5.2 `bedtime` 窗口一致）的已落盘 `daily/` 与 `activities/` 卡片摘要（不含 `resolved`/`archived`/`faded`，按 `updated_at` 从新往旧截取至剩余字符预算，避免漏掉当日续更的长周期活动卡）；
    - **预算红线**：整套 `<gist>` 骨架受硬上限严格约束（默认 `GIST_BUDGET ≤ 3000 tokens`），保持自传完整连贯且轻盈稳固；
-   - 新会话随后顺接上一段会话的**最近 4 轮原始对话**作为无缝滑行过渡。
+   - 新会话随后顺接上一段会话的**最近 6 轮原始对话**作为无缝滑行过渡。
 
 ---
 
