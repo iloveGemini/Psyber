@@ -34,7 +34,7 @@
      - `read` / `write` / `edit` 严格要求匹配 `/^private\/[\p{Script=Han}a-zA-Z0-9_-]+\.md$/u`（仅允许单层且不含 `.` 的文件名，其中 `<name>` 即 `GET /api/v1/drawer` 返回的条目 `id`），映射至 `<dataDir>/private/<name>.sealed`；不匹配时明确提示合法字符与单层 `.md` 限制。
    - **其余路径 → 映射到 `<dataDir>/memory/<relPath>`（`zone: "memory"`）**：
      - `grep` 的 `path` 可为文件或子目录前缀；
-     - 写操作（`write` / `edit`）额外受顶级路径、二级结构与扩展名白名单约束：仅允许 `self.md`、`user.md`、`shelf/rules.md`、`shelf/mirror.md`、`shelf/threads.md`、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml`，或位于 `daily/`、`favorite/`、`gist/`、`activities/<slug>/`、`entities/<category>/` 下的 `.md` 文件（拒绝在 `shelf/` 下新建非固定文件名以防既不进 Static Prefix 又不进双轨召回的黑洞文件，拒绝无 `.md` 后缀的路径如 `daily/note` 或直接写在 `activities/foo.md`、`entities/foo.md` 的单层孤儿路径）。
+     - 写操作（`write` / `edit`）额外受顶级路径、二级结构与扩展名白名单约束：仅允许 `self.md`、`user.md`、`shelf/rules.md`、`shelf/mirror.md`、`shelf/threads.md`、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml`，或位于 `daily/`、`favorite/` 下的单层 `.md` 文件，或位于 `gist/(days|weeks|months|years)/` 下的 `.md` 文件（严格匹配 `/^gist\/(days|weeks|months|years)\/[a-zA-Z0-9_-]+\.md$/`），或位于 `activities/<slug>/`、`entities/<category>/` 下的 `.md` 文件（拒绝在 `shelf/` 下新建非固定文件名以防既不进 Static Prefix 又不进双轨召回的黑洞文件，拒绝无 `.md` 后缀的路径如 `daily/note` 或直接写在 `activities/foo.md`、`entities/foo.md` 的单层孤儿路径）。
 4. **`glob` 模式防线（`resolveGlobPattern`）**：同样拦截绝对路径、`..`、`\0` 与 `.git`；**仅当 `pattern` 显式以 `private/` 开头时**，限定扫描 `<dataDir>/private/*.sealed`（仅支持单层 `private/*.md` 风格匹配，内存解封元信息返回 `private/<name>.md`）；**其他任何通配符（含 `**/*`）绝不混入 `private/`**。
 
 ### 1.2 5 工具精确行为与自救报错契约
@@ -86,7 +86,24 @@ PSYBER-SEALED-V1
    - 用户通过 `POST /api/v1/drawer/:id/open` 或 CLI `psyber export --include-private` 拆封：**先**在同一事务内写入 `events (role='system', kind='privacy.peeked', session_id=activeSessionId || 'system', content='用户在 ' + channel + ' 拆封了上锁抽屉「' + title + '」', metadata={ drawerId, title, channel: 'app' | 'cli' })`，**再**返回解封正文；
    - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind = 'privacy.peeked' AND id > lastNoticedId` 组装 `<events_notice>`（例如 `系统事实：用户在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`），绝不替住户预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
 
+### 2.3 多尺度自传骨架 `<gist>` 读取与连续性拼装规程（Psyche 连续性模型落地）
+
+承接 `Spec 01` §2.5 与 `MEMORY.md` §2.1，`<gist>` 是住户由天、周、月、年亲笔滚动的自传时间骨架，新会话开局由 Direct Engine 调用 `server/src/memory/gist.ts` 组装：
+
+1. **磁盘文件存储结构**：
+   - `memory/gist/days/YYYY-MM.md`：每日梗概（以 `### YYYY-MM-DD` 分段，每段 ≲ 300 字符）；
+   - `memory/gist/weeks/YYYY.md`：每周梗概（以 `### YYYY-Www` ISO 周分段，每段 ≲ 500 字符）；
+   - `memory/gist/months/YYYY.md`：每月梗概（以 `### YYYY-MM` 分段，每段 ≲ 800 字符）；
+   - `memory/gist/years/YYYY.md`：跨年汇总（以 `### YYYY` 分段，每段 ≲ 1000 字符）。
+2. **多尺度金字塔读取算法（`renderGistContinuity`）**：
+   - 提取最新 **`years: 3`** 年、**`months: 12`** 月、**`weeks: 4`** 周、**`days: 7`** 天的自传片段；
+   - **区间去重与由远及近**：当天的梗概已在【天】中呈现时，所属该周不重复拆解；当周已在【周】呈现时，所属该月不重复拆解；严格维持“越远越粗，近处细腻”；
+   - **待入梗概情节补全**：提取最后一条日梗概所在日期之后、尚未被收拢进天梗概的近期 `daily/` 记忆卡片正文（从新往旧截取至近期经历预算）；
+   - **硬预算截断**：整套 `<gist>` 骨架受 `GIST_BUDGET ≤ 3000 tokens` 严格约束（超出时自最远年份向上温和截断）；
+   - 组装为包含 `【年】`、`【月】`、`【周】`、`【天】`、`【最近的经历】` 的结构化 Markdown 块，注入新会话 Segment 2 首条助手锚点。
+
 ---
+
 
 ## 3. 卡片 Frontmatter 宽容解析与 `REGISTRY.yaml` 写前校验
 
@@ -296,7 +313,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 | 触发时机 | 行为 |
 | :--- | :--- |
-| `write` / `edit` 落盘 `memory/**/*.md` | **同步**计算 SHA-256 `content_hash`，若变化则在单事务内刷新 `card_index` + `card_fts`（耗时 `< 3ms`）；同时将 `{ path, contentHash }` 推入异步单并发向量补齐队列（若 `slots.embedding` 已配置），**绝不阻塞工具返回**。`REGISTRY.yaml` 变更仅刷新内存空间描述向量缓存，不进 `card_index`。 |
+| `write` / `edit` 落盘 `memory/**/*.md` | **同步**计算 SHA-256 `content_hash`，若变化则在单事务内刷新 `card_index` + `card_fts`（耗时 `< 3ms`；**若落盘路径匹配 `entities/<category>/*.md`，索引器同步读取 `entities/REGISTRY.yaml`，将该实体声明的 `name`、`aliases` 与 `relation` 自动拼入 `trigger_tokens` 分词索引**，彻底解决口语称谓/别名搜不到实体问题）；同时将 `{ path, contentHash }` 推入异步单并发向量补齐队列（若 `slots.embedding` 已配置），**绝不阻塞工具返回**。`REGISTRY.yaml` 变更仅刷新内存空间描述向量缓存，不进 `card_index`。 |
 | `MemoryTx` 异常回滚 | 对回滚还原的每个 `touchedMemoryPaths` 调用 `reindexFile(path)`（新建被删文件则 `removeFromIndex(path)`，单事务清除 `card_index` + `card_fts` + `card_embeddings`），保证磁盘与索引 100% 一致。 |
 | 服务启动 & `bun run memory:reindex` | 扫描 `<dataDir>/memory/**/*.md`（跳过 `.git/` 与 `REGISTRY.yaml`）：新增/哈希变化的文件刷新索引，磁盘已删但表里残留的孤儿路径同时从 `card_index` / `card_fts` / `card_embeddings` 清除；向量仅对 `card_embeddings` 中缺失当前 `model_key + content_hash` 的卡片异步补算，不阻塞 HTTP 启动。 |
 | 索引层过期巡检（`expireOverdueStateCards`） | 每次定时心跳、双轨召回、`glob`/`grep` 及 §6.1 状态对账前，先将 `space = 'daily' AND kind = 'state' AND status = 'active' AND expires_at <= Clock.now()` 的 `card_index.status` 置为 `faded`（见 §8.1）。 |
@@ -311,7 +328,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 | 写入源 | 触发场景 | 锁粒度与互斥防竞态规则 | Git 提交时机与格式 | 是否走 C2.7 复核 |
 | :--- | :--- | :--- | :--- | :--- |
-| **主对话当轮即时写卡** | 聊天中顺手改 `daily/` `state`、记 `favorite/`、收 `entities/` 或 `edit` `self`/`user`/`shelf` | 在 `ChatTurnLock` 内按需短持 `MemoryWriteMutex` 完成写盘与索引刷新，路径记入本轮 `turnTouchedMemoryPaths`（排除 `private/`） | 在释放 `ChatTurnLock` **之前**（`turn.done` 推送前或 `abort` 清理时），短持 `MemoryWriteMutex` 执行 `git add -- <...paths>`；若 `git diff --cached --quiet` 为真则跳过提交，否则执行 `git commit -m "chat(memory): update <file1>, ... [turn:<turnId>]"` | **否**（不阻塞前台聊天；由后续整理轮做 `state` 对账兜底） |
+| **主对话当轮即时写卡** | 聊天中顺手改 `daily/` `state`、记 `favorite/`、收 `entities/` 或 `edit` `self`/`user`/`shelf` | 在 `ChatTurnLock` 内按需短持 `MemoryWriteMutex` 完成写盘与索引刷新，路径记入本轮 `turnTouchedMemoryPaths`（排除 `private/`） | **若本轮未触碰任何记忆文件（`turnTouchedMemoryPaths.size === 0`，占日常闲聊 95%+），直接推送 `turn.done` 并释放 `ChatTurnLock`，绝对不争抢 `MemoryWriteMutex`，彻底杜绝前台闲聊被后台整理轮（C2.7 复核 15~30s）无故阻塞**；仅当当轮产生了实际写卡（`turnTouchedMemoryPaths.size > 0`）时，才在释放 `ChatTurnLock` 前短持 `MemoryWriteMutex` 执行精准提交 | **否**（不阻塞前台聊天；由后续整理轮做 `state` 对账兜底） |
 | **静默整理轮（`MemoryTx`）** | `activity:<slug>` / `daily_wrapup` / `bedtime`（按 `10_000` 字分批） | **仅在 `ChatTurnLock` 空闲时启动批次**（杜绝与进行中主对话的未提交 `turnTouchedMemoryPaths` 交叉改写）；单批持 `MemoryWriteMutex` 完成 A→B→C→commit；多批期间若检测到新主对话排队等锁，当前批提交释放后自动让出一次事件循环给主对话先运行 | 每批正常结束后执行 `git add -- <...touchedMemoryPaths>`；若 `git diff --cached --quiet` 非空则 `git commit -m "memory(<task>): <summary> [review: fixed=<N>, rejected=<M>]"` | **是**（C2.7 单轮只读 diff 复核） |
 
 ### 5.2 游标防重查询与 `digested_activity_spans` 联动
@@ -319,7 +336,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 - **`activity:<slug>` 结束后**：在同一 SQLite 提交事务内写入 `digested_activity_spans(slug, start_event_id, end_event_id)` 并推进 `task_cursors['activity:<slug>']`；
 - **`daily_wrapup` 门禁与连续前沿查询（`door_note` 解耦，进行中活动防抢跑）**：
   - **`door_note` 直接纳入连续整理流**：`door = closed` 仅代表用户失去即时唤醒权，不限制住户在整理轮自主查阅门缝纸条。`daily_wrapup` **不再按 `door_notes_read` 过滤**，按 `seq` 连续拉取 `chat / wake / door_note`（杜绝游标跨越未读纸条空洞），并在送入 `prompts/tidy.md` 的转录中对 `door_note` 显式标注 `[对方从门缝塞进来的纸条 · 当时门处于关闭状态]`；整理轮**不推进 `task_cursors['door_notes_read']`**（留给 `chat`/`wake` 唤醒层自主决定是否回应或开门）；
-  - **进行中 `ActivityPlugin` 门禁**：常规 `daily_wrapup`（25 分钟闲置等）若检测到存在活跃 `ActivityPlugin` 则直接跳过，待活动结束后由 `activity:<slug>` 整理；仅当撞上 80% / `CONTEXT_OVERFLOW` 强换段时才提前收当前活动之前已结束的事件，并施加上限 `e.id < minActiveActivityEventId`（当前活跃活动最早事件 `id`；`CONTEXT_OVERFLOW` 忙态换段时同时受 `e.id < firstQueuedPendingChatEventId` 约束，不吞待回复消息），确保游标绝不跨过未就绪空洞：
+  - **进行中 `ActivityPlugin` 门禁与长会话温热切段触发**：常规 `daily_wrapup` 采取**缓存保活与长会话切段策略**：当且仅当开启了 Prompt Cache 与 Warm-up 保活（每 4~5 分钟以 1 token 预热维系缓存），且当前会话已累积成长会话（**本段 Token > 40_000**）时，若用户停下对话持续闲置达到 **25 分钟**，趁着 40k+ 的庞大上下文仍在缓存温热期内，以极低成本在后台运行结晶整理轮并**换新 `session_id`（长会话收端切段）**，彻底避免后续对话拖拽臃肿历史；未开启缓存或本段 Token ≤ 40_000 的轻量会话**一律不收、不切会话**，留待 80% 上下文上限或深夜 `bedtime` 批量消化。若检测到存在活跃 `ActivityPlugin` 则直接跳过，待活动结束后由 `activity:<slug>` 整理；仅当撞上 80% / `CONTEXT_OVERFLOW` 强换段时才提前收当前活动之前已结束的事件，并施加上限 `e.id < minActiveActivityEventId`（当前活跃活动最早事件 `id`；`CONTEXT_OVERFLOW` 忙态换段时同时受 `e.id < firstQueuedPendingChatEventId` 约束，不吞待回复消息），确保游标绝不跨过未就绪空洞：
   ```sql
   SELECT * FROM events e
   WHERE e.status = 'active'

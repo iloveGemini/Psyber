@@ -151,7 +151,7 @@ source: live                      # live | import（预留外部历史迁移标�
 | 任务类型 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
 | :--- | :--- | :--- | :--- |
 | **1. 活动收尾任务 (`activity:<slug>`)** | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间 `events.activity = <slug>` 的原始对话流 + 对应目录现有文件列表 + `activities/REGISTRY.yaml` 中该空间的 `card_style` | 更新或新建 `activities/<slug>/<topic>.md`（必要时附收入 `favorite/`） |
-| **2. 换段结晶任务 (`daily_wrapup`)** | 闲置 `> 25 分钟` 且本段新增 Token `> 40_000`，或上下文 `> 80%`（完成后换新 `session_id`） | 游标后的未整理对话（跳过已由 `activity:<slug>` 整理完的活动段；按 `TASK_BUDGET = 10_000` 字分批、每批独立提交推进游标）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 全部未关闭的 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved` 或 `disputed`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入或新开 `activities/` |
+| **2. 换段结晶任务 (`daily_wrapup`)** | 开启 Prompt Cache 与 Warm-up 保活、本段 Token > 40k 且闲置达 25 分钟（趁缓存温热以极低成本消化长会话并换新 `session_id`）；或上下文 > 80% 强换段（未开缓存或 ≤ 40k 的轻会话闲置时不收不切） | 游标后的未整理对话（跳过已由 `activity:<slug>` 整理完的活动段；按 `TASK_BUDGET = 10_000` 字分批、每批独立提交推进游标）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 全部未关闭的 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved` 或 `disputed`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入或新开 `activities/` |
 | **3. 每日睡前整理任务 (`bedtime`)** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话（对齐 `daily_wrapup` 游标），再递入当日已写/改卡片摘要 + 当日关键双向反馈链（`prev → acts → next`）+ 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（天/周/月/年）、按需修订 `shelf/`（规矩/镜子/承诺）、`self.md`/`user.md` 与兜底 `favorite/`/`entities/` |
 
 ### 5.1 冲突对账（`daily/` state 卡 · 对应 C2.7）

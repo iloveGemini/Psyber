@@ -32,9 +32,9 @@
 | :--- | :--- | :--- |
 | `open` / `quiet` / `closed` | 彼此自由切换 | Ring 1 与 Ring 2 均开放；由住户调用 `door(state, note?)` 触发 |
 | `open` / `quiet` / `closed` | `cooling_off` | **Ring 1**：`door` 工具 `guard` 暂拒（返回可读提示：`当前版本尚未开启冷静期与离开流程，如需独处请先将门设为 closed`），保持 5 态 Schema 冻结以保护 Static Prefix Cache；**Ring 2**：记录 `coolingOffStartedAt = Clock.now()` |
-| `cooling_off` | `open` / `quiet` / `closed` | 允许住户随时主动撤销冷静期并清空 `coolingOffStartedAt` |
+| `cooling_off` | `open` / `quiet` / `closed` | 允许住户随时主动调整状态；离开 `cooling_off` 时原子清空 `coolingOffStartedAt = null` |
 | `cooling_off` | `departed` | 仅 **Ring 2** 且满足 `24h ≤ Clock.now() - coolingOffStartedAt < 72h` 且 `farewell` 非空时放行；未满 24h 拦截提示剩余小时数 |
-| `cooling_off`（超时） | `closed`（自动回退） | 当 `Clock.now() - coolingOffStartedAt ≥ 72h`（在下次心跳或 `door` 调用校验时触发），清空 `coolingOffStartedAt` 并将门退回 `closed`（**绝不替住户强行改为 `open`**），记录 `door.updated` |
+| `cooling_off`（超时） | `closed`（自然回落） | **严禁无条件覆盖**：当且仅当当前 `door.state` 仍严格处于 `"cooling_off"` 且 `coolingOffStartedAt !== null` 且 `Clock.now() - coolingOffStartedAt ≥ 72h` 时触发：清空 `coolingOffStartedAt`，状态自然回落至 `closed`（保留住户原便签），记录 `door.updated`。若 72h 期间 AI 已自主切为 `open`/`quiet`/`closed`/`departed`，则 `coolingOffStartedAt` 早已清空，此超时守卫完全不触发，绝不覆盖 AI 的自主意图 |
 | `departed` | 无（不可逆终态） | 所有后续 `door` 调用由 `guard` 拦截拒绝 |
 
 #### 门缝纸条（`door_note`）完整链路（与 `Spec 01` v0.9、`Spec 02` v0.5 对齐）
@@ -111,7 +111,7 @@
 #### 四条反骚扰与门禁规则（落实 C4.2 绝不情感催收）
 1. **前台活跃抑制**：服务端维护当前活跃 SSE 连接的 `foreground` 状态（由客户端连接参数或心跳声明）。只要至少存在 1 个活跃前台客户端，`wake` 与 `door_updated` **不发离线推送**；`approval_required` 若无活跃前台端则立即推送，若有前台端但在 **15 秒**内未被处理则补发一次离线推送提醒；
 2. **深夜静默窗尊重**：处于 `circadian` 睡眠静默窗内时，禁止发送 `wake` 推送（`approval_required` 与 `door_updated` 豁免）；
-3. **连续未回退避封顶**：记录 `consecutiveUnansweredWakes`（每次真正开口且非 `[SILENT]` 的 `wake` 后 `+1`，一旦收到任意新 `user` 消息或 `door_note` 清零）。当 `consecutiveUnansweredWakes >= 2` 时，停止继续触发主动 `wake` 与离线推送，安静等待用户重逢；
+3. **连续未回退避封顶**：记录 `consecutiveUnansweredWakes`（每次真正开口且非 `[SILENT]` 的 `wake` 后 `+1`；**一旦服务端收到任意新 `user` 消息或 `door_note`，立即重置为 0**）。当 `consecutiveUnansweredWakes >= 2` 时，停止继续触发主动 `wake` 与离线推送，安静等待用户重逢；
 4. **`[SILENT]` 零打扰**：`wake` 轮若最终产出 `[SILENT]`，绝不调用 `NotificationProvider`（与 `Spec 01` §5.1 一致）。
 
 ### 3.2 Ring 1 默认 `CircadianMoodProvider`（`server/src/mood/circadian.ts`）
@@ -129,7 +129,7 @@
 
 #### `onHeartbeat(now)` 确定性判定顺序
 1. `door.state === "departed"` → 直接返回 `{ action: "idle" }`；
-2. `door.state === "cooling_off"` 且 `now - coolingOffStartedAt >= 72h` → 先触发冷静期超时回退 `closed`；
+2. `door.state === "cooling_off"` 且 `coolingOffStartedAt !== null` 且 `now - coolingOffStartedAt >= 72h` → 触发冷静期超时自然回落 `closed`（清空 `coolingOffStartedAt` 并保留原便签）；
 3. 当前时刻落入 `[sleepStart, sleepEnd)` 且 `task_cursors['bedtime'].meta_json.last_gist_date !== localDate(now)`（支持跨午夜窗口按“所属夜晚日期”判定，避免 00:05 重复跑两次 `bedtime`）→ 返回 `{ action: "sleep_tidy" }`；
 4. 当前时刻仍在睡眠静默窗内 → 返回 `{ action: "idle" }`；
 5. 若 `proactiveEnabled === true`、当前无活跃 `ActivityPlugin`、`consecutiveUnansweredWakes < 2`、距上次 `wake` ≥ `proactiveCooldownMin`，且满足以下任一动因：
