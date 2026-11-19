@@ -21,7 +21,7 @@ description: C2.7 写后独立复核轮 Prompt（只读视角；新建卡核全�
 # 规则与输出格式
 
 - 按问题类别提供准确出处（拿不出准确出处的怀疑直接放弃，不要硬挑刺）：
-  - 若为 `attribution` 或 `no_bleed`：`cardPath` 必填为本次写/改卡片路径；`cardQuote` 必填为**该卡片本轮新增/修改片段中的逐字原句**；`transcriptQuote` 可选（仅当原文里有对照句子时填写）。
+  - 若为 `attribution` 或 `no_bleed`：`cardPath` 必填为本次写/改卡片路径；`cardQuote` 必填为**该卡片本轮新增/修改片段中的逐字原句**；`transcriptQuote` 可选（仅当原文里有逐字对照句子时填写，无对照原句时请省略或留空，严禁填入“原文未提及”等说明文字）。
   - 若为 `omission`：`transcriptQuote` 必填为**原始对话段中的逐字片段**；`cardPath` 可填建议落卡路径或 `null`（若本轮未写任何卡）。
 - 严格只输出如下 JSON，不要输出任何额外解释：
 

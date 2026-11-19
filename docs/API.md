@@ -1,6 +1,6 @@
 # Psyber 前后端 API 契约（API）
 
-> **版本**：v0.3（2026-11-19，补齐媒体上传、远程 OAuth 授权、生成中止端点与 SSE 重同步事件，与 [`CAPABILITIES.md`](CAPABILITIES.md) v1.2 及 [`ARCHITECTURE.md`](ARCHITECTURE.md) v0.4 一致）
+> **版本**：v0.4（2026-11-19，明确 `wake` `[SILENT]` 延后广播 `turn.start`/`turn.thinking` 与 `CONTEXT_OVERFLOW` 换段整理忙态不改 `door_state`，与 [`CAPABILITIES.md`](CAPABILITIES.md) v1.2 及 [`ARCHITECTURE.md`](ARCHITECTURE.md) v0.5 一致）
 > **原则**：极简、版本化、面向 Flutter 多端（支持本机/局域网/公网选路、断线重连与离线安全降级），严禁泄露底层内部字段。
 
 ---
@@ -33,8 +33,8 @@
 | 方法与路径 | 说明 |
 | :--- | :--- |
 | `GET /api/v1/chat/history?before=<id>&limit=50` | 分页拉取时间线（含对话、门缝留言、具身表达元数据、可折叠 `✦ 整理记忆` 静默任务卡、扩展富卡片；媒体仅返回 URL，**严禁内联 base64**） |
-| `POST /api/v1/chat/messages` | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `activityHint`、`attachments`、`stickerId`）；门为 `closed`/`cooling_off` 时自动作为「门缝纸条」落盘不唤醒回复；`departed` 时返回 `410 GONE` |
-| `POST /api/v1/chat/messages/:id/edit` | 编辑最后一条用户消息并重新生成（`departed` 时返回 `410 GONE`） |
+| `POST /api/v1/chat/messages` | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `activityHint`、`attachments`、`stickerId`）；门为 `closed`/`cooling_off` 时自动作为「门缝纸条」落盘不唤醒回复；若处于 `CONTEXT_OVERFLOW` 系统级换段整理忙态（不改 `door_state`），消息仍按 `chat` 正常入待回复队列，整理完成后自动回复；`departed` 时返回 `410 GONE` |
+| `POST /api/v1/chat/messages/:id/edit` | 编辑最后一条用户消息并重新生成（`closed`/`cooling_off` 时拒绝以防绕过关门强行唤醒，`departed` 时返回 `410 GONE`） |
 | `POST /api/v1/chat/messages/:id/reroll` | 重摇助手回复（保留版本组，可切版本；`closed`/`cooling_off` 时拒绝，`departed` 时返回 `410 GONE`） |
 | `POST /api/v1/chat/messages/:id/version` | 切换同一 `group_id` 的历史版本 |
 | `DELETE /api/v1/chat/messages/:id` | 软删消息（标记 `deleted`，不污染后续记忆整理；`departed` 时返回 `410 GONE`） |
@@ -47,8 +47,8 @@
 - 单连接推送全部实时态，支持 `Last-Event-ID` 断线续传：
   - `message.created` / `message.updated` — **多端实时同步事件**（任一客户端发消息、编辑、切换版本或软删时广播给其他在线终端）
   - `door.updated` — **门与关系状态变更**（`open` / `quiet` / `closed` / `cooling_off` / `departed`、门牌便签）
-  - `turn.start` — 新一轮开始（`mode: "chat" | "wake" | "memory_task" | "solitary"`, `label?: "整理观影记忆"`）
-  - `turn.thinking` — 流式思考增量（`delta`）
+  - `turn.start` — 新一轮开始（`mode: "chat" | "wake" | "memory_task" | "solitary"`, `label?: "整理观影记忆"`；注：`wake` 模式在前 16 字符确认非 `[SILENT]` 或产生实质 `express` 等工具调用前**暂缓广播 `turn.start` 与 `turn.thinking`**，确认开口后再补推）
+  - `turn.thinking` — 流式思考增量（`delta`；`wake` 模式下随 `turn.start` 一并暂缓至确认非 `[SILENT]` 后推送）
   - `turn.expression` — **具身身体语言事件**（`haptic` / `atmosphere` / `motion` / `stickerId`，供 Flutter Expression Renderer 实时响应）
   - `turn.tool` — 工具调用折叠摘要（如 `read activities/cinema/xxx.md` 或 `call_tool browser.open`）
   - `turn.approval_required` / `turn.approval_resolved` — 高风险工具审批挂起与多端同步结果（`approvalId`, `decision`, `toolName`, `summary`, `expiresAt`）

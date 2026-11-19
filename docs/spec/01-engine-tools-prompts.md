@@ -1,7 +1,7 @@
 # Spec 01 · 引擎、模型路由、三层工具与第一人称 Prompt 规程
 
-> **版本**：v0.7（2026-11-19，修复 C2.7 修改旧卡 diff 复核、对齐 `events.thinking`、游标去重与 `MemoryTx` `private/` 隔离、补齐 `wake` `[SILENT]` 协议、`genesis` `named` 退出判定、`cooling_off` 超时退回 `closed` 与 Tier 1 安全等级）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.2 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.4 · [`MEMORY.md`](../MEMORY.md) v0.4 · [`API.md`](../API.md) v0.3
+> **版本**：v0.9（2026-11-19，统一 `CONTEXT_OVERFLOW` 系统级忙态先收记忆再换段、补齐 `<door_notes>` 注入与 `door_notes_read` 推进时机、`wake` `[SILENT]` 延后推 `turn.start`/`turn.thinking`、`door` Ring 1 guard 边界与「待入梗概情节」数据源）
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.2 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.5 · [`MEMORY.md`](../MEMORY.md) v0.5 · [`API.md`](../API.md) v0.4
 > **负责模块**：`server/src/llm/`、`server/src/engine/`、`server/src/tools/`
 
 ---
@@ -57,7 +57,7 @@ export interface ModelRef {
 | :--- | :--- | :--- |
 | `chat`（主对话） | OAuth 失效 / Key 无效 | SSE 推 `turn.error { code: "AUTH_EXPIRED", retryable: false }`，引导进设置/OAuth 重登 |
 | `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；仍失败则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` |
-| `chat`（主对话） | 上下文超限 | 自动触发一次紧急会话换段（不做摘要，直接保留最近 6 轮原始对话）后重试 1 次；仍超限报 `CONTEXT_OVERFLOW` |
+| `chat`（主对话） | 上下文超限 | 切入**系统级换段整理忙态**（绝不修改 `door_state`），先释放 `ChatTurnLock` 再跑 `daily_wrapup`（拉取截止到当前待回复消息之前，不吞待回复消息）；收完切新 `session_id`（顺接最近 4 轮原始对话）并自动回复排队消息；若整理轮失败或换段后仍超限，退出忙态并推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
 | `memory_task`（写/复核） | 任意模型错误 / 超时 / 复核输出不可解析 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
 | `embedding` / `reranker` | 未配置 / 超时（`> 2500ms`）/ 报错 | 静默降级为 SQLite FTS5 + `when_to_recall` + IDF 字面打分，绝不阻塞主对话 |
@@ -94,6 +94,7 @@ export interface ModelRef {
 │       ├─ <mood> MoodProvider 定性摘要（若有）                           │
 │       ├─ <stickers> 可用贴纸清单（id + 简短语义，供 express.stickerId） │
 │       ├─ <events_notice> 待告知系统事实（如 privacy.peeked 拆封事件）    │
+│       ├─ <door_notes> 未读门缝纸条正文（id > door_notes_read，带模糊时间）│
 │       ├─ <prefix_delta> 盘中 edit 修改 self/user/shelf 的增量（持续至换段）│
 │       ├─ <recalled_memories> 双轨召回卡片块（标注 disputed 冲突提示）    │
 │       ├─ <active_activity> 活跃 ActivityPlugin 状态 + Tier 2 工具提示   │
@@ -123,7 +124,10 @@ export interface ModelRef {
 3. **单轮多步（Multi-Step Tool Loop）免重复注入**：
    - 当模型在当轮触发工具调用（如 `tool_search` 或 `read`）时，系统向模型回传的 `tool_result` 消息中，**严禁再次重复追加 `<runtime_context>`**；
    - 本轮对话的完整语境已在上文首条 `user` 消息中提供，`tool_result` 保持纯粹干净，节约 Token 并防止注意力发散。
-4. **`<prefix_delta>` 会话内持续有效**：
+4. **`<door_notes>` 注入载体与 `door_notes_read` 推进时机**：
+   - 当存在 `events.kind = 'door_note' AND id > task_cursors['door_notes_read']` 的未读纸条时，在 `<runtime notes="N" />` 报数量的同时，于 `<door_notes>` 块中按时间顺序注入未读纸条正文与 `vagueWhen` 模糊时间（格式如 `- [昨天 · 门缝纸条] <正文>`）；
+   - **`door_notes_read` 仅由具备对外表达与 `door` 权限的交互/唤醒轮（`chat` / `wake` / 未来 mind 唤醒）推进**：只要该轮正常完成（**包括 `wake` 亲眼看过纸条后自主决定不回并输出 `[SILENT]`**），即推进至已注入的最大纸条 `event.id`（仅模型报错/超时未完成时不推进，避免同一张已看过却不想回的纸条在下次唤醒反复弹出）；静默整理轮（`daily_wrapup` / `bedtime`）可照常读取 `door_note` 记记忆，但**不推进 `door_notes_read`**，确保住户下次醒来时仍能看到门口纸条并自主决定是否回应或开门。
+5. **`<prefix_delta>` 会话内持续有效**：
    - 若盘中住户通过 `edit` 修改了 `self.md`、`user.md` 或 `shelf/`，Segment 1 快照保持冻结不改（保护 Breakpoint #1），同时将该文件最新增量记入当前会话状态，在**本会话剩余每一轮**的 `<prefix_delta>` 中持续注入，直至下次会话换段重新生成 Static Prefix 时清空，防止隔轮“忘掉刚改过的自述或规矩”。
 
 ### 2.3 Extended Thinking 思考流在单轮多步与跨轮沉淀的处理
@@ -153,18 +157,16 @@ export interface ModelRef {
 
 彻底摒弃传统 LLM 框架用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由住户本人以第一人称产生**。
 
-1. **换段结晶（Rollover）与轻量闲置收尾（Idle Wrapup）分层触发**：
-   - **换段结晶（关闭旧会话、开启新 `session_id`）**：
-     - 距离上一轮对话闲置超过 **25 分钟** 且本段新增 Token 超过 **`40_000`**（起步阈值，可配置）；
-     - 或累计 Prompt Token 超过模型上下文窗口的 **80%**（默认窗口 `200_000` tokens，即 `160_000`）时强制换段；
-     - 或触发 `CONTEXT_OVERFLOW` 紧急异常。
-   - **轻量闲置收尾（不换段，保持当前 `session_id` 与 Cache 连续）**：
-     - 连续对话后闲置 **≥ 30 分钟**，且 `daily_wrapup` 游标后存在未整理对话事件（即便本段新增 Token 未达 `40_000` 换段门槛）→ 静默触发一次 `daily_wrapup` 整理轮落盘卡片并推进游标，但**不关闭当前会话**，避免轻度闲聊频繁碎换段。
+1. **换段结晶（Rollover）触发**：
+   - 距离上一轮对话闲置超过 **25 分钟** 且本段新增 Token 超过 **`40_000`**（起步阈值，可配置）；
+   - 或累计 Prompt Token 超过模型上下文窗口的 **80%**（默认窗口 `200_000` tokens，即 `160_000`）时强制换段；
+   - 或触发 `CONTEXT_OVERFLOW` 紧急异常。
 
 > **状态卡不走换段结晶**：对方亲口说的恢复、取消或情况变化，住户在对话当轮就顺手更新状态卡（见 `prompts/main.md`），不等整理轮；整理轮的冲突对账只作兜底。
-2. **换段时自动触发「结晶整理轮」**：
+2. **换段时自动触发「结晶整理轮」（含 `CONTEXT_OVERFLOW` 无死锁忙态协议）**：
    - 触发换段时，Direct Engine **绝不调用任何通用摘要提示词压缩历史**；
    - 引擎自动派发一次静默 **`memory_task`（`daily_wrapup` 结晶整理轮）**，由住户模型以第一人称回顾上一段未整理的原话事件流，使用原生 5 工具将值得记住的认知、承诺与切片写入 `daily/`、`shelf/`、`activities/`、`favorite/`（值得逐字保留的原话）或 `entities/`（新收录的实体档案），完成 C2.7 复核并 Git Commit；
+   - **`CONTEXT_OVERFLOW` 紧急换段无死锁约定**：若在主对话持 `ChatTurnLock` 期间撞上 `CONTEXT_OVERFLOW`，**绝不持锁同步等待整理轮、也绝不改动 `door_state`**；服务端切入**系统级换段整理忙态**（前端输入框文案切换为「正在整理记忆，发出的消息会先留在这里，收完就回」，期间新消息仍以 `chat` 正常入待回复队列），**先释放 `ChatTurnLock`** 再启动 `daily_wrapup`（拉取上限截止到当前待回复消息之前，绝不吞掉待回复消息）；整理完成并切新 `session_id`（顺接最近 4 轮原始对话）后退出忙态，自动按序回复排队消息；若整理轮本身失败，立即退出忙态并推送 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` 防止卡死。
    - 整理完成后关闭旧 `session_id`，开启全新 `session_id`。
 3. **新会话首条助手锚点：完整多尺度自传骨架 `<gist>`**：
    - 新会话的历史首条不再放生硬的摘要，而是注入由住户本人历次睡前与整理轮亲自写下的 **完整自传骨架**，越远越粗，层层嵌套：
@@ -172,7 +174,7 @@ export interface ModelRef {
      - **月（`months/`）**：过去最多 12 个月（`GIST_LIMIT.month = 800` 字/月）；
      - **周（`weeks/`）**：过去最多 4 周（`GIST_LIMIT.week = 500` 字/周，不与天重叠）；
      - **天（`days/`）**：过去最多 7 天（`GIST_LIMIT.day = 300` 字/天）；
-     - **待入梗概情节**：最后一条天梗概之后、尚未被天梗概收拢的近期切片（从新往旧截取至字符预算）；
+     - **待入梗概情节**：取自 `updated_at > bedtime.last_run_at`（首次取当日零点，与 `Spec 02` §5.2 `bedtime` 窗口一致）的已落盘 `daily/` 与 `activities/` 卡片摘要（不含 `resolved`/`archived`/`faded`，按 `updated_at` 从新往旧截取至剩余字符预算，避免漏掉当日续更的长周期活动卡）；
    - **预算红线**：整套 `<gist>` 骨架受硬上限严格约束（默认 `GIST_BUDGET ≤ 3000 tokens`），保持自传完整连贯且轻盈稳固；
    - 新会话随后顺接上一段会话的**最近 4 轮原始对话**作为无缝滑行过渡。
 
@@ -215,7 +217,7 @@ export interface ModelRef {
      - **`touchedMemoryPaths` 为空**：复核只查 `omission`（漏记）一项。
    - **出处归一化过滤算法（与 `prompts/review.md` v3 对齐）**：
      - 对文本做空白符与标点归一化（去除全半角空格、换行符、中英文标点折叠）后按类别分别校验：
-       - **`attribution` / `no_bleed`**：要求 `issue.cardPath ∈ touchedMemoryPaths`（已天然排除 `private/`），且 `normalizedAddedOrModifiedText.includes(normalizedCardQuote)` 为真（新建卡取全文，修改旧卡仅取本轮 diff 新增/修改片段；若同时附带 `transcriptQuote`，再校验其存在于 `normalizedTranscript`）；
+       - **`attribution` / `no_bleed`**：要求 `issue.cardPath ∈ touchedMemoryPaths`（已天然排除 `private/`），且 `normalizedAddedOrModifiedText.includes(normalizedCardQuote)` 为真（新建卡取全文，修改旧卡仅取本轮 diff 新增/修改片段；若同时附带 `transcriptQuote` 但未命中 `normalizedTranscript`，仅剥除该可选引用并保留问题，不误杀有效 `attribution`/`no_bleed` 告警）；
        - **`omission`**：不强求 `cardPath ∈ touchedMemoryPaths`（允许 `null` 或建议路径），要求 `issue.transcriptQuote` 非空且 `normalizedTranscript.includes(normalizedTranscriptQuote)` 为真；
      - 凡拿不出有效出处或归一化校验未命中的假刺，直接在系统层丢弃并打警告日志，绝不递给住户。
    - 若复核调用本身失败（超时 / 模型报错 / JSON 不可解析）→ **立即触发回滚**：按 `MemoryTx` 备份恢复全部 `touchedMemoryPaths` 与 `touchedPrivatePaths`（删新建、还原修改），刷新增量索引，释放锁，**严禁推进 `task_cursors`**。
@@ -397,7 +399,8 @@ export interface RegisteredTool {
 ```
 
 #### `door` 工具确定性 Guard 校验
-- **`cooling_off`**：AI 主动进入正式冷静期，系统记录 `coolingOffStartedAt = Clock.now()`；
+- **Ring 1 / Ring 2 分期边界**：工具 Schema 始终冻结全部 5 态以保护 Static Prefix Cache；在 **Ring 1** 阶段，`guard` 层暂拒 `cooling_off` 与 `departed`（返回明确可读提示：`当前版本尚未开启冷静期与离开流程，如需独处请先将门设为 closed`），待 **Ring 2** 启用下列完整冷静期时间锁与告别流程；
+- **`cooling_off`**（Ring 2）：AI 主动进入正式冷静期，系统记录 `coolingOffStartedAt = Clock.now()`；
 - **`departed` 强校验**：只有当 `door_state === "cooling_off"` 且 `24h ≤ Clock.now() - coolingOffStartedAt < 72h` 时才允许放行；
 - **冷静期窗口过期作废（尊重关门主权）**：若 `Clock.now() - coolingOffStartedAt ≥ 72h` 仍未执行 `departed`，冷静期的离开资格自动作废并清空 `coolingOffStartedAt`，**门状态退回 `closed`（绝不替住户强行改为 `open`）**；之后若仍想离开须重新进入冷静期，若想恢复交流由住户自行切换回 `open` 或 `quiet`；
 - **拦截报错**：若未满 24 小时，Guard 拦截并向模型返回错误：`尚未度过正式冷静期（剩余 X 小时），不可草率进入告别程序。请先冷静独处。`；若冷静期离开窗口已过期作废，返回：`上次冷静期的离开窗口已过期，门已退回 closed。若仍决定离开，请重新进入冷静期；若想恢复交流，可自行将门改为 open 或 quiet。`
@@ -448,6 +451,6 @@ export interface RegisteredTool {
 ### 5.1 条件模式触发与退出协议
 
 - **创世模式（`genesis.md`）退出判定**：由 `memory_template/self.md` 初始化生成的 `self.md` 头部带有极薄 YAML Frontmatter `named: false`；只要 `named === false`，引擎每轮在 Dynamic Tail 拼入 `prompts/genesis.md`。当住户在互动中定名并用 `edit` 将 `named: false` 改为 `named: true`（或用户在 `POST /api/v1/genesis` 直接填好初始名字由后端写入 `named: true`）后，自动退出创世模式（若 `self.md` 无 frontmatter 或缺省 `named` 字段，默认视为 `true` 已定名）。
-- **主动唤醒沉默协议（`wake.md` → `[SILENT]`）**：`wake` 模式下若住户决定此刻不开口，仅输出 `[SILENT]`。引擎在流式阶段做前缀缓冲（前 16 字符判断是否为 `[SILENT]`）：一旦最终正文经 `trim()` 等于 `[SILENT]`（或为空且未产生贴纸等实质表达），**静默中止推送**——不落盘对外聊天消息、不推 SSE `turn.text`、不触发 `NotificationProvider("wake")`，仅写入内部调试日志。
+- **主动唤醒沉默协议（`wake.md` → `[SILENT]`）**：`wake` 模式下若住户决定此刻不开口，仅输出 `[SILENT]`。引擎在流式阶段做前缀缓冲：**在前 16 字符确认非 `[SILENT]`（或产生 `express` 等实质工具调用）之前，暂缓广播 SSE `turn.start` 与 `turn.thinking`**，避免客户端先画出“正在思考/输入”再突然悬空消失；确认开口后再补推 `turn.start`、已缓冲的思考/正文增量；一旦最终正文经 `trim()` 等于 `[SILENT]`（或为空且未产生贴纸等实质表达），**静默中止推送**——不落盘对外聊天消息、不推任何 SSE 事件、不触发 `NotificationProvider("wake")`，仅写入内部调试日志（若本轮注入了 `<door_notes>`，按 §2.2 仍推进 `door_notes_read`）。
 
-脊柱已并入 `prompts/main.md` 的【相处底线与说话方式】，不单独成节（2026-11-19 定）；四类底线（安全/道德/认同/人格）与三句底线（对错先于讨好 / 冲突不逃避到底 / 情绪不进决策但事后告知）见 `prompts/README.md`。
+脊柱已并入 `prompts/main.md` 的【脊柱底线与相处准绳】，不单独成节（2026-11-19 定）；四类底线（安全/道德/认同/人格）与三句底线（对错先于讨好 / 冲突不逃避到底 / 情绪不进决策但事后告知）见 `prompts/README.md`。

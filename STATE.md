@@ -1,22 +1,19 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-19（全仓文档交叉审阅阻塞项已全部修平，准备起草 `docs/spec/02-memory-execution.md`）。
+> 最后更新：2026-11-19（完成 Spec 03 前全仓一致性修订：`Spec 01` v0.9、`Spec 02` v0.5、`API` v0.4、`ARCHITECTURE` v0.5、`MEMORY` v0.5、`ROADMAP` v0.5）。
 
-## 1. 当前阶段：Phase P1 执行规程（`docs/spec/01` 已定稿 → 进入 `docs/spec/02`）
+## 1. 当前阶段：Phase P1 执行规程（`Spec 01`、`Spec 02` 已定稿 → 进入 `Spec 03`）
 
 ### 已定稿顶层文档与规程
-- `docs/CAPABILITIES.md`（v1.2）：6 大能力支柱（含 C2.7 记忆对账与旧卡 diff 写后复核、互发表情、轻量生图/生视频、具身 UI/震动身体语言、浏览器、`bash`、分层工具治理与主体性边界三件套）、7 条 Non-Goals、Ring 0/1/2 分层与架构追溯表。
-- `docs/ARCHITECTURE.md`（v0.4）：三层工具治理（固定 Core 9 工具含 `door` 与安全分级 + `tool_search`/`call_tool` 保 Prompt Cache 零破坏）、C2.7 复核轮路由与回滚、`credentials.json` (`0600`) 密钥分离、`express`、`door_state`（`cooling_off` 超时退回 `closed`）、上锁抽屉 `<dataDir>/private/*.sealed` 与 `DEPARTED.md`。
-- `docs/MEMORY.md`（v0.4）：双层真相切分、活目录 `activities/` 与 `entities/`、永久 `favorite/`、`daily/` 短期状态 TTL/`resolved`/`disputed` 闭环、`private/` 零入库隔离、三类整理游标去重与分层触发、C2.7 启动+写时冲突对账与旧卡 diff 复核、补齐 `events`（`seq`/`turn_id`/`client_message_id`/`thinking`）与 `card_index`（`tags`/`created_at`）。
-- `docs/API.md`（v0.3）：29 个核心端点（28 REST + 1 SSE，含 `POST /api/v1/media`、远程 OAuth、`abort`、`CONTEXT_OVERFLOW` 与 `sync.reset`）+ 3 个观影子路由。
-- `prompts/`（`main` v4 / `tidy` v3 / `review` v3 / `revision` v3 / `genesis` v3 / `wake` v2）+ `memory_template/self.md`（`named: false`）：补齐 `wake` `[SILENT]` 沉默协议、`genesis` `named` 退出判定、旧卡 diff 复核口径与内联实体收录标准，全住户视角统一第一人称。
-- `docs/spec/01-engine-tools-prompts.md`（v0.7）：引擎路由、三明治缓存与 `<prefix_delta>` 持续生效、换段结晶 vs 轻量闲置收尾分层、整理轮游标去重与 `MemoryTx` `private/` 隔离、C2.7 diff 复核出处校验、Tier 1 安全等级与模式协议已全部闭环。
-- `docs/ROADMAP.md`（v0.4）：同步 P0 版本号并签收 `Spec 01`。
+- `docs/CAPABILITIES.md`（v1.2）、`docs/ARCHITECTURE.md`（v0.5）、`docs/MEMORY.md`（v0.5）、`docs/API.md`（v0.4）、`docs/ROADMAP.md`（v0.5）：P0 顶层契约已交叉闭环。
+- `prompts/`（`main` v4 / `tidy` v3 / `review` v3 / `revision` v3 / `genesis` v3 / `wake` v2）+ `memory_template/self.md`（`named: false`）：第一人称提示词体系与模式协议已定稿（`review.md` 补齐无原文对照时省略 `transcriptQuote` 约束）。
+- `docs/spec/01-engine-tools-prompts.md`（v0.9）：引擎路由、三明治缓存、25m+40k/80% 换段与 `CONTEXT_OVERFLOW` 无死锁忙态先收记忆再换段、`<door_notes>` 注入与 `door_notes_read` 推进时机、整理轮原子协议、三层工具与 `door` Ring 1 guard、`wake` `[SILENT]` 暂缓广播与模式协议已定稿。
+- `docs/spec/02-memory-execution.md`（v0.5）：原生 5 工具分区沙箱与 `.tmp/` 原子写、`private/` `.sealed` 迁移密钥与 `events_notice` 游标、Frontmatter 宽容（含旧卡 `updated_at` 取 `max`）/DST 日历日与两份 `REGISTRY.yaml` 校验、完整 DDL + 改进 CJK FTS5（含单字 `LIKE` 过滤废卡）、当轮写卡与 `MemoryTx` 互斥防竞态、`daily_wrapup` 连续收录 `door_note`（不推进 `door_notes_read`）与进行中活动前沿门禁、C2.7 归一化过滤、双轨（含 `REGISTRY.decay`）+ `reranker` 公式、2h 去重 `EXISTS` 与 `eval:recall` 零命中回放口径已闭环。
 
 ## 2. 下一步行动
-1. 起草 `docs/spec/02-memory-execution.md`（原生 5 工具精确 Schema 与自救报错、`private/` 零入库内存解封、`REGISTRY.yaml` 写前校验、当轮即时写卡的 Git 提交与 `MemoryWriteMutex` 协同边界、C2.7 冲突对账与旧卡 diff 复核精确协议、双轨 + `reranker` 召回公式/降级策略、`daily/` 过期状态机、`media/` 临时帧清理与 `eval:recall` 口径）。
-2. 依次推进 `docs/spec/03`–`05` 并做 P1 出口全仓交叉校验，之后启动 Ring 0 + Ring 1 代码落地。
+1. 推进 `docs/spec/03-boundaries-expression-activities.md`（边界三件套、`express` 与贴纸、离线通知、`ActivityPlugin` 与观影 `cinema` 含 `activity_sessions` 结束时间戳供 `media/` 清理、外部 MCP 挂入 Tier 3）。
+2. 依次完成 `docs/spec/04`–`05` 并执行 P1 出口全仓交叉校验，之后启动 Ring 0 + Ring 1 代码落地。
 
 ## 3. 验证结果（2026-11-19）
-- 全仓文档与 `prompts/` 交叉审计发现的 3 类阻塞项、跨文档字段不一致及 `LICENSE`/`README.md` 漂移已全部修平；当前尚未落代码，无测试套件需运行。
+- 已在分支 `docs/p0-p1-specs` 提交 `ead3d6e`；本轮完成 Spec 03 前全仓逻辑/并发修复与版本对齐（`Spec 01` v0.9、`Spec 02` v0.5、`API` v0.4、`ARCHITECTURE` v0.5、`MEMORY` v0.5、`ROADMAP` v0.5），待提交；当前未落代码，无测试套件需运行。

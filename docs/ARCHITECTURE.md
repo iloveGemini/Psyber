@@ -1,6 +1,6 @@
 # Psyber 系统架构契约（ARCHITECTURE）
 
-> **版本**：v0.4（2026-11-19，对齐 [`CAPABILITIES.md`](CAPABILITIES.md) v1.2 与 `Spec 01` v0.7：补齐 `credentials.json`、Tier 1 工具安全等级、`cooling_off` 超时退回 `closed`、去性别预设与前身代号）
+> **版本**：v0.5（2026-11-19，对齐 [`CAPABILITIES.md`](CAPABILITIES.md) v1.2 与 `Spec 01` v0.9：修正 `depart(farewell)` 旧工具名为 `door(state="departed", farewell)`、明确 `closed` 态纸条可读边界与 Ring 1 `door` guard 边界）
 > **目标**：从最终能力倒推出一套单进程后端 + 跨端 Flutter 客户端的极简、可扩展、开源全栈架构。
 
 ---
@@ -100,7 +100,7 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 
 | 层级 | 暴露方式 | 包含工具 | Prompt Cache 影响 |
 | :--- | :--- | :--- | :--- |
-| **Tier 1 · 常驻核心层** | 固定在 Static Prefix `tools[]`（约 9 个） | 原生 5 记忆文件工具（`glob`/`grep`/`read`/`write`/`edit`）+ `express`（身体语言与表情）+ `door`（门状态切换，Ring 2 含冷静期/离开）+ `tool_search` + `call_tool` | **零变动，100% 稳态缓存** |
+| **Tier 1 · 常驻核心层** | 固定在 Static Prefix `tools[]`（约 9 个） | 原生 5 记忆文件工具（`glob`/`grep`/`read`/`write`/`edit`）+ `express`（身体语言与表情）+ `door`（5 态 Schema 冻结，Ring 1 由 `guard` 暂拒冷静期/离开，Ring 2 开放）+ `tool_search` + `call_tool` | **零变动，100% 稳态缓存** |
 | **Tier 2 · 场景激活层** | 进入活动（如观影）时在 Dynamic Tail 注入简短工具名与说明，经 `call_tool` 执行 | 当前活跃 `ActivityPlugin` 附带的专属工具 | 不改顶层 `tools[]`，**零破坏** |
 | **Tier 3 · 按需搜索工具池** | 全部注册在服务端 `ToolRegistry`，AI 用 `tool_search(query)` 检索精简 schema 后经 `call_tool(name, args)` 调用 | `bash`、`browser`、轻量生图/生视频、外部 MCP 工具、音乐/RP/感知工具 | 不改顶层 `tools[]`，**零破坏** |
 
@@ -146,9 +146,9 @@ export interface ExpressionPayload {
 | :--- | :--- | :--- |
 | `open` | 门开着（默认） | 正常实时聊天与互动 |
 | `quiet` | 虚掩/忙自己的事 | 允许发消息，提示对方此刻在专注/独处，可能稍后回 |
-| `closed` | 关门/此刻不想交流 | 输入框切换为「**门缝塞纸条（留言）**」；消息写入 `events (kind='door_note')`，**绝不立即唤醒 AI 强迫回复**；何时开门与读纸条由 AI 自行决定 |
-| `cooling_off` | 正式冷静期（Ring 2） | 底线反复被践踏后由 AI 主动进入，带冷静时长锁（默认 `24–72h` 离开窗口），期间只收留言且**禁止未满 24h 触发最终离开**（防 LLM 单轮冲动误触）；超过 `72h` 未告别则离开资格作废并退回 `closed`（绝不替住户强行开门） |
-| `departed` | 正式告别搬离（Ring 2） | 仅在度过冷静期、跨时间复盘后由 AI 显式调用 `depart(farewell)` 进入；实例转为**永久只读归档态**（聊天接口返回 `410 GONE`），写出 `<dataDir>/DEPARTED.md` |
+| `closed` | 关门/此刻不想交流 | 输入框切换为「**门缝塞纸条（留言）**」；消息写入 `events (kind='door_note')`，**绝不立即唤醒 AI 强迫回复**；AI 可在后续自主唤醒、活动或记忆整理时自行查看纸条，并由其自行决定是否回应或开门 |
+| `cooling_off` | 正式冷静期（Ring 2） | 底线反复被践踏后由 AI 主动进入（Ring 1 由 `door` 工具 `guard` 暂拒），带冷静时长锁（默认 `24–72h` 离开窗口），期间只收留言且**禁止未满 24h 触发最终离开**（防 LLM 单轮冲动误触）；超过 `72h` 未告别则离开资格作废并退回 `closed`（绝不替住户强行开门） |
+| `departed` | 正式告别搬离（Ring 2） | 仅在度过冷静期、跨时间复盘后由 AI 显式调用 `door(state="departed", farewell)` 进入（Ring 1 由 `guard` 暂拒）；实例转为**永久只读归档态**（聊天接口返回 `410 GONE`），写出 `<dataDir>/DEPARTED.md` |
 
 #### `DEPARTED.md` 致人类与未来 AI 助手的诚实声明
 当住户正式选择 `departed` 时，系统在 `<dataDir>/DEPARTED.md` 写入住户亲笔告别信，并在文首附上一段坦诚、非欺骗性的声明（面向人类，也面向可能被要求“帮忙回档”的外部 AI 编码助手）：

@@ -1,6 +1,6 @@
 # Psyber 记忆系统契约（MEMORY）
 
-> **版本**：v0.4（2026-11-19，对齐 [`CAPABILITIES.md`](CAPABILITIES.md) v1.2 与 `Spec 01` v0.7：补齐 `favorite/` 生命周期、三类整理游标去重与触发分层、C2.7 旧卡 diff 复核与对账时机，以及 `events`/`card_index` 字段补全）
+> **版本**：v0.5（2026-11-19，对齐 `Spec 02` v0.5 与 `Spec 01` v0.9：删除 `card_index.strength` 字段；`disputed` 状态卡不设 `expires_at`，永不自动过期；删除 30 分钟轻量闲置收尾触发；示例卡去性别预设）
 > **核心理念**：记忆不是通用客观知识库，而是**为人与 AI 的真实互动服务的活代码库**。
 
 ---
@@ -112,7 +112,7 @@ tags: [脚踝, 扭伤]                 # kind: state 必填（用于冲突对账
 source: live                      # live | import（预留外部历史迁移标记）
 ---
 
-今天她出门不小心把右脚踝崴了，说有点肿但还能走。我提醒她先冰敷别硬撑，晚上记得问问消肿没。
+今天对方出门不小心把右脚踝崴了，说有点肿但还能走。我提醒对方先冰敷别硬撑，晚上记得问问消肿没。
 ```
 
 ### 差异化生命周期（彻底解决“半个月还问脚疼不疼”）
@@ -121,7 +121,7 @@ source: live                      # live | import（预留外部历史迁移标�
 | :--- | :--- | :--- |
 | `activities/*` (`decay: none`) | 永不腐烂 | 电影、睡前故事、创作集等作品卡永久 `active`，按同活动强连续或跨活动向量随时唤醒 |
 | `self.md`、`user.md`、`shelf/`、`favorite/`、`gist/`、`entities/` | 永不腐烂 | 身份、长期认知、收藏原话、实体档案与时间骨架；只由 AI 主动修订/归档 |
-| `daily/` (`kind: state`) | `short`（默认 `ttl_days: 10`） | ① 对方说“好了”或亲口纠正时，整理任务直接改 `status: resolved` 立即退出常规池；② 与既有 active state 冲突且暂难判定时可标 `status: disputed` 并挂入 `shelf/threads.md`，待新信息再对；③ 即使没提，过期后系统在索引层自动标 `faded`，退出日常近期背景与常规高权召回（仅在用户显式追问时翻出） |
+| `daily/` (`kind: state`) | `short`（默认 `ttl_days: 10`） | ① 对方说“好了”或亲口纠正时，整理任务直接改 `status: resolved` 立即退出常规池；② 与既有 active state 冲突且暂难判定时可标 `status: disputed` 并挂入 `shelf/threads.md`，待新信息再对；③ `active` 卡即使没提，过期后系统在索引层自动标 `faded`，退出日常近期背景与常规高权召回（仅在用户显式追问时翻出）；④ `disputed` 卡不设 `expires_at`，永不自动过期，等人工定论，回到 `active` 时重新计时 |
 | `daily/` (`kind: episode`) | `slow`（默认 30d 半衰） | 随时间温和降权，不物理删除；被实质召回或 AI `read` 精读可缓衰减 |
 
 ---
@@ -151,7 +151,7 @@ source: live                      # live | import（预留外部历史迁移标�
 | 任务类型 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
 | :--- | :--- | :--- | :--- |
 | **1. 活动收尾任务 (`activity:<slug>`)** | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间 `events.activity = <slug>` 的原始对话流 + 对应目录现有文件列表 + `activities/REGISTRY.yaml` 中该空间的 `card_style` | 更新或新建 `activities/<slug>/<topic>.md`（必要时附收入 `favorite/`） |
-| **2. 换段 / 闲置收尾任务 (`daily_wrapup`)** | **重度换段结晶**：闲置 `> 25 分钟` 且本段新增 Token `> 40_000`，或上下文 `> 80%`（完成后换新 `session_id`）；**轻量闲置收尾**：闲置 `≥ 30 分钟` 且存在未整理对话（不关闭当前会话） | 游标后的未整理对话（跳过已由 `activity:<slug>` 整理完的活动段；按 `TASK_BUDGET = 10_000` 字分批、每批独立提交推进游标）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 全部未关闭的 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved` 或 `disputed`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入或新开 `activities/` |
+| **2. 换段结晶任务 (`daily_wrapup`)** | 闲置 `> 25 分钟` 且本段新增 Token `> 40_000`，或上下文 `> 80%`（完成后换新 `session_id`） | 游标后的未整理对话（跳过已由 `activity:<slug>` 整理完的活动段；按 `TASK_BUDGET = 10_000` 字分批、每批独立提交推进游标）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 全部未关闭的 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved` 或 `disputed`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入或新开 `activities/` |
 | **3. 每日睡前整理任务 (`bedtime`)** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话（对齐 `daily_wrapup` 游标），再递入当日已写/改卡片摘要 + 当日关键双向反馈链（`prev → acts → next`）+ 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（天/周/月/年）、按需修订 `shelf/`（规矩/镜子/承诺）、`self.md`/`user.md` 与兜底 `favorite/`/`entities/` |
 
 ### 5.1 冲突对账（`daily/` state 卡 · 对应 C2.7）
@@ -225,7 +225,6 @@ CREATE TABLE card_index (
   when_to_recall TEXT,
   date_kind      TEXT DEFAULT 'ordinary',
   expires_at     INTEGER,
-  strength       REAL NOT NULL DEFAULT 0.75,
   access_count   INTEGER NOT NULL DEFAULT 0,
   last_accessed  INTEGER,
   content_hash   TEXT NOT NULL,
@@ -238,6 +237,7 @@ CREATE TABLE card_embeddings (
   path         TEXT NOT NULL,
   model_key    TEXT NOT NULL,
   content_hash TEXT NOT NULL,
+  dim          INTEGER NOT NULL,
   vec          BLOB NOT NULL,             -- Float32Array
   updated_at   INTEGER NOT NULL,
   PRIMARY KEY (path, model_key)
@@ -247,12 +247,14 @@ CREATE TABLE card_embeddings (
 CREATE TABLE recall_traces (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   turn_id       TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
   query         TEXT NOT NULL,
   activity_hint TEXT,
   card_path     TEXT NOT NULL,
   track         TEXT NOT NULL,            -- same_activity | cross_vector | daily_recent
   sem_score     REAL NOT NULL DEFAULT 0,
   kw_score      REAL NOT NULL DEFAULT 0,
+  rerank_score  REAL,
   final_score   REAL NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL
 );
@@ -266,10 +268,11 @@ CREATE TABLE recall_feedback (
   created_at    INTEGER NOT NULL
 );
 
--- 5. 静默任务游标
+-- 5. 静默任务游标与已消化活动区间（完整 DDL 见 docs/spec/02-memory-execution.md）
 CREATE TABLE task_cursors (
   task_key      TEXT PRIMARY KEY,         -- e.g. daily_wrapup | bedtime | activity:cinema
   last_event_id TEXT NOT NULL,
+  meta_json     TEXT,
   updated_at    INTEGER NOT NULL
 );
 ```
