@@ -435,7 +435,7 @@ export interface RegisteredTool {
 
 ## 5. 全套第一人称 Prompt 原文与模式协议（见 prompts/）
 
-> **版本**：v0.3（2026-11-19，同步 `main.md` v4、`tidy.md` v3、`review.md` v3、`revision.md` v3、`genesis.md` v3、`wake.md` v2）
+> **版本**：v0.4（2026-11-19，同步 `main.md` v4、`tidy.md` v3、`review.md` v3、`revision.md` v3、`genesis.md` v3、`wake.md` v3）
 > **落点**：全部 Prompt 原文与编写规范已统一收敛至根目录 [`prompts/`](../../prompts/)（代码直接通过 `readPrompt()` 读时现读，不缓存），本节不再贴全文，只保留加载位置、版本指针与模式触发协议。改提示词先改 `prompts/`，再同步本节版本号。
 > **编写铁律**：住户视角 Prompt 全部使用通用中文第一人称，严禁写死任何特定名字、性别、职业或私人关系预设（所有个人身份均从 `memory/{self,user}.md` 自然读取）；仅只读复核角色（`review.md`）与各文件末尾的 JSON 接口格式约束采用技术说明/第二人称（见 `prompts/README.md` §6）。
 
@@ -446,7 +446,7 @@ export interface RegisteredTool {
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（新建全审 / 旧卡 diff 审） | memory_task 复核轮（无历史只读） |
 | `prompts/revision.md` | v3 | C2.7 住户复核修订轮 | memory_task 修订轮（延续写作轮会话） |
 | `prompts/genesis.md` | v3 | 创世中性开局 | Dynamic Tail（`self.md` `named: false` 时拼入） |
-| `prompts/wake.md` | v2 | 主动唤醒（含 `[SILENT]` 沉默协议） | Dynamic Tail（`wake` 模式拼入） |
+| `prompts/wake.md` | v3 | 主动唤醒（含 `[SILENT]` 沉默协议） | Dynamic Tail（`wake` 模式拼入） |
 
 ### 5.1 条件模式触发与退出协议
 

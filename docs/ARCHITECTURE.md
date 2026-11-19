@@ -188,8 +188,8 @@ export interface ActivityPlugin {
   /** 挂载到 /api/v1/activities/:slug/* 的扩展路由（可选） */
   registerRoutes?(app: Hono): void;
 
-  /** 活动从 active 变为 ended 时通知 engine 派发独立活动记忆整理轮 */
-  onActivityEnded?: (cb: (summary: { slug: string; topicHint?: string; sinceEventId: string }) => void) => void;
+  /** 活动从 active 变为 ended 时通知 engine 派发独立活动记忆整理轮（精确起止区间防连续活动串场） */
+  onActivityEnded?: (cb: (summary: { sessionId: string; slug: string; topicHint?: string; sinceEventId: string; untilEventId: string }) => void) => void;
 }
 ```
 
