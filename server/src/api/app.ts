@@ -3,11 +3,15 @@ import type { Database } from "bun:sqlite";
 import { Hono } from "hono";
 import type { Clock } from "../core/clock.ts";
 import type { PsyberConfig } from "../core/config.ts";
+import type { MediaStore } from "../core/media.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
+import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
+import { registerAdminRoutes } from "./admin_routes.ts";
+import type { PairingManager } from "./pairing.ts";
 
 const VALID_ULID_OR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -45,16 +49,26 @@ export interface AppDeps {
   getConfig: () => PsyberConfig;
   events: EventStore;
   getActiveSessionId: () => string;
+  dataDir?: string;
   db?: Database;
+  memoryIndex?: MemoryIndex;
   sse?: SseHub;
   engine?: DirectEngine;
+  pairing?: PairingManager;
+  media?: MediaStore;
+  /** 用户新消息（chat / door_note）落盘时回调，用于立即重置 consecutiveUnansweredWakes = 0 */
+  onUserMessagePersisted?: () => void;
+  /** 仅在明确部署于可信反向代理后时才信任 x-forwarded-for */
+  trustProxy?: boolean;
+  /** 自定义获取客户端连接 IP（用于 /auth/pair 防爆破限流） */
+  getClientIp?: (req: Request) => string;
 }
 
 /**
  * 创建 Ring 1 极简 Hono HTTP + SSE 应用：
  * - /api/v1/health 免鉴权非阻塞探活
- * - 其余业务端点统一校验 Bearer Token 哈希（SSE 兼容 ?token=）
- * - /door、/chat/history、/chat/messages、DELETE /chat/messages/:id、/stream、/turns/:turnId/abort、/turns/:turnId/recall、/recall/feedback
+ * - 其余业务端点统一校验 Bearer Token 哈希（SSE / media 兼容 ?token=）
+ * - 聊天、门状态、召回评测与 SSE 路由在本文件注册；配对、创世、媒体与设置委托给 admin_routes.ts
  */
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -94,6 +108,8 @@ export function createApp(deps: AppDeps): Hono {
     matched.lastSeenAt = deps.clock.now();
     return next();
   });
+
+  registerAdminRoutes(app, deps);
 
   app.get("/api/v1/door", (c) => {
     const cfg = deps.getConfig();
@@ -187,6 +203,8 @@ export function createApp(deps: AppDeps): Hono {
     const timelineItem = toTimelineItem(event, deps.events);
 
     if (!deduplicated) {
+      // 对齐 Spec 04 §2.2：新消息（含门缝纸条）落盘时立即重置连续未回唤醒计数
+      deps.onUserMessagePersisted?.();
       deps.sse?.emit("message.created", { message: timelineItem });
       if (!isClosed && deps.engine && event.turnId) {
         const ac = new AbortController();

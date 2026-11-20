@@ -6,7 +6,71 @@ import {
 } from "../expression/express.ts";
 import type { MemoryTools } from "../memory/tools.ts";
 import type { EventStore } from "../store/events.ts";
-import type { ToolRegistry } from "./registry.ts";
+import type { ToolDefinition, ToolRegistry } from "./registry.ts";
+
+/** 原生 5 记忆工具定义（供 Tier 1 注册与静默整理轮 tidy.ts 共享，避免重复声明） */
+export const MEMORY_5_TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    name: "edit",
+    description: "局部精确替换 memory/ 中的笔记片段（补丁外内容严格不变）",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+  },
+  {
+    name: "glob",
+    description: "列举 memory/ 目录下的文件路径清单",
+    parameters: {
+      type: "object",
+      properties: { pattern: { type: "string" } },
+      required: ["pattern"],
+    },
+  },
+  {
+    name: "grep",
+    description: "在 memory/ 中按字面或正则全文检索线索",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        include_archived: { type: "boolean" },
+      },
+      required: ["pattern"],
+    },
+  },
+  {
+    name: "read",
+    description: "精读某篇记忆卡片正文",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        offset: { type: "integer" },
+        limit: { type: "integer" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "write",
+    description: "新建或整篇覆写记忆卡片（严禁覆写 self.md 与 user.md）",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["path", "content"],
+    },
+  },
+];
 
 /** 注册 Ring 1 常驻 9 个 Tier 1 核心工具 */
 export function registerCoreTier1Tools(

@@ -39,6 +39,77 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   embedTimeoutMs: 2500,
 };
 
+/** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */
+export interface CircadianConfig {
+  /** 睡眠静默窗开始时刻（HH:mm，实例本地时区，默认 "23:30"；调早会更早触发睡前整理并进入静默） */
+  sleepStart: string;
+  /** 睡眠静默窗结束时刻（HH:mm，实例本地时区，默认 "07:30"；调晚会延长早晨免打扰） */
+  sleepEnd: string;
+  /** 心跳巡检间隔（单位：分钟，默认 30；调小响应更及时，调大更省后台开销） */
+  heartbeatIntervalMin: number;
+  /** 是否启用定时心跳主动唤醒（默认 true；关闭后仅保留睡前整理与正常聊天） */
+  proactiveEnabled: boolean;
+  /** 距上次互动至少间隔多久才考虑主动唤醒（单位：分钟，默认 240；调大更克制） */
+  proactiveMinGapMin: number;
+  /** 两次主动唤醒最小冷却间隔（单位：分钟，默认 180；调大减少模型额度消耗） */
+  proactiveCooldownMin: number;
+}
+
+export const DEFAULT_CIRCADIAN_CONFIG: CircadianConfig = {
+  sleepStart: "23:30",
+  sleepEnd: "07:30",
+  heartbeatIntervalMin: 30,
+  proactiveEnabled: true,
+  proactiveMinGapMin: 240,
+  proactiveCooldownMin: 180,
+};
+
+/** Ring 1 离线通知配置（仅桌面本地通知 + 通用 Webhook，绝不存明文密钥） */
+export interface NotificationsConfig {
+  desktop: { enabled: boolean };
+  webhook?: {
+    enabled: boolean;
+    url: string;
+    /** 引用 credentials.json 中 channelTokens 的键名（可选） */
+    credentialKey?: string;
+    /** 附加自定义 HTTP 请求头（不含明文密钥） */
+    headers?: Record<string, string>;
+  };
+}
+
+export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
+  desktop: { enabled: true },
+};
+
+export interface ModelRef {
+  provider: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface LlmConfig {
+  providers: Record<
+    string,
+    {
+      kind: "anthropic" | "openai" | "google" | "openai-compat";
+      authMode: "oauth" | "api_key";
+      baseUrl?: string;
+    }
+  >;
+  slots: {
+    chat?: ModelRef;
+    memory_task?: ModelRef;
+    vision?: ModelRef;
+    embedding?: ModelRef;
+    reranker?: ModelRef;
+  };
+  thinking: {
+    enabled: boolean;
+    budgetTokens?: number;
+  };
+}
+
 /**
  * 单住户实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
@@ -62,6 +133,36 @@ export interface PsyberConfig {
   };
   /** 召回可调参数（缺失字段自动回落 DEFAULT_RECALL_CONFIG） */
   recall?: RecallConfig;
+  /** 作息静默窗与心跳参数 */
+  circadian?: CircadianConfig;
+  /** 离线通知通道配置 */
+  notifications?: NotificationsConfig;
+  /** LLM 槽位与 Provider 非敏感配置（明文 API Key 存 credentials.json） */
+  llm?: LlmConfig;
+  /** 是否已完成初生引导 */
+  genesisCompleted?: boolean;
+}
+
+/**
+ * 原子写二进制或文本文件（同文件系统 .tmp 暂存 + fsync 刷盘 + rename 替换），防止断电留下半截文件。
+ */
+export async function atomicWriteBytes(
+  dataDir: string,
+  absTarget: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  await fs.mkdir(path.dirname(absTarget), { recursive: true });
+  const tmpDir = path.join(dataDir, ".tmp");
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpPath = path.join(tmpDir, `${crypto.randomUUID()}.tmp`);
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(bytes);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, absTarget);
 }
 
 /**
@@ -138,6 +239,9 @@ export async function loadOrCreateConfig(
         devices: [],
       },
       recall: { ...DEFAULT_RECALL_CONFIG },
+      circadian: { ...DEFAULT_CIRCADIAN_CONFIG },
+      notifications: { ...DEFAULT_NOTIFICATIONS_CONFIG },
+      genesisCompleted: false,
     };
     await saveConfig(dataDir, cfg);
     return cfg;
@@ -168,6 +272,16 @@ export async function loadOrCreateConfig(
       ...DEFAULT_RECALL_CONFIG,
       ...(cfg.recall ?? {}),
     },
+    circadian: {
+      ...DEFAULT_CIRCADIAN_CONFIG,
+      ...(cfg.circadian ?? {}),
+    },
+    notifications: {
+      ...DEFAULT_NOTIFICATIONS_CONFIG,
+      ...(cfg.notifications ?? {}),
+    },
+    llm: cfg.llm,
+    genesisCompleted: Boolean(cfg.genesisCompleted),
   };
 }
 
