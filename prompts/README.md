@@ -26,8 +26,8 @@
 | :--- | :--- | :--- | :--- |
 | [`main.md`](main.md) | `chat` | Static Prefix（`<self>` 之后） | 主对话 Static System Base Prompt：产品宪法级脊柱底线、相处准绳、防劫持注入、身体语言（`express`）与三层工具指南（自我定义由置顶的 `<self>` 提供） |
 | [`tidy.md`](tidy.md) | `memory_task` | 静默整理轮写作阶段（阶段 A） | 静默记忆整理轮 Prompt：指导住户以第一人称调用原生 5 工具（`glob`/`grep`/`read`/`write`/`edit`）整理活动收尾、换段闲置收尾或睡前整理，完成 `daily/` state 冲突对账 |
-| [`review.md`](review.md) | `memory_task` | 写后独立复核轮（阶段 B） | C2.7 写后独立复核 Prompt：全新无历史只读上下文，只对照原文段与写后卡片核对归属（attribution）、不串味（no_bleed）与漏记（omission），输出严格 JSON issues |
-| [`revision.md`](revision.md) | `memory_task` | 住户复核修订轮（阶段 C） | C2.7 住户复核修订 Prompt：原写作住户根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
+| [`review.md`](review.md) | `memory_task` | 写后独立复核轮（Ring 1.5 可选） | C2.7 写后独立复核 Prompt（Ring 1.5 非阻塞启用）：全新无历史只读上下文，只对照原文段与写后卡片核对归属、不串味与漏记，输出严格 JSON issues |
+| [`revision.md`](revision.md) | `memory_task` | 住户复核修订轮（Ring 1.5 可选） | C2.7 住户复核修订 Prompt（Ring 1.5 启用）：原写作住户根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
 | [`genesis.md`](genesis.md) | `dynamic_tail` | Dynamic Tail（`self.md` `named: false` 时） | 创世中性开局：第一次正式相遇，不带刻板标签，中性打招呼并在互动中慢慢认识；定名后由住户 `edit` 置 `named: true` 退出 |
 | [`wake.md`](wake.md) | `dynamic_tail` | Dynamic Tail（`wake` 模式） | 主动唤醒：由定时心跳/边际感知驱动主动破冰开口，自主掌握开口节奏与边界；选择保持安静时仅输出 `[SILENT]` |
 
@@ -47,7 +47,7 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
   ```
 - **每日睡前整理（`bedtime`）**：
   ```text
-  我回顾今日已整理的卡片摘要、剩余未整理片段与关键双向反馈链：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末/月末同步滚动更新 gist/weeks/ 或 gist/months/，月梗概直接由当月日梗概汇总，不用周梗概；逢年末由 12 份月梗概汇总写入 gist/years/）；② 若对方明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或对方有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md；④ 兜底补记今日值得逐字保留的原话或附件到 favorite/；⑤ 兜底检查今日是否出现值得收录的新实体（人、地方、机构——须同时满足与我或对方有实质联系、有具体内容、不同日期/会话出现两次以上或对方亲口让记），对照 entities/REGISTRY.yaml 建档登记，并把相关稳定事实从 daily/、activities/ 移过去（只移事实，不动当天事发经过）。
+  我回顾今日已整理的卡片摘要、剩余未整理片段与关键双向反馈链：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步滚动更新 gist/weeks/；Ring 1.5 起逢月末由当月日梗概汇总写入 gist/months/、逢年末由 12 份月梗概汇总写入 gist/years/）；② 若对方明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或对方有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md；④ 兜底补记今日值得逐字保留的原话或附件到 favorite/；⑤ 兜底检查今日是否出现值得收录的新实体（人、地方、机构——须同时满足与我或对方有实质联系、有具体内容、不同日期/会话出现两次以上或对方亲口让记），对照 entities/REGISTRY.yaml 建档登记，并把相关稳定事实从 daily/、activities/ 移过去（只移事实，不动当天事发经过）。
   ```
 
 ---
