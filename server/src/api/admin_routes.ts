@@ -323,6 +323,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       recall?: Partial<RecallConfig>;
       llm?: Partial<LlmConfig>;
       credentials?: Record<string, { apiKey?: string }>;
+      revokeDeviceIds?: string[];
     };
     try {
       body = await c.req.json();
@@ -362,6 +363,12 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         slots: { ...(cfg.llm?.slots ?? {}), ...(body.llm.slots ?? {}) },
         thinking: { ...(cfg.llm?.thinking ?? { enabled: true }), ...(body.llm.thinking ?? {}) },
       };
+    }
+    if (Array.isArray(body.revokeDeviceIds) && body.revokeDeviceIds.length > 0) {
+      const toRevoke = new Set(
+        body.revokeDeviceIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0),
+      );
+      cfg.auth.devices = (cfg.auth.devices ?? []).filter((d) => !toRevoke.has(d.deviceId));
     }
 
     let creds: StoredCredentials = { apiKeys: {}, channelTokens: {} };

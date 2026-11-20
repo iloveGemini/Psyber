@@ -148,57 +148,76 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   void _openStickerSheet() {
     final stickersFuture = widget.controller.loadStickers();
     unawaited(
-      showModalBottomSheet<void>(
+      showDialog<void>(
         context: context,
-        backgroundColor: PsyberTheme.paperCard,
-        builder: (ctx) => Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '选择贴纸',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 12),
-              FutureBuilder<List<StickerView>>(
-                future: stickersFuture,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 16),
-                      child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                    );
-                  }
-                  final items = snapshot.data ?? const <StickerView>[];
-                  if (items.isEmpty) {
-                    return const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Text(
-                        '暂无可用贴纸，可将图片放入数据目录的 stickers/ 文件夹后重启同步。',
-                        style: TextStyle(fontSize: 13, color: PsyberTheme.inkMuted),
-                      ),
-                    );
-                  }
-                  return Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
+        builder: (ctx) => Dialog(
+          backgroundColor: PsyberTheme.paperCard,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: PsyberTheme.hairline),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
-                      for (final sticker in items)
-                        ActionChip(
-                          key: Key('sticker_option_${sticker.id}'),
-                          label: Text(sticker.label),
-                          onPressed: () {
-                            Navigator.of(ctx).pop();
-                            unawaited(_sendSticker(sticker));
-                          },
+                      const Expanded(
+                        child: Text(
+                          '选择贴纸',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                         ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                      ),
                     ],
-                  );
-                },
+                  ),
+                  const SizedBox(height: 8),
+                  FutureBuilder<List<StickerView>>(
+                    future: stickersFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 16),
+                          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                        );
+                      }
+                      final items = snapshot.data ?? const <StickerView>[];
+                      if (items.isEmpty) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            '暂无可用贴纸，可将图片放入数据目录的 stickers/ 文件夹后重启同步。',
+                            style: TextStyle(fontSize: 13, color: PsyberTheme.inkMuted),
+                          ),
+                        );
+                      }
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final sticker in items)
+                            ActionChip(
+                              key: Key('sticker_option_${sticker.id}'),
+                              label: Text(sticker.label),
+                              onPressed: () {
+                                Navigator.of(ctx).pop();
+                                unawaited(_sendSticker(sticker));
+                              },
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -228,44 +247,226 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     });
   }
 
-  void _openSettingsSheet() {
+  void _openModelConfigDialog() {
+    final baseUrlCtrl = TextEditingController();
+    final modelCtrl = TextEditingController();
+    final apiKeyCtrl = TextEditingController();
+    var providerKind = 'openai-compat';
+    String? errText;
+    var saving = false;
+
     unawaited(
-      showModalBottomSheet<void>(
+      showDialog<void>(
         context: context,
-        backgroundColor: PsyberTheme.paperCard,
-        builder: (ctx) => Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '客户端设置',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 12),
-              ValueListenableBuilder<bool>(
-                valueListenable: widget.controller.recallEvalModeNotifier,
-                builder: (context, enabled, _) => SwitchListTile(
-                  key: const Key('recall_eval_switch'),
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('召回评测模式'),
-                  subtitle: const Text('开启后在助手回复下方显示「想起 N 张卡」标注入口'),
-                  value: enabled,
-                  onChanged: widget.controller.toggleRecallEvalMode,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => Dialog(
+            backgroundColor: PsyberTheme.paperCard,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: PsyberTheme.hairline),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      '配置模型与 API Key',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '保存后立即热生效，无需重启后端',
+                      style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkMuted),
+                    ),
+                    const SizedBox(height: 14),
+                    DropdownButtonFormField<String>(
+                      initialValue: providerKind,
+                      decoration: const InputDecoration(
+                        labelText: '模型服务商',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
+                        DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
+                        DropdownMenuItem(value: 'google', child: Text('Google')),
+                        DropdownMenuItem(
+                          value: 'openai-compat',
+                          child: Text('OpenAI 兼容接口（自定义地址）'),
+                        ),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) setDialogState(() => providerKind = v);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: baseUrlCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '自定义接口地址 Base URL（兼容接口必填）',
+                        hintText: '例如 https://api.example.com/v1',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: modelCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '主对话模型 ID',
+                        hintText: '例如 gpt-4o / deepseek-chat',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: apiKeyCtrl,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'API Key（写入 0600 凭证文件）',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    if (errText != null) ...[
+                      const SizedBox(height: 10),
+                      Text(errText!, style: const TextStyle(color: Color(0xFFB34A3C), fontSize: 12.5)),
+                    ],
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: saving ? null : () => Navigator.of(ctx).pop(),
+                          child: const Text('取消'),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          onPressed: saving
+                              ? null
+                              : () async {
+                                  final model = modelCtrl.text.trim();
+                                  final baseUrl = baseUrlCtrl.text.trim();
+                                  if (model.isEmpty) {
+                                    setDialogState(() => errText = '请填写模型 ID');
+                                    return;
+                                  }
+                                  if (providerKind == 'openai-compat' && baseUrl.isEmpty) {
+                                    setDialogState(() => errText = '兼容接口请填写自定义 Base URL');
+                                    return;
+                                  }
+                                  setDialogState(() {
+                                    saving = true;
+                                    errText = null;
+                                  });
+                                  try {
+                                    await widget.controller.updateLlmSettings(
+                                      providerKind: providerKind,
+                                      modelName: model,
+                                      baseUrl: baseUrl.isEmpty ? null : baseUrl,
+                                      apiKey: apiKeyCtrl.text.trim(),
+                                    );
+                                    if (ctx.mounted) Navigator.of(ctx).pop();
+                                  } on ApiException catch (e) {
+                                    setDialogState(() {
+                                      errText = e.message;
+                                      saving = false;
+                                    });
+                                  } catch (_) {
+                                    setDialogState(() {
+                                      errText = '保存失败，请检查网络连接';
+                                      saving = false;
+                                    });
+                                  }
+                                },
+                          child: const Text('保存'),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              const Divider(),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.link_off),
-                title: const Text('断开连接并重新配对'),
-                onTap: () async {
-                  Navigator.of(ctx).pop();
-                  await widget.controller.disconnect();
-                },
+            ),
+          ),
+        ),
+      ).whenComplete(() {
+        baseUrlCtrl.dispose();
+        modelCtrl.dispose();
+        apiKeyCtrl.dispose();
+      }),
+    );
+  }
+
+  void _openSettingsSheet() {
+    unawaited(
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => Dialog(
+          backgroundColor: PsyberTheme.paperCard,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: PsyberTheme.hairline),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          '客户端设置',
+                          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    key: const Key('open_model_config_tile'),
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.key_outlined),
+                    title: const Text('配置模型与 API Key'),
+                    subtitle: const Text('支持自定义 Base URL 与 OpenAI 兼容接口，保存后热生效'),
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      _openModelConfigDialog();
+                    },
+                  ),
+                  const Divider(),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: widget.controller.recallEvalModeNotifier,
+                    builder: (context, enabled, _) => SwitchListTile(
+                      key: const Key('recall_eval_switch'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('召回评测模式'),
+                      subtitle: const Text('开启后在助手回复下方显示「想起 N 张卡」标注入口'),
+                      value: enabled,
+                      onChanged: widget.controller.toggleRecallEvalMode,
+                    ),
+                  ),
+                  const Divider(),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.link_off),
+                    title: const Text('断开连接并重新配对'),
+                    onTap: () async {
+                      Navigator.of(ctx).pop();
+                      await widget.controller.disconnect();
+                    },
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),

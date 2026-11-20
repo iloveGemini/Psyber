@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -80,6 +81,7 @@ class FakePsyberApiClient implements PsyberApiClient {
     String? sleepStart,
     String? sleepEnd,
     String? providerKind,
+    String? baseUrl,
     String? modelName,
     String? apiKey,
   }) async {
@@ -91,6 +93,24 @@ class FakePsyberApiClient implements PsyberApiClient {
       sleepStart: sleepStart ?? '23:30',
       sleepEnd: sleepEnd ?? '07:30',
     );
+  }
+
+  @override
+  Future<void> updateLlmSettings(
+    ConnectionProfile profile, {
+    required String providerKind,
+    required String modelName,
+    String? baseUrl,
+    String? apiKey,
+  }) async {}
+
+  int revokeCount = 0;
+  String? lastRevokedDeviceId;
+
+  @override
+  Future<void> revokeDevice(ConnectionProfile profile, String deviceId) async {
+    revokeCount += 1;
+    lastRevokedDeviceId = deviceId;
   }
 
   @override
@@ -462,5 +482,41 @@ void main() {
     expect(api.sentPayloads.length, 2);
     expect(api.sentPayloads[1]['stickerId'], 'hug');
     expect(find.text('[贴纸：抱抱]'), findsOneWidget);
+  });
+
+  test('disconnect 通知服务端吊销并清空本地凭证，FileSessionStorage 在沙盒环境下安全降级', () async {
+    final tempDir = await Directory.systemTemp.createTemp('psyber_session_test');
+    final sessionFile = File('${tempDir.path}/client_session.json');
+    final storage = FileSessionStorage(file: sessionFile);
+    final api = FakePsyberApiClient();
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    const profile = ConnectionProfile(
+      baseUrl: 'http://localhost:3721',
+      token: 'psb_test_token',
+      deviceId: 'dev_sandbox_01',
+      deviceName: 'Mac',
+      instanceId: 'inst-001',
+    );
+    await storage.save(profile);
+    expect(await sessionFile.exists(), isTrue);
+
+    await controller.initialize();
+    expect(controller.profileNotifier.value?.token, 'psb_test_token');
+
+    // 调用 disconnect，通知后端吊销并清空本地存储
+    await controller.disconnect();
+    expect(api.revokeCount, 1);
+    expect(api.lastRevokedDeviceId, 'dev_sandbox_01');
+    expect(await sessionFile.exists(), isFalse);
+    expect(controller.profileNotifier.value, isNull);
+    expect(controller.connectionNotifier.value, ConnectionPhase.unpaired);
   });
 }

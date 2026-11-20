@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import 'core/media/image_picker.dart';
@@ -12,12 +10,13 @@ import 'features/genesis/genesis_page.dart';
 import 'features/pairing/pairing_page.dart';
 import 'shared/theme.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   final controller = AppController(
     api: HttpPsyberApiClient(),
     storage: FileSessionStorage(),
   );
-  unawaited(controller.initialize());
+  await controller.initialize();
   runApp(PsyberApp(controller: controller));
 }
 

@@ -76,9 +76,20 @@ abstract class PsyberApiClient {
     String? sleepStart,
     String? sleepEnd,
     String? providerKind,
+    String? baseUrl,
     String? modelName,
     String? apiKey,
   });
+
+  Future<void> updateLlmSettings(
+    ConnectionProfile profile, {
+    required String providerKind,
+    required String modelName,
+    String? baseUrl,
+    String? apiKey,
+  });
+
+  Future<void> revokeDevice(ConnectionProfile profile, String deviceId);
 
   Future<DoorStatus> getDoor(ConnectionProfile profile);
 
@@ -249,6 +260,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     String? sleepStart,
     String? sleepEnd,
     String? providerKind,
+    String? baseUrl,
     String? modelName,
     String? apiKey,
   }) async {
@@ -267,10 +279,15 @@ class HttpPsyberApiClient implements PsyberApiClient {
         providerKind.isNotEmpty &&
         modelName != null &&
         modelName.isNotEmpty) {
+      final providerEntry = <String, dynamic>{
+        'kind': providerKind,
+        'authMode': 'api_key',
+      };
+      if (baseUrl != null && baseUrl.trim().isNotEmpty) {
+        providerEntry['baseUrl'] = baseUrl.trim();
+      }
       payload['llm'] = {
-        'providers': {
-          providerKind: {'kind': providerKind, 'authMode': 'api_key'},
-        },
+        'providers': {providerKind: providerEntry},
         'slots': {
           'chat': {'provider': providerKind, 'model': modelName},
         },
@@ -286,6 +303,56 @@ class HttpPsyberApiClient implements PsyberApiClient {
       uri: uri,
       bearerToken: profile.token,
       body: payload,
+    );
+  }
+
+  @override
+  Future<void> updateLlmSettings(
+    ConnectionProfile profile, {
+    required String providerKind,
+    required String modelName,
+    String? baseUrl,
+    String? apiKey,
+  }) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
+    final providerEntry = <String, dynamic>{
+      'kind': providerKind,
+      'authMode': 'api_key',
+    };
+    if (baseUrl != null && baseUrl.trim().isNotEmpty) {
+      providerEntry['baseUrl'] = baseUrl.trim();
+    }
+    final payload = <String, dynamic>{
+      'llm': {
+        'providers': {providerKind: providerEntry},
+        'slots': {
+          'chat': {'provider': providerKind, 'model': modelName.trim()},
+        },
+      },
+    };
+    if (apiKey != null && apiKey.trim().isNotEmpty) {
+      payload['credentials'] = {
+        providerKind: {'apiKey': apiKey.trim()},
+      };
+    }
+    await _requestJson(
+      method: 'PATCH',
+      uri: uri,
+      bearerToken: profile.token,
+      body: payload,
+    );
+  }
+
+  @override
+  Future<void> revokeDevice(ConnectionProfile profile, String deviceId) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
+    await _requestJson(
+      method: 'PATCH',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {
+        'revokeDeviceIds': [deviceId],
+      },
     );
   }
 

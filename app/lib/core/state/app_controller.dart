@@ -110,7 +110,7 @@ class AppController {
       return;
     }
     profileNotifier.value = saved;
-    await connectAndSync();
+    unawaited(connectAndSync());
   }
 
   /// 首次通过一次性配对码绑定后端并落盘长期 Token + instanceId。
@@ -139,6 +139,7 @@ class AppController {
     String? sleepStart,
     String? sleepEnd,
     String? providerKind,
+    String? baseUrl,
     String? modelName,
     String? apiKey,
   }) async {
@@ -152,6 +153,7 @@ class AppController {
       sleepStart: sleepStart,
       sleepEnd: sleepEnd,
       providerKind: providerKind,
+      baseUrl: baseUrl,
       modelName: modelName,
       apiKey: apiKey,
     );
@@ -160,8 +162,35 @@ class AppController {
     await refreshSnapshot();
   }
 
+  Future<void> updateLlmSettings({
+    required String providerKind,
+    required String modelName,
+    String? baseUrl,
+    String? apiKey,
+  }) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    await _api.updateLlmSettings(
+      profile,
+      providerKind: providerKind,
+      modelName: modelName,
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+    );
+    if (_disposed) return;
+    turnErrorNotifier.value = null;
+  }
+
   /// 断开当前连接并清除本地凭证，返回配对页。
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool notifyServer = true}) async {
+    final profile = profileNotifier.value;
+    if (notifyServer && profile != null && profile.deviceId.isNotEmpty) {
+      try {
+        await _api.revokeDevice(profile, profile.deviceId);
+      } catch (_) {
+        // 网络不通或服务端已停机时静默忽略，优先保证客户端本地清空返回配对
+      }
+    }
     _cancelSseAndTimers();
     await _storage.clear();
     if (_disposed) return;

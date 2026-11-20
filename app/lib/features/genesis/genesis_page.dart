@@ -4,7 +4,7 @@ import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
-/// Ring 1 初生引导页：支持中性开局（留空名字）或直接定名，并一步配置 BYOK 模型凭证。
+/// Ring 1 初生引导页：支持中性开局（留空名字）或直接定名，并一步配置 BYOK 模型与自定义 Base URL。
 class GenesisPage extends StatefulWidget {
   const GenesisPage({
     super.key,
@@ -23,6 +23,7 @@ class _GenesisPageState extends State<GenesisPage> {
   final _timezoneController = TextEditingController(text: 'Asia/Shanghai');
   final _sleepStartController = TextEditingController(text: '23:30');
   final _sleepEndController = TextEditingController(text: '07:30');
+  final _baseUrlController = TextEditingController();
   final _modelController = TextEditingController();
   final _apiKeyController = TextEditingController();
   String _providerKind = 'openai';
@@ -36,12 +37,20 @@ class _GenesisPageState extends State<GenesisPage> {
     _timezoneController.dispose();
     _sleepStartController.dispose();
     _sleepEndController.dispose();
+    _baseUrlController.dispose();
     _modelController.dispose();
     _apiKeyController.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
+    final modelName = _modelController.text.trim();
+    final baseUrl = _baseUrlController.text.trim();
+    if (_providerKind == 'openai-compat' && modelName.isNotEmpty && baseUrl.isEmpty) {
+      setState(() => _error = '使用 OpenAI 兼容接口时请填写自定义接口地址（Base URL）');
+      return;
+    }
+
     setState(() {
       _submitting = true;
       _error = null;
@@ -55,8 +64,9 @@ class _GenesisPageState extends State<GenesisPage> {
             : _timezoneController.text.trim(),
         sleepStart: _sleepStartController.text.trim(),
         sleepEnd: _sleepEndController.text.trim(),
-        providerKind: _modelController.text.trim().isEmpty ? null : _providerKind,
-        modelName: _modelController.text.trim(),
+        providerKind: modelName.isEmpty ? null : _providerKind,
+        baseUrl: baseUrl.isEmpty ? null : baseUrl,
+        modelName: modelName,
         apiKey: _apiKeyController.text.trim(),
       );
     } on ApiException catch (e) {
@@ -153,6 +163,10 @@ class _GenesisPageState extends State<GenesisPage> {
                         DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
                         DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
                         DropdownMenuItem(value: 'google', child: Text('Google')),
+                        DropdownMenuItem(
+                          value: 'openai-compat',
+                          child: Text('OpenAI 兼容接口（自定义地址）'),
+                        ),
                       ],
                       onChanged: (v) {
                         if (v != null) setState(() => _providerKind = v);
@@ -160,10 +174,20 @@ class _GenesisPageState extends State<GenesisPage> {
                     ),
                     const SizedBox(height: 12),
                     TextField(
+                      key: const Key('genesis_base_url_field'),
+                      controller: _baseUrlController,
+                      decoration: const InputDecoration(
+                        labelText: '自定义接口地址 Base URL（可选，兼容接口必填）',
+                        hintText: '例如 https://api.example.com/v1',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
                       key: const Key('genesis_model_field'),
                       controller: _modelController,
                       decoration: const InputDecoration(
-                        labelText: '主对话模型 ID（可选，如 gpt-4o）',
+                        labelText: '主对话模型 ID（可选，如 gpt-4o / deepseek-chat）',
                         border: OutlineInputBorder(),
                       ),
                     ),

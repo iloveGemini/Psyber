@@ -284,8 +284,9 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
       body: JSON.stringify({ code: issued.code, deviceName: "My iPhone", platform: "ios" }),
     });
     expect(pairOk.status).toBe(200);
-    const pairJson = (await pairOk.json()) as { token: string; instanceId: string };
+    const pairJson = (await pairOk.json()) as { token: string; instanceId: string; deviceId: string };
     expect(pairJson.token.startsWith("psb_")).toBe(true);
+    expect(pairJson.deviceId).toBeDefined();
     expect(pairJson.instanceId).toBe(ctx.config.instanceId);
 
     for (let i = 0; i < 5; i++) {
@@ -393,5 +394,19 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     });
     expect(msgRes.status).toBe(202);
     expect(userMsgPersistedCount).toBe(1);
+
+    // 6. 测试设备吊销（对齐 Spec 04 §1.1）：通过 revokeDeviceIds 移除已绑定设备并验证令牌失效
+    const revokeRes = await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({ revokeDeviceIds: [pairJson.deviceId] }),
+    });
+    expect(revokeRes.status).toBe(200);
+    const settingsAfterRevoke = (await revokeRes.json()) as { settings?: { devices?: Array<{ deviceId: string }> } };
+    expect(settingsAfterRevoke.settings?.devices?.some((d) => d.deviceId === pairJson.deviceId)).toBe(false);
+
+    // 验证吊销后该设备的令牌立即失效返回 401
+    const revokedCheck = await app.request("/api/v1/settings", { headers: authHeaders });
+    expect(revokedCheck.status).toBe(401);
   });
 });

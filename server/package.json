@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/index.ts",
+    "pair": "bun run src/index.ts --pair",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

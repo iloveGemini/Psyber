@@ -423,14 +423,45 @@ async function main(): Promise<void> {
 
   console.log(`Psyber server listening on http://${host}:${port} (dataDir=${runtime.dataDir})`);
 
-  // 首次无已配对设备时自动打印 8 位一次性配对码，开箱即连
-  if (runtime.config.auth.devices.length === 0) {
+  const forcePair =
+    process.argv.includes("--pair") ||
+    process.argv.includes("-p") ||
+    process.env.PSYBER_PAIR === "1" ||
+    process.env.PSYBER_ISSUE_PAIR === "1";
+
+  // 首次无已配对设备，或启动时带 --pair 选项时，自动打印 8 位一次性配对码
+  if (runtime.config.auth.devices.length === 0 || forcePair) {
     const pair = runtime.pairing.issueCode();
-    console.log(`[psyber] 尚未配对任何客户端，一次性配对码（5 分钟有效）：${pair.code}`);
+    if (runtime.config.auth.devices.length === 0) {
+      console.log(`[psyber] 尚未配对任何客户端，一次性配对码（5 分钟有效）：${pair.code}`);
+    } else {
+      console.log(`[psyber] 已手动请求签发新设备配对码（5 分钟有效）：${pair.code}`);
+    }
+  } else {
+    console.log(
+      `[psyber] 当前已有 ${runtime.config.auth.devices.length} 台已配对设备。如需配对新客户端，可在本终端按 p 回车，或带 --pair 选项重启（bun run pair）。`,
+    );
+  }
+
+  // 交互式终端模式下，支持随时在控制台按 p / pair 回车签发新配对码
+  let ttyListener: ((chunk: string) => void) | null = null;
+  if (process.stdin.isTTY) {
+    process.stdin.setEncoding("utf-8");
+    ttyListener = (chunk: string) => {
+      const text = chunk.trim().toLowerCase();
+      if (text === "p" || text === "pair") {
+        const pair = runtime.pairing.issueCode();
+        console.log(`[psyber] 控制台交互签发一次性配对码（5 分钟有效）：${pair.code}`);
+      }
+    };
+    process.stdin.on("data", ttyListener);
   }
 
   const shutdown = async (signal: string) => {
     console.log(`[psyber] 收到 ${signal}，正在等待后台整理收尾并安全停机...`);
+    if (ttyListener) {
+      process.stdin.off("data", ttyListener);
+    }
     server.stop();
     await runtime.stop();
     process.exit(0);

@@ -65,11 +65,19 @@ class FileSessionStorage implements SessionStorage {
     try {
       await tmp.writeAsString(jsonEncode(profile.toJson()), flush: true);
       if (!Platform.isWindows) {
-        await Process.run('chmod', ['600', tmp.path]);
+        try {
+          await Process.run('chmod', ['600', tmp.path]);
+        } catch (_) {
+          // macOS App Sandbox 或受限环境无权限 spawn 子进程，沙盒自身已隔离容器，安全降级
+        }
       }
       await tmp.rename(_file.path);
       if (!Platform.isWindows) {
-        await Process.run('chmod', ['600', _file.path]);
+        try {
+          await Process.run('chmod', ['600', _file.path]);
+        } catch (_) {
+          // 安全降级
+        }
       }
     } finally {
       if (await tmp.exists()) {
