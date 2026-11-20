@@ -61,15 +61,23 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
     final current = _items;
     if (current == null) return;
     final target = current[index];
-    await widget.controller.submitRecallFeedback(
-      turnId: widget.turnId,
-      cardPath: target.cardPath,
-      verdict: verdict,
-    );
-    if (!mounted) return;
-    final updated = List<RecallTraceItem>.from(current);
-    updated[index] = target.copyWith(feedback: verdict);
-    setState(() => _items = updated);
+    try {
+      await widget.controller.submitRecallFeedback(
+        turnId: widget.turnId,
+        cardPath: target.cardPath,
+        verdict: verdict,
+      );
+      if (!mounted) return;
+      final updated = List<RecallTraceItem>.from(current);
+      updated[index] = target.copyWith(feedback: verdict);
+      setState(() {
+        _items = updated;
+        _error = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _error = '提交标注失败，请稍后重试');
+    }
   }
 
   Future<void> _promptMissedNote() async {
@@ -77,7 +85,8 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
     final note = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('补充漏召备注'),
+        backgroundColor: PsyberTheme.letterSurface,
+        title: const Text('补充漏召备注', style: TextStyle(fontSize: 16.5)),
         content: TextField(
           controller: textController,
           decoration: const InputDecoration(
@@ -96,20 +105,26 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
           ),
         ],
       ),
-    );
-    textController.dispose();
+    ).whenComplete(textController.dispose);
     if (note == null || note.isEmpty) return;
-    await widget.controller.submitRecallFeedback(
-      turnId: widget.turnId,
-      verdict: 'missed',
-      note: note,
-    );
+    try {
+      await widget.controller.submitRecallFeedback(
+        turnId: widget.turnId,
+        verdict: 'missed',
+        note: note,
+      );
+      if (!mounted) return;
+      setState(() => _error = null);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _error = '提交漏召备注失败，请稍后重试');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.only(top: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -120,13 +135,13 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: PsyberTheme.paperCanvas,
+                color: PsyberTheme.mineralCanvas,
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: PsyberTheme.hairline),
               ),
               child: Text(
                 '想起 ${widget.recallCount} 张卡',
-                style: const TextStyle(fontSize: 12, color: PsyberTheme.inkMuted),
+                style: const TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
               ),
             ),
           ),
@@ -135,7 +150,7 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: PsyberTheme.paperCard,
+                color: PsyberTheme.mineralCanvas,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: PsyberTheme.hairline),
               ),
@@ -146,7 +161,10 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : _error != null
-                      ? Text(_error!, style: const TextStyle(fontSize: 12))
+                      ? Text(
+                          _error!,
+                          style: const TextStyle(fontSize: 12, color: PsyberTheme.dangerInk),
+                        )
                       : Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -215,21 +233,25 @@ class _VerdictChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         decoration: BoxDecoration(
-          color: selected ? PsyberTheme.accentWarm : PsyberTheme.paperCanvas,
+          color: selected ? colors.accentSoft : colors.letterSurface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: PsyberTheme.hairline),
+          border: Border.all(
+            color: selected ? colors.accentBorder : colors.hairline,
+          ),
         ),
         child: Text(
           label,
           style: TextStyle(
             fontSize: 11.5,
-            color: selected ? Colors.white : PsyberTheme.inkPrimary,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+            color: colors.inkDeep,
           ),
         ),
       ),

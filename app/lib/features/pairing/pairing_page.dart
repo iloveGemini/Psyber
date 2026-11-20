@@ -7,7 +7,7 @@ import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
-/// Ring 1 单地址配对页：输入服务端地址与 8 位一次性配对码即可绑定长期令牌。
+/// 配对入口页：连接常驻在后台的住户服务，支持终端一次性配对码绑定长期令牌。
 class PairingPage extends StatefulWidget {
   const PairingPage({
     super.key,
@@ -23,8 +23,10 @@ class PairingPage extends StatefulWidget {
 class _PairingPageState extends State<PairingPage> {
   final _urlController = TextEditingController(text: 'http://localhost:3721');
   final _codeController = TextEditingController();
-  final _deviceNameController = TextEditingController(text: _resolvePlatformInfo().name);
+  final _deviceNameController =
+      TextEditingController(text: _resolvePlatformInfo().name);
   bool _submitting = false;
+  bool _showHelp = false;
   String? _errorText;
 
   static ({String name, String wire}) _resolvePlatformInfo() {
@@ -92,90 +94,161 @@ class _PairingPageState extends State<PairingPage> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Scaffold(
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Card(
-              color: PsyberTheme.paperCard,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: const BorderSide(color: PsyberTheme.hairline),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      'Psyber',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                        color: PsyberTheme.inkPrimary,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 10,
+                        height: 10,
+                        decoration: BoxDecoration(
+                          color: colors.statusSuccess,
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '输入后端地址与终端打印的一次性配对码完成绑定',
-                      style: TextStyle(color: PsyberTheme.inkMuted, fontSize: 13),
-                    ),
-                    const SizedBox(height: 20),
-                    TextField(
-                      key: const Key('pair_url_field'),
-                      controller: _urlController,
-                      decoration: const InputDecoration(
-                        labelText: '服务端地址',
-                        hintText: 'http://localhost:3721',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      key: const Key('pair_code_field'),
-                      controller: _codeController,
-                      textCapitalization: TextCapitalization.characters,
-                      decoration: const InputDecoration(
-                        labelText: '一次性配对码',
-                        hintText: '例如 ABCD-1234',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      key: const Key('pair_device_field'),
-                      controller: _deviceNameController,
-                      decoration: const InputDecoration(
-                        labelText: '当前设备名称',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    if (_errorText != null) ...[
-                      const SizedBox(height: 12),
+                      const SizedBox(width: 10),
                       Text(
-                        _errorText!,
-                        key: const Key('pair_error_text'),
-                        style: const TextStyle(color: Color(0xFFB34A3C), fontSize: 13),
+                        'Psyber',
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 28,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.4,
+                        ),
                       ),
                     ],
-                    const SizedBox(height: 18),
-                    FilledButton(
-                      key: const Key('pair_submit_button'),
-                      onPressed: _submitting ? null : _submit,
-                      child: _submitting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('配对并连接'),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    '连接到常驻在后台的住户空间，窗口只是推开那扇门的地方。',
+                    style: TextStyle(fontSize: 13.5, color: PsyberTheme.inkQuiet, height: 1.5),
+                  ),
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: PsyberTheme.letterSurface,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: PsyberTheme.hairline),
                     ),
-                  ],
-                ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextField(
+                          key: const Key('pair_url_field'),
+                          controller: _urlController,
+                          style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
+                          decoration: const InputDecoration(
+                            labelText: '服务端地址',
+                            hintText: 'http://localhost:3721',
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          key: const Key('pair_code_field'),
+                          controller: _codeController,
+                          textCapitalization: TextCapitalization.characters,
+                          style: PsyberTheme.monoStyle.copyWith(
+                            fontSize: 16,
+                            letterSpacing: 1.6,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          decoration: const InputDecoration(
+                            labelText: '一次性配对码',
+                            hintText: 'ABCD-1234',
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          key: const Key('pair_device_field'),
+                          controller: _deviceNameController,
+                          decoration: const InputDecoration(
+                            labelText: '当前设备名称',
+                          ),
+                        ),
+                        if (_errorText != null) ...[
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                            decoration: BoxDecoration(
+                              color: PsyberTheme.dangerSoft,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              _errorText!,
+                              key: const Key('pair_error_text'),
+                              style: const TextStyle(
+                                color: PsyberTheme.dangerInk,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 20),
+                        FilledButton(
+                          key: const Key('pair_submit_button'),
+                          onPressed: _submitting ? null : _submit,
+                          child: _submitting
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text('配对并连接'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => setState(() => _showHelp = !_showHelp),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _showHelp ? Icons.expand_less : Icons.help_outline,
+                            size: 15,
+                            color: PsyberTheme.inkQuiet,
+                          ),
+                          const SizedBox(width: 6),
+                          const Text(
+                            '如何获取配对码？',
+                            style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (_showHelp)
+                    Container(
+                      margin: const EdgeInsets.only(top: 4),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: PsyberTheme.letterSurface,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: PsyberTheme.hairline),
+                      ),
+                      child: const Text(
+                        '在运行后端的终端输入 p 并回车，或另开终端执行 bun run pair，即可生成 5 分钟内有效的一次性配对码。',
+                        style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet, height: 1.5),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),

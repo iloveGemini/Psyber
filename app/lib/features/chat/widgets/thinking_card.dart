@@ -34,13 +34,14 @@ class _ThinkingCardState extends State<ThinkingCard> {
     if (widget.thinking.trim().isEmpty) {
       return const SizedBox.shrink();
     }
+    final colors = context.colors;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: PsyberTheme.paperCanvas,
+        color: colors.mineralCanvas,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: PsyberTheme.hairline),
+        border: Border.all(color: colors.hairline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -56,15 +57,15 @@ class _ThinkingCardState extends State<ThinkingCard> {
                 children: [
                   Icon(
                     _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 16,
-                    color: PsyberTheme.inkMuted,
+                    size: 15,
+                    color: colors.inkQuiet,
                   ),
                   const SizedBox(width: 4),
                   Text(
                     widget.isStreaming ? '思考中…' : '思考过程',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 12,
-                      color: PsyberTheme.inkMuted,
+                      color: colors.inkQuiet,
                     ),
                   ),
                 ],
@@ -79,8 +80,8 @@ class _ThinkingCardState extends State<ThinkingCard> {
                 key: const Key('thinking_body'),
                 style: const TextStyle(
                   fontSize: 12.5,
-                  height: 1.45,
-                  color: PsyberTheme.inkMuted,
+                  height: 1.5,
+                  color: PsyberTheme.inkQuiet,
                 ),
               ),
             ),

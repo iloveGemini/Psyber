@@ -15,6 +15,8 @@ class ApiException implements Exception {
   final String code;
   final String message;
 
+  bool get isEndpointUnavailable => statusCode == 404 || statusCode == 501;
+
   @override
   String toString() => 'ApiException($statusCode, $code): $message';
 }
@@ -24,9 +26,10 @@ class CanceledException implements Exception {
   const CanceledException();
 }
 
-/// 纯函数 SSE 行流解析器：支持 event / data / 空行落帧，忽略注释行。
+/// 纯函数 SSE 行流解析器：支持 id / event / data / 空行落帧，忽略注释行。
 Stream<SseEventFrame> parseSseLines(Stream<String> lines) async* {
   String currentEvent = 'message';
+  String? currentId;
   final dataLines = <String>[];
 
   await for (final line in lines) {
@@ -37,17 +40,20 @@ Stream<SseEventFrame> parseSseLines(Stream<String> lines) async* {
         try {
           final decoded = jsonDecode(raw);
           if (decoded is Map<String, dynamic>) {
-            yield SseEventFrame(event: currentEvent, data: decoded);
+            yield SseEventFrame(event: currentEvent, data: decoded, id: currentId);
           }
         } catch (_) {
           // 忽略无法解析的损坏帧
         }
       }
       currentEvent = 'message';
+      currentId = null;
       continue;
     }
     if (line.startsWith(':')) continue;
-    if (line.startsWith('event:')) {
+    if (line.startsWith('id:')) {
+      currentId = line.substring(3).trim();
+    } else if (line.startsWith('event:')) {
       currentEvent = line.substring(6).trim();
     } else if (line.startsWith('data:')) {
       dataLines.add(line.substring(5).trimLeft());
@@ -55,7 +61,7 @@ Stream<SseEventFrame> parseSseLines(Stream<String> lines) async* {
   }
 }
 
-/// Psyber Ring 1 薄客户端网络接口（测试环境注入内存 Fake，100% 离线）。
+/// Psyber 客户端网络接口（支持 Ring 1 核心端点与 Ring 1.5 扩展槽位；测试环境可注入内存 Fake）。
 abstract class PsyberApiClient {
   Future<HealthInfo> checkHealth(String baseUrl);
 
@@ -80,6 +86,13 @@ abstract class PsyberApiClient {
     String? modelName,
     String? apiKey,
   });
+
+  Future<SettingsSnapshot> getSettings(ConnectionProfile profile);
+
+  Future<SettingsSnapshot> updateSettings(
+    ConnectionProfile profile,
+    Map<String, dynamic> patch,
+  );
 
   Future<void> updateLlmSettings(
     ConnectionProfile profile, {
@@ -108,6 +121,16 @@ abstract class PsyberApiClient {
 
   Future<List<StickerView>> listStickers(ConnectionProfile profile);
 
+  Future<StickerView> uploadSticker(
+    ConnectionProfile profile, {
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+    required String id,
+    required String label,
+    String pack = 'default',
+  });
+
   Future<SendMessageResult> sendMessage(
     ConnectionProfile profile, {
     required String clientMessageId,
@@ -117,6 +140,23 @@ abstract class PsyberApiClient {
   });
 
   Future<void> deleteMessage(ConnectionProfile profile, String messageId);
+
+  /// Ring 1.5：编辑末条用户消息（Ring 1 服务端返回 404 时由上层温和提示）。
+  Future<TimelineItem> editMessage(
+    ConnectionProfile profile,
+    String messageId,
+    String content,
+  );
+
+  /// Ring 1.5：重摇助手回复。
+  Future<void> rerollMessage(ConnectionProfile profile, String messageId);
+
+  /// Ring 1.5：切换历史版本组。
+  Future<TimelineItem> switchMessageVersion(
+    ConnectionProfile profile,
+    String messageId,
+    int version,
+  );
 
   Future<void> abortTurn(ConnectionProfile profile, String turnId);
 
@@ -133,10 +173,29 @@ abstract class PsyberApiClient {
     String? note,
   });
 
+  /// Ring 1.5：拉取活跃活动会话（Ring 1 服务端未挂载时返回 null）。
+  Future<ActivitySessionView?> getActiveActivity(ConnectionProfile profile);
+
+  /// Ring 1.5：结束观影伴看活动。
+  Future<void> endCinemaActivity(
+    ConnectionProfile profile, {
+    String? sessionId,
+  });
+
+  /// Ring 1.5：读取上锁抽屉清单。
+  Future<List<DrawerEntryView>> listDrawer(ConnectionProfile profile);
+
+  /// Ring 1.5：显式确认拆封抽屉（写先于读 `privacy.peeked`）。
+  Future<DrawerOpenedContent> openDrawerEntry(
+    ConnectionProfile profile,
+    String id,
+  );
+
   /// 打开 SSE 实时事件流；调用方取消订阅时自动断开底层连接。
   Stream<SseEventFrame> openEventStream(
     ConnectionProfile profile, {
     required bool foreground,
+    String? lastEventId,
   });
 }
 
@@ -307,6 +366,36 @@ class HttpPsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<SettingsSnapshot> getSettings(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    return SettingsSnapshot.fromJson(json);
+  }
+
+  @override
+  Future<SettingsSnapshot> updateSettings(
+    ConnectionProfile profile,
+    Map<String, dynamic> patch,
+  ) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
+    final json = await _requestJson(
+      method: 'PATCH',
+      uri: uri,
+      bearerToken: profile.token,
+      body: patch,
+    );
+    final rawSettings = json['settings'];
+    if (rawSettings is Map<String, dynamic>) {
+      return SettingsSnapshot.fromJson(rawSettings);
+    }
+    return getSettings(profile);
+  }
+
+  @override
   Future<void> updateLlmSettings(
     ConnectionProfile profile, {
     required String providerKind,
@@ -314,7 +403,6 @@ class HttpPsyberApiClient implements PsyberApiClient {
     String? baseUrl,
     String? apiKey,
   }) async {
-    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
     final providerEntry = <String, dynamic>{
       'kind': providerKind,
       'authMode': 'api_key',
@@ -335,25 +423,14 @@ class HttpPsyberApiClient implements PsyberApiClient {
         providerKind: {'apiKey': apiKey.trim()},
       };
     }
-    await _requestJson(
-      method: 'PATCH',
-      uri: uri,
-      bearerToken: profile.token,
-      body: payload,
-    );
+    await updateSettings(profile, payload);
   }
 
   @override
   Future<void> revokeDevice(ConnectionProfile profile, String deviceId) async {
-    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/settings');
-    await _requestJson(
-      method: 'PATCH',
-      uri: uri,
-      bearerToken: profile.token,
-      body: {
-        'revokeDeviceIds': [deviceId],
-      },
-    );
+    await updateSettings(profile, {
+      'revokeDeviceIds': [deviceId],
+    });
   }
 
   @override
@@ -447,6 +524,63 @@ class HttpPsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<StickerView> uploadSticker(
+    ConnectionProfile profile, {
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+    required String id,
+    required String label,
+    String pack = 'default',
+  }) async {
+    final boundary = '----psyberstk${DateTime.now().microsecondsSinceEpoch}';
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/stickers');
+    final client = _clientFactory();
+    client.connectionTimeout = const Duration(seconds: 20);
+    try {
+      final req = await client.postUrl(uri).timeout(const Duration(seconds: 20));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${profile.token}');
+      req.headers.set(
+        HttpHeaders.contentTypeHeader,
+        'multipart/form-data; boundary=$boundary',
+      );
+      void writeField(String name, String value) {
+        req.add(
+          utf8.encode(
+            '--$boundary\r\nContent-Disposition: form-data; name="$name"\r\n\r\n$value\r\n',
+          ),
+        );
+      }
+
+      writeField('id', id);
+      writeField('label', label);
+      writeField('pack', pack);
+      final fileHeader = '--$boundary\r\n'
+          'Content-Disposition: form-data; name="file"; filename="$filename"\r\n'
+          'Content-Type: $mimeType\r\n\r\n';
+      req.add(utf8.encode(fileHeader));
+      req.add(bytes);
+      req.add(utf8.encode('\r\n--$boundary--\r\n'));
+
+      final res = await req.close().timeout(const Duration(seconds: 20));
+      final rawText = await utf8.decodeStream(res).timeout(const Duration(seconds: 20));
+      final map = _safeDecodeMap(rawText);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final err = map['error'];
+        final errMap = err is Map<String, dynamic> ? err : const <String, dynamic>{};
+        throw ApiException(
+          statusCode: res.statusCode,
+          code: errMap['code'] as String? ?? 'HTTP_${res.statusCode}',
+          message: errMap['message'] as String? ?? '贴纸上传失败（HTTP ${res.statusCode}）',
+        );
+      }
+      return StickerView.fromJson(map);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  @override
   Future<SendMessageResult> sendMessage(
     ConnectionProfile profile, {
     required String clientMessageId,
@@ -483,6 +617,59 @@ class HttpPsyberApiClient implements PsyberApiClient {
       method: 'DELETE',
       uri: uri,
       bearerToken: profile.token,
+    );
+  }
+
+  @override
+  Future<TimelineItem> editMessage(
+    ConnectionProfile profile,
+    String messageId,
+    String content,
+  ) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages/$messageId/edit',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {'content': content},
+    );
+    return TimelineItem.fromJson(
+      (json['message'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+    );
+  }
+
+  @override
+  Future<void> rerollMessage(ConnectionProfile profile, String messageId) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages/$messageId/reroll',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+  }
+
+  @override
+  Future<TimelineItem> switchMessageVersion(
+    ConnectionProfile profile,
+    String messageId,
+    int version,
+  ) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages/$messageId/version',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {'version': version},
+    );
+    return TimelineItem.fromJson(
+      (json['activated'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
     );
   }
 
@@ -547,9 +734,80 @@ class HttpPsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<ActivitySessionView?> getActiveActivity(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities');
+    try {
+      final json = await _requestJson(
+        method: 'GET',
+        uri: uri,
+        bearerToken: profile.token,
+      );
+      final raw = json['activeSession'];
+      if (raw is Map<String, dynamic>) {
+        return ActivitySessionView.fromJson(raw);
+      }
+      return null;
+    } on ApiException catch (e) {
+      if (e.isEndpointUnavailable) return null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> endCinemaActivity(
+    ConnectionProfile profile, {
+    String? sessionId,
+  }) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities/cinema/end',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {
+        if (sessionId != null && sessionId.isNotEmpty) 'sessionId': sessionId,
+        'reason': 'user_ended',
+      },
+    );
+  }
+
+  @override
+  Future<List<DrawerEntryView>> listDrawer(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/drawer');
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    final raw = json['items'];
+    if (raw is! List<dynamic>) return const <DrawerEntryView>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(DrawerEntryView.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<DrawerOpenedContent> openDrawerEntry(
+    ConnectionProfile profile,
+    String id,
+  ) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/drawer/$id/open');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const {'confirmed': true},
+    );
+    return DrawerOpenedContent.fromJson(json);
+  }
+
+  @override
   Stream<SseEventFrame> openEventStream(
     ConnectionProfile profile, {
     required bool foreground,
+    String? lastEventId,
   }) {
     late final StreamController<SseEventFrame> controller;
     HttpClient? client;
@@ -560,11 +818,18 @@ class HttpPsyberApiClient implements PsyberApiClient {
       onListen: () async {
         client = _clientFactory();
         try {
+          final query = <String, String>{
+            'foreground': foreground ? 'true' : 'false',
+            if (lastEventId != null && lastEventId.isNotEmpty) 'lastEventId': lastEventId,
+          };
           final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/stream')
-              .replace(queryParameters: {'foreground': foreground ? 'true' : 'false'});
+              .replace(queryParameters: query);
           final req = await client!.getUrl(uri);
           req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
           req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${profile.token}');
+          if (lastEventId != null && lastEventId.isNotEmpty) {
+            req.headers.set('Last-Event-ID', lastEventId);
+          }
           final res = await req.close();
           if (canceled) return;
           if (res.statusCode != 200) {

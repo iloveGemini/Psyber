@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 import '../models/models.dart';
 import '../network/api_client.dart';
@@ -22,6 +22,7 @@ class ActiveTurnState {
     this.thinking = '',
     this.text = '',
     this.latestExpression,
+    this.tools = const <ToolProgressItem>[],
   });
 
   final String turnId;
@@ -29,11 +30,13 @@ class ActiveTurnState {
   final String thinking;
   final String text;
   final ExpressionPayload? latestExpression;
+  final List<ToolProgressItem> tools;
 
   ActiveTurnState copyWith({
     String? thinking,
     String? text,
     ExpressionPayload? latestExpression,
+    List<ToolProgressItem>? tools,
   }) {
     return ActiveTurnState(
       turnId: turnId,
@@ -41,12 +44,13 @@ class ActiveTurnState {
       thinking: thinking ?? this.thinking,
       text: text ?? this.text,
       latestExpression: latestExpression ?? this.latestExpression,
+      tools: tools ?? this.tools,
     );
   }
 }
 
-/// Ring 1 客户端状态协调器：
-/// 按连接态、门状态、时间线、流式轮次、具身表达 5 个独立 ValueNotifier 隔离刷新，
+/// 客户端状态协调器：
+/// 按连接态、门状态、时间线、流式轮次、具身表达、设置与活跃活动独立隔离刷新，
 /// 避免高频 turn.text 触发整页重绘；切后台静默中止连接，回前台合并重连绝不弹红条。
 class AppController {
   AppController({
@@ -87,9 +91,21 @@ class AppController {
   final ValueNotifier<ExpressionPayload?> expressionNotifier =
       ValueNotifier<ExpressionPayload?>(null);
   final ValueNotifier<String?> turnErrorNotifier = ValueNotifier<String?>(null);
+  final ValueNotifier<SettingsSnapshot?> settingsNotifier =
+      ValueNotifier<SettingsSnapshot?>(null);
+  final ValueNotifier<ActivitySessionView?> activeActivityNotifier =
+      ValueNotifier<ActivitySessionView?>(null);
 
   /// NG-4：召回评测浮条默认关闭，仅在用户主动开启评测模式后呈现。
   final ValueNotifier<bool> recallEvalModeNotifier = ValueNotifier<bool>(false);
+
+  /// 外观日夜模式：默认跟随系统，支持随时手动切换。
+  final ValueNotifier<ThemeMode> themeModeNotifier =
+      ValueNotifier<ThemeMode>(ThemeMode.system);
+
+  void setThemeMode(ThemeMode mode) {
+    themeModeNotifier.value = mode;
+  }
 
   StreamSubscription<SseEventFrame>? _sseSub;
   Timer? _reconnectTimer;
@@ -98,7 +114,9 @@ class AppController {
   bool _isPaused = false;
   bool _disposed = false;
   bool _hasMoreHistory = false;
+  bool _hasLoadedOlder = false;
   String? _nextBeforeId;
+  String? _lastStreamSeq;
 
   bool get hasMoreHistory => _hasMoreHistory;
 
@@ -160,6 +178,31 @@ class AppController {
     if (_disposed) return;
     genesisNotifier.value = await _api.getGenesis(profile);
     await refreshSnapshot();
+    unawaited(loadSettings());
+  }
+
+  Future<SettingsSnapshot?> loadSettings() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    try {
+      final snap = await _api.getSettings(profile);
+      if (!_disposed) settingsNotifier.value = snap;
+      return snap;
+    } on ApiException {
+      return settingsNotifier.value;
+    } catch (_) {
+      return settingsNotifier.value;
+    }
+  }
+
+  Future<SettingsSnapshot?> patchSettings(Map<String, dynamic> patch) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    final snap = await _api.updateSettings(profile, patch);
+    if (_disposed) return snap;
+    settingsNotifier.value = snap;
+    turnErrorNotifier.value = null;
+    return snap;
   }
 
   Future<void> updateLlmSettings({
@@ -179,6 +222,18 @@ class AppController {
     );
     if (_disposed) return;
     turnErrorNotifier.value = null;
+    unawaited(loadSettings());
+  }
+
+  Future<void> revokeOtherDevice(String deviceId) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    final snap = await _api.updateSettings(profile, {
+      'revokeDeviceIds': [deviceId],
+    });
+    if (!_disposed) {
+      settingsNotifier.value = snap;
+    }
   }
 
   /// 断开当前连接并清除本地凭证，返回配对页。
@@ -202,9 +257,15 @@ class AppController {
     doorNotifier.value = DoorStatus.initial;
     activeTurnNotifier.value = null;
     turnErrorNotifier.value = null;
+    settingsNotifier.value = null;
+    activeActivityNotifier.value = null;
+    _hasLoadedOlder = false;
+    _hasMoreHistory = false;
+    _nextBeforeId = null;
+    _lastStreamSeq = null;
   }
 
-  /// 建连并按 Ring 1 契约拉取 /genesis、/chat/history 与 /door 补齐状态。
+  /// 建连并按契约拉取 /genesis、/chat/history、/door 与 /settings 补齐状态。
   Future<void> connectAndSync() async {
     final profile = profileNotifier.value;
     if (profile == null || _disposed || _isPaused) return;
@@ -230,6 +291,10 @@ class AppController {
       await refreshSnapshot();
       if (_disposed || _isPaused) return;
 
+      activeTurnNotifier.value = null;
+      unawaited(loadSettings());
+      unawaited(_refreshActivitySlot(profile));
+
       _reconnectAttempt = 0;
       _offlineHintTimer?.cancel();
       showReconnectingHintNotifier.value = false;
@@ -243,6 +308,17 @@ class AppController {
     }
   }
 
+  Future<void> _refreshActivitySlot(ConnectionProfile profile) async {
+    try {
+      final session = await _api.getActiveActivity(profile);
+      if (_disposed) return;
+      activeActivityNotifier.value =
+          (session != null && !session.isEnded) ? session : null;
+    } catch (_) {
+      // Ring 1 后端未挂载 /activities 或网络抖动时静默忽略
+    }
+  }
+
   Future<void> refreshSnapshot() async {
     final profile = profileNotifier.value;
     if (profile == null) return;
@@ -253,6 +329,16 @@ class AppController {
     if (_disposed) return;
     doorNotifier.value = results[0] as DoorStatus;
     final page = results[1] as HistoryPage;
+    if (_hasLoadedOlder && page.items.isNotEmpty) {
+      final latestMinSeq = page.items.first.seq;
+      final latestIds = page.items.map((e) => e.id).toSet();
+      final preservedOlder = timelineNotifier.value
+          .where((e) => e.seq < latestMinSeq && !latestIds.contains(e.id));
+      final merged = <TimelineItem>[...preservedOlder, ...page.items]
+        ..sort((a, b) => a.seq.compareTo(b.seq));
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(merged);
+      return;
+    }
     _hasMoreHistory = page.hasMore;
     _nextBeforeId = page.nextBefore;
     timelineNotifier.value = List<TimelineItem>.unmodifiable(page.items);
@@ -263,6 +349,7 @@ class AppController {
     if (profile == null || !_hasMoreHistory || _nextBeforeId == null) return;
     final page = await _api.getHistory(profile, beforeId: _nextBeforeId, limit: 50);
     if (_disposed) return;
+    _hasLoadedOlder = true;
     _hasMoreHistory = page.hasMore;
     _nextBeforeId = page.nextBefore;
     final existingIds = timelineNotifier.value.map((e) => e.id).toSet();
@@ -310,6 +397,27 @@ class AppController {
     return _api.listStickers(profile);
   }
 
+  Future<StickerView?> uploadSticker({
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+    required String id,
+    required String label,
+    String pack = 'default',
+  }) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.uploadSticker(
+      profile,
+      bytes: bytes,
+      filename: filename,
+      mimeType: mimeType,
+      id: id,
+      label: label,
+      pack: pack,
+    );
+  }
+
   Future<SendMessageResult?> sendMessage(
     String rawText, {
     List<String>? attachments,
@@ -352,11 +460,66 @@ class AppController {
     );
   }
 
+  Future<void> editMessage(String messageId, String newContent) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    final updated = await _api.editMessage(profile, messageId, newContent);
+    if (_disposed) return;
+    if (updated.id.isNotEmpty) {
+      _upsertTimelineItem(updated);
+    }
+    await refreshSnapshot();
+  }
+
+  Future<void> rerollMessage(String messageId) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    await _api.rerollMessage(profile, messageId);
+  }
+
+  Future<void> switchMessageVersion(String messageId, int version) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    final activated = await _api.switchMessageVersion(profile, messageId, version);
+    if (_disposed) return;
+    if (activated.id.isNotEmpty) {
+      _upsertTimelineItem(activated);
+    }
+  }
+
+  Future<void> endActiveCinema() async {
+    final profile = profileNotifier.value;
+    final session = activeActivityNotifier.value;
+    if (profile == null || session == null) return;
+    await _api.endCinemaActivity(profile, sessionId: session.id);
+    if (!_disposed) {
+      activeActivityNotifier.value = null;
+    }
+  }
+
+  Future<List<DrawerEntryView>> listDrawer() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return const <DrawerEntryView>[];
+    return _api.listDrawer(profile);
+  }
+
+  Future<DrawerOpenedContent?> openDrawerEntry(String id) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.openDrawerEntry(profile, id);
+  }
+
   Future<void> abortActiveTurn() async {
     final profile = profileNotifier.value;
     final active = activeTurnNotifier.value;
     if (profile == null || active == null) return;
-    await _api.abortTurn(profile, active.turnId);
+    activeTurnNotifier.value = null;
+    try {
+      await _api.abortTurn(profile, active.turnId);
+    } catch (_) {
+      // 容错忽略网络异常
+    }
+    unawaited(refreshSnapshot());
   }
 
   Future<List<RecallTraceItem>> loadTurnRecall(String turnId) async {
@@ -387,7 +550,13 @@ class AppController {
   }
 
   void _startSse(ConnectionProfile profile) {
-    _sseSub = _api.openEventStream(profile, foreground: true).listen(
+    _sseSub = _api
+        .openEventStream(
+          profile,
+          foreground: true,
+          lastEventId: _lastStreamSeq,
+        )
+        .listen(
       _handleSseFrame,
       onError: (Object err) {
         if (_disposed || _isPaused || err is CanceledException) return;
@@ -402,6 +571,9 @@ class AppController {
 
   void _handleSseFrame(SseEventFrame frame) {
     if (_disposed) return;
+    if (frame.id != null && frame.id!.isNotEmpty) {
+      _lastStreamSeq = frame.id;
+    }
     switch (frame.event) {
       case 'ping':
         return;
@@ -412,7 +584,8 @@ class AppController {
         }
         return;
       case 'message.updated':
-        if (frame.data['action'] == 'delete') {
+        final action = frame.data['action'] as String?;
+        if (action == 'delete') {
           final deletedId = frame.data['deletedId'] as String?;
           if (deletedId != null) {
             timelineNotifier.value = List<TimelineItem>.unmodifiable(
@@ -422,17 +595,38 @@ class AppController {
         } else {
           final rawMsg = frame.data['message'];
           if (rawMsg is Map<String, dynamic>) {
-            _upsertTimelineItem(TimelineItem.fromJson(rawMsg));
+            final item = TimelineItem.fromJson(rawMsg);
+            // 版本切换或编辑时替换同 groupId 的旧展示项
+            if (item.groupId != null) {
+              final list = List<TimelineItem>.from(timelineNotifier.value);
+              list.removeWhere(
+                (e) => e.groupId == item.groupId && e.role == item.role && e.id != item.id,
+              );
+              timelineNotifier.value = List<TimelineItem>.unmodifiable(list);
+            }
+            _upsertTimelineItem(item);
           }
         }
         return;
       case 'door.updated':
+        final nextState = DoorState.fromWire(frame.data['state'] as String?);
+        final rawUnread = frame.data['unreadDoorNotes'];
+        final nextUnread = rawUnread is num
+            ? rawUnread.toInt()
+            : (nextState == DoorState.open
+                ? 0
+                : doorNotifier.value.unreadDoorNotes);
         doorNotifier.value = doorNotifier.value.copyWith(
-          state: DoorState.fromWire(frame.data['state'] as String?),
+          state: nextState,
           note: frame.data['note'] as String?,
           clearNote: frame.data['note'] == null,
           updatedAt: (frame.data['updatedAt'] as num?)?.toInt() ??
               doorNotifier.value.updatedAt,
+          unreadDoorNotes: nextUnread,
+          coolingOffStartedAt:
+              (frame.data['coolingOffStartedAt'] as num?)?.toInt(),
+          departedAt: (frame.data['departedAt'] as num?)?.toInt(),
+          farewell: frame.data['farewell'] as String?,
         );
         return;
       case 'turn.start':
@@ -448,6 +642,22 @@ class AppController {
           activeTurnNotifier.value = current.copyWith(
             thinking: current.thinking + delta,
           );
+        }
+        return;
+      case 'turn.tool':
+        final current = activeTurnNotifier.value;
+        if (current != null) {
+          final tool = ToolProgressItem.fromJson(frame.data);
+          final nextTools = List<ToolProgressItem>.from(current.tools);
+          final idx = nextTools.indexWhere(
+            (t) => t.callId.isNotEmpty && t.callId == tool.callId,
+          );
+          if (idx >= 0) {
+            nextTools[idx] = tool;
+          } else {
+            nextTools.add(tool);
+          }
+          activeTurnNotifier.value = current.copyWith(tools: nextTools);
         }
         return;
       case 'turn.text':
@@ -475,6 +685,22 @@ class AppController {
       case 'turn.done':
         activeTurnNotifier.value = null;
         // 补齐最新落盘的助手消息与门状态（确保 recallCount 与持久化 ID 精确一致）
+        unawaited(refreshSnapshot());
+        return;
+      case 'activity.updated':
+        final rawSession = frame.data['session'];
+        if (rawSession is Map<String, dynamic>) {
+          final parsed = ActivitySessionView.fromJson(rawSession);
+          activeActivityNotifier.value = parsed.isEnded ? null : parsed;
+        } else {
+          activeActivityNotifier.value = null;
+        }
+        return;
+      case 'sync.reset':
+        final latestSeq = frame.data['latestStreamSeq'];
+        if (latestSeq != null) {
+          _lastStreamSeq = '$latestSeq';
+        }
         unawaited(refreshSnapshot());
         return;
     }
@@ -539,6 +765,9 @@ class AppController {
     activeTurnNotifier.dispose();
     expressionNotifier.dispose();
     turnErrorNotifier.dispose();
+    settingsNotifier.dispose();
+    activeActivityNotifier.dispose();
     recallEvalModeNotifier.dispose();
+    themeModeNotifier.dispose();
   }
 }

@@ -8,15 +8,19 @@ import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../expression/expression_renderer.dart';
 import '../../../shared/theme.dart';
-import 'widgets/recall_feedback_bar.dart';
-import 'widgets/thinking_card.dart';
+import '../activities/activity_banner_slot.dart' show ActivityBannerSlot;
+import '../settings/settings_panel.dart';
+import 'widgets/adaptive_composer.dart';
+import 'widgets/app_drawers.dart';
+import 'widgets/door_threshold_bar.dart';
+import 'widgets/sticker_picker_sheet.dart';
+import 'widgets/timeline_items.dart';
 
-/// Ring 1 主聊天页：
-/// - 仅在 paused/hidden 切后台时静默中止 SSE、回前台合并重连不弹红条（桌面失焦 inactive 不断流）
-/// - 门状态顶栏与门缝纸条输入框自适应切换（含发图上传与贴纸面板）
-/// - ListView.builder 虚拟化时间线 + 顶部按需分页加载 + 独立流式轮次槽（防整页高频重绘）
-/// - 基础 ExpressionRenderer（色温光罩 + 触觉 + 气泡微动效 + 贴纸/附件图片渲染）
-/// - 默认关闭、按需开启的召回标注浮条
+/// 主聊天室页面：
+/// - 门楣顶栏（实时门态、门牌便签展开、活动胶囊与设置入口）
+/// - Ring 1.5 活动伴看浮栏槽（日常零占位）
+/// - 居中窄阅读列（680px）+ 悬停/长按消息菜单 + 局部流式轮次槽 + 回到底部胶囊
+/// - 宽屏（>= 920px）右侧滑出设置栏，窄屏推入独立设置页
 class ChatPage extends StatefulWidget {
   const ChatPage({
     super.key,
@@ -31,26 +35,34 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _PendingAttachment {
-  const _PendingAttachment({required this.hash, required this.filename});
-
-  final String hash;
-  final String filename;
-}
-
 class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
-  final List<_PendingAttachment> _pendingAttachments = <_PendingAttachment>[];
+  final List<PendingAttachment> _pendingAttachments = <PendingAttachment>[];
+
   bool _sending = false;
   bool _uploadingImage = false;
   bool _loadingOlder = false;
+  bool _showDesktopSettings = false;
+  bool _showScrollToBottom = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.controller.expressionNotifier.addListener(_onExpression);
+    _scrollController.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final distFromBottom =
+        _scrollController.position.maxScrollExtent - _scrollController.offset;
+    final shouldShow = distFromBottom > 240;
+    if (shouldShow != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = shouldShow);
+    }
   }
 
   void _onExpression() {
@@ -74,6 +86,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.expressionNotifier.removeListener(_onExpression);
+    _scrollController.removeListener(_onScroll);
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -84,7 +97,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if ((text.isEmpty && _pendingAttachments.isEmpty) || _sending) return;
     setState(() => _sending = true);
     try {
-      final attachmentHashes = _pendingAttachments.map((a) => a.hash).toList(growable: false);
+      final attachmentHashes =
+          _pendingAttachments.map((a) => a.hash).toList(growable: false);
       await widget.controller.sendMessage(
         text,
         attachments: attachmentHashes.isEmpty ? null : attachmentHashes,
@@ -118,7 +132,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       if (uploaded == null || !mounted) return;
       setState(() {
         _pendingAttachments.add(
-          _PendingAttachment(hash: uploaded.hash, filename: picked.filename),
+          PendingAttachment(
+            hash: uploaded.hash,
+            filename: picked.filename,
+            bytes: picked.bytes,
+          ),
         );
       });
     } on ApiException catch (e) {
@@ -150,75 +168,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     unawaited(
       showDialog<void>(
         context: context,
-        builder: (ctx) => Dialog(
-          backgroundColor: PsyberTheme.paperCard,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: PsyberTheme.hairline),
-          ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          '选择贴纸',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: () => Navigator.of(ctx).pop(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  FutureBuilder<List<StickerView>>(
-                    future: stickersFuture,
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState != ConnectionState.done) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 16),
-                          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                        );
-                      }
-                      final items = snapshot.data ?? const <StickerView>[];
-                      if (items.isEmpty) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 12),
-                          child: Text(
-                            '暂无可用贴纸，可将图片放入数据目录的 stickers/ 文件夹后重启同步。',
-                            style: TextStyle(fontSize: 13, color: PsyberTheme.inkMuted),
-                          ),
-                        );
-                      }
-                      return Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final sticker in items)
-                            ActionChip(
-                              key: Key('sticker_option_${sticker.id}'),
-                              label: Text(sticker.label),
-                              onPressed: () {
-                                Navigator.of(ctx).pop();
-                                unawaited(_sendSticker(sticker));
-                              },
-                            ),
-                        ],
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
+        builder: (ctx) => StickerPickerDialog(
+          stickersFuture: stickersFuture,
+          profile: widget.controller.profileNotifier.value,
+          onSelect: (sticker) => unawaited(_sendSticker(sticker)),
         ),
       ),
     );
@@ -247,732 +200,365 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     });
   }
 
-  void _openModelConfigDialog() {
-    final baseUrlCtrl = TextEditingController();
-    final modelCtrl = TextEditingController();
-    final apiKeyCtrl = TextEditingController();
-    var providerKind = 'openai-compat';
-    String? errText;
-    var saving = false;
-
-    unawaited(
-      showDialog<void>(
-        context: context,
-        builder: (ctx) => StatefulBuilder(
-          builder: (ctx, setDialogState) => Dialog(
-            backgroundColor: PsyberTheme.paperCard,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: PsyberTheme.hairline),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      '配置模型与 API Key',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '保存后立即热生效，无需重启后端',
-                      style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkMuted),
-                    ),
-                    const SizedBox(height: 14),
-                    DropdownButtonFormField<String>(
-                      initialValue: providerKind,
-                      decoration: const InputDecoration(
-                        labelText: '模型服务商',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: const [
-                        DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                        DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
-                        DropdownMenuItem(value: 'google', child: Text('Google')),
-                        DropdownMenuItem(
-                          value: 'openai-compat',
-                          child: Text('OpenAI 兼容接口（自定义地址）'),
-                        ),
-                      ],
-                      onChanged: (v) {
-                        if (v != null) setDialogState(() => providerKind = v);
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: baseUrlCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '自定义接口地址 Base URL（兼容接口必填）',
-                        hintText: '例如 https://api.example.com/v1',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: modelCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '主对话模型 ID',
-                        hintText: '例如 gpt-4o / deepseek-chat',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: apiKeyCtrl,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: 'API Key（写入 0600 凭证文件）',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    if (errText != null) ...[
-                      const SizedBox(height: 10),
-                      Text(errText!, style: const TextStyle(color: Color(0xFFB34A3C), fontSize: 12.5)),
-                    ],
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: saving ? null : () => Navigator.of(ctx).pop(),
-                          child: const Text('取消'),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton(
-                          onPressed: saving
-                              ? null
-                              : () async {
-                                  final model = modelCtrl.text.trim();
-                                  final baseUrl = baseUrlCtrl.text.trim();
-                                  if (model.isEmpty) {
-                                    setDialogState(() => errText = '请填写模型 ID');
-                                    return;
-                                  }
-                                  if (providerKind == 'openai-compat' && baseUrl.isEmpty) {
-                                    setDialogState(() => errText = '兼容接口请填写自定义 Base URL');
-                                    return;
-                                  }
-                                  setDialogState(() {
-                                    saving = true;
-                                    errText = null;
-                                  });
-                                  try {
-                                    await widget.controller.updateLlmSettings(
-                                      providerKind: providerKind,
-                                      modelName: model,
-                                      baseUrl: baseUrl.isEmpty ? null : baseUrl,
-                                      apiKey: apiKeyCtrl.text.trim(),
-                                    );
-                                    if (ctx.mounted) Navigator.of(ctx).pop();
-                                  } on ApiException catch (e) {
-                                    setDialogState(() {
-                                      errText = e.message;
-                                      saving = false;
-                                    });
-                                  } catch (_) {
-                                    setDialogState(() {
-                                      errText = '保存失败，请检查网络连接';
-                                      saving = false;
-                                    });
-                                  }
-                                },
-                          child: const Text('保存'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ).whenComplete(() {
-        baseUrlCtrl.dispose();
-        modelCtrl.dispose();
-        apiKeyCtrl.dispose();
-      }),
-    );
-  }
-
-  void _openSettingsSheet() {
-    unawaited(
-      showDialog<void>(
-        context: context,
-        builder: (ctx) => Dialog(
-          backgroundColor: PsyberTheme.paperCard,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: PsyberTheme.hairline),
-          ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 440),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          '客户端设置',
-                          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: () => Navigator.of(ctx).pop(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    key: const Key('open_model_config_tile'),
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.key_outlined),
-                    title: const Text('配置模型与 API Key'),
-                    subtitle: const Text('支持自定义 Base URL 与 OpenAI 兼容接口，保存后热生效'),
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      _openModelConfigDialog();
-                    },
-                  ),
-                  const Divider(),
-                  ValueListenableBuilder<bool>(
-                    valueListenable: widget.controller.recallEvalModeNotifier,
-                    builder: (context, enabled, _) => SwitchListTile(
-                      key: const Key('recall_eval_switch'),
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('召回评测模式'),
-                      subtitle: const Text('开启后在助手回复下方显示「想起 N 张卡」标注入口'),
-                      value: enabled,
-                      onChanged: widget.controller.toggleRecallEvalMode,
-                    ),
-                  ),
-                  const Divider(),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.link_off),
-                    title: const Text('断开连接并重新配对'),
-                    onTap: () async {
-                      Navigator.of(ctx).pop();
-                      await widget.controller.disconnect();
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: ValueListenableBuilder<DoorStatus>(
-          valueListenable: widget.controller.doorNotifier,
-          builder: (context, door, _) => Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Psyber', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-                  const SizedBox(width: 8),
-                  _DoorBadge(door: door),
-                ],
-              ),
-              if (door.note != null && door.note!.trim().isNotEmpty)
-                Text(
-                  door.note!,
-                  style: const TextStyle(fontSize: 12, color: PsyberTheme.inkMuted),
-                  overflow: TextOverflow.ellipsis,
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          ValueListenableBuilder<bool>(
-            valueListenable: widget.controller.showReconnectingHintNotifier,
-            builder: (context, showHint, _) {
-              if (!showHint) return const SizedBox.shrink();
-              return const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8),
-                child: Center(
-                  child: Text(
-                    '正在重新连接…',
-                    key: Key('gentle_reconnecting_hint'),
-                    style: TextStyle(fontSize: 12, color: PsyberTheme.inkMuted),
-                  ),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            key: const Key('settings_button'),
-            tooltip: '设置',
-            icon: const Icon(Icons.tune),
-            onPressed: _openSettingsSheet,
-          ),
-        ],
-      ),
-      body: ValueListenableBuilder<ExpressionPayload?>(
-        valueListenable: widget.controller.expressionNotifier,
-        builder: (context, expr, child) => AtmosphereOverlay(
-          atmosphere: expr?.atmosphere,
-          child: child!,
-        ),
-        child: Column(
-          children: [
-            ValueListenableBuilder<String?>(
-              valueListenable: widget.controller.turnErrorNotifier,
-              builder: (context, err, _) {
-                if (err == null || err.isEmpty) return const SizedBox.shrink();
-                return Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  color: const Color(0xFFF6E7E2),
-                  child: Text(
-                    err,
-                    key: const Key('turn_error_banner'),
-                    style: const TextStyle(fontSize: 13, color: Color(0xFF7D362B)),
-                  ),
-                );
-              },
-            ),
-            Expanded(
-              child: ValueListenableBuilder<List<TimelineItem>>(
-                valueListenable: widget.controller.timelineNotifier,
-                builder: (context, items, _) {
-                  final hasMore = widget.controller.hasMoreHistory;
-                  final headerCount = hasMore ? 1 : 0;
-                  return ValueListenableBuilder<bool>(
-                    valueListenable: widget.controller.recallEvalModeNotifier,
-                    builder: (context, evalEnabled, _) {
-                      return ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        itemCount: headerCount + items.length + 1,
-                        itemBuilder: (context, index) {
-                          if (hasMore && index == 0) {
-                            return Center(
-                              child: TextButton(
-                                key: const Key('load_older_history_button'),
-                                onPressed: _loadingOlder ? null : _loadOlder,
-                                child: Text(_loadingOlder ? '加载中…' : '加载更早消息'),
-                              ),
-                            );
-                          }
-                          final msgIndex = index - headerCount;
-                          if (msgIndex == items.length) {
-                            // 流式回复槽独立监听，避免高频 turn.text 触发历史列表重绘
-                            return ValueListenableBuilder<ActiveTurnState?>(
-                              valueListenable: widget.controller.activeTurnNotifier,
-                              builder: (context, active, _) {
-                                if (active == null) return const SizedBox.shrink();
-                                return _StreamingAssistantBubble(
-                                  active: active,
-                                  onAbort: widget.controller.abortActiveTurn,
-                                );
-                              },
-                            );
-                          }
-                          final item = items[msgIndex];
-                          return _MessageBubble(
-                            item: item,
-                            controller: widget.controller,
-                            showRecallBar: evalEnabled,
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-            ValueListenableBuilder<DoorStatus>(
-              valueListenable: widget.controller.doorNotifier,
-              builder: (context, door, _) => _AdaptiveComposer(
-                door: door,
-                controller: _inputController,
-                pendingAttachments: _pendingAttachments,
-                uploadingImage: _uploadingImage,
-                sending: _sending,
-                onPickImage: _pickAndUploadImage,
-                onOpenStickers: _openStickerSheet,
-                onRemoveAttachment: (idx) {
-                  setState(() => _pendingAttachments.removeAt(idx));
-                },
-                onSend: _send,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DoorBadge extends StatelessWidget {
-  const _DoorBadge({required this.door});
-
-  final DoorStatus door;
-
-  @override
-  Widget build(BuildContext context) {
-    final label = switch (door.state) {
-      DoorState.open => '门开着',
-      DoorState.quiet => '想静一静',
-      DoorState.closed => '门关着',
-      DoorState.coolingOff => '冷静中',
-      DoorState.departed => '已离开',
-    };
-    return Container(
-      key: const Key('door_state_badge'),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: door.state.isDoorNoteMode ? PsyberTheme.doorNotePaper : PsyberTheme.paperCard,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: PsyberTheme.hairline),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(fontSize: 11.5, color: PsyberTheme.inkMuted),
-      ),
-    );
-  }
-}
-
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({
-    required this.item,
-    required this.controller,
-    required this.showRecallBar,
-  });
-
-  final TimelineItem item;
-  final AppController controller;
-  final bool showRecallBar;
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = item.isUser;
-    final profile = controller.profileNotifier.value;
-    final bgColor = item.isDoorNote
-        ? PsyberTheme.doorNotePaper
-        : isUser
-            ? PsyberTheme.userBubble
-            : PsyberTheme.paperCard;
-
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: PsyberTheme.hairline),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (item.isDoorNote)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 4),
-                  child: Text(
-                    '门缝纸条',
-                    style: TextStyle(fontSize: 11, color: PsyberTheme.inkMuted),
-                  ),
-                ),
-              if (item.isAssistant && (item.thinking?.isNotEmpty ?? false))
-                ThinkingCard(thinking: item.thinking!, isStreaming: false),
-              if (item.sticker != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: profile != null && item.sticker!.url.isNotEmpty
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.network(
-                            profile.resolveMediaUrl(item.sticker!.url),
-                            headers: {'Authorization': 'Bearer ${profile.token}'},
-                            width: 96,
-                            height: 96,
-                            fit: BoxFit.contain,
-                            errorBuilder: (_, __, ___) => Text(
-                              '[贴纸：${item.sticker!.label}]',
-                              style: const TextStyle(fontSize: 13, color: PsyberTheme.accentWarm),
-                            ),
-                          ),
-                        )
-                      : Text(
-                          '[贴纸：${item.sticker!.label}]',
-                          style: const TextStyle(fontSize: 13, color: PsyberTheme.accentWarm),
-                        ),
-                ),
-              if (item.attachments.isNotEmpty && profile != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final hash in item.attachments)
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.network(
-                            profile.resolveMediaUrl('/api/v1/media/$hash'),
-                            headers: {'Authorization': 'Bearer ${profile.token}'},
-                            width: 140,
-                            height: 140,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              width: 100,
-                              height: 60,
-                              color: PsyberTheme.paperCanvas,
-                              alignment: Alignment.center,
-                              child: const Text('图片已过期', style: TextStyle(fontSize: 11)),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              if (item.content.isNotEmpty)
-                SelectableText(
-                  item.content,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    height: 1.5,
-                    color: PsyberTheme.inkPrimary,
-                  ),
-                ),
-              if (showRecallBar &&
-                  item.isAssistant &&
-                  item.turnId != null &&
-                  (item.recallCount ?? 0) > 0)
-                RecallFeedbackBar(
-                  controller: controller,
-                  turnId: item.turnId!,
-                  recallCount: item.recallCount!,
-                ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: IconButton(
-                  key: Key('delete_msg_${item.id}'),
-                  icon: const Icon(Icons.delete_outline, size: 15, color: PsyberTheme.inkMuted),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                  tooltip: '删除消息',
-                  onPressed: () => unawaited(controller.deleteMessage(item.id)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StreamingAssistantBubble extends StatelessWidget {
-  const _StreamingAssistantBubble({
-    required this.active,
-    required this.onAbort,
-  });
-
-  final ActiveTurnState active;
-  final Future<void> Function() onAbort;
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: MotionBubbleWrapper(
-          motion: active.latestExpression?.motion,
-          child: Container(
-            key: const Key('streaming_bubble'),
-            margin: const EdgeInsets.symmetric(vertical: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: PsyberTheme.paperCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: PsyberTheme.hairline),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (active.thinking.isNotEmpty)
-                  ThinkingCard(thinking: active.thinking, isStreaming: true),
-                if (active.text.isNotEmpty)
-                  Text(
-                    active.text,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      height: 1.5,
-                      color: PsyberTheme.inkPrimary,
-                    ),
-                  )
-                else
-                  const Text(
-                    '…',
-                    style: TextStyle(color: PsyberTheme.inkMuted),
-                  ),
-                const SizedBox(height: 6),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton.icon(
-                    key: const Key('abort_turn_button'),
-                    onPressed: () => unawaited(onAbort()),
-                    icon: const Icon(Icons.stop_circle_outlined, size: 16),
-                    label: const Text('停止生成', style: TextStyle(fontSize: 12)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AdaptiveComposer extends StatelessWidget {
-  const _AdaptiveComposer({
-    required this.door,
-    required this.controller,
-    required this.pendingAttachments,
-    required this.uploadingImage,
-    required this.sending,
-    required this.onPickImage,
-    required this.onOpenStickers,
-    required this.onRemoveAttachment,
-    required this.onSend,
-  });
-
-  final DoorStatus door;
-  final TextEditingController controller;
-  final List<_PendingAttachment> pendingAttachments;
-  final bool uploadingImage;
-  final bool sending;
-  final VoidCallback onPickImage;
-  final VoidCallback onOpenStickers;
-  final void Function(int index) onRemoveAttachment;
-  final VoidCallback onSend;
-
-  @override
-  Widget build(BuildContext context) {
-    if (door.state.isReadOnly) {
-      return Container(
-        key: const Key('departed_readonly_banner'),
-        width: double.infinity,
-        padding: const EdgeInsets.all(16),
-        decoration: const BoxDecoration(
-          color: PsyberTheme.paperCard,
-          border: Border(top: BorderSide(color: PsyberTheme.hairline)),
-        ),
-        child: const Text(
-          '这段陪伴已停留在纪念只读状态',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: PsyberTheme.inkMuted, fontSize: 13),
-        ),
-      );
+  void _toggleSettings() {
+    final wide = MediaQuery.sizeOf(context).width >= PsyberTheme.desktopBreakpoint;
+    if (wide) {
+      setState(() => _showDesktopSettings = !_showDesktopSettings);
+      return;
     }
-
-    final isDoorNote = door.state.isDoorNoteMode;
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-        decoration: BoxDecoration(
-          color: isDoorNote ? PsyberTheme.doorNotePaper : PsyberTheme.paperCard,
-          border: const Border(top: BorderSide(color: PsyberTheme.hairline)),
+    unawaited(
+      Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => SettingsPage(
+            controller: widget.controller,
+            imagePicker: widget.imagePicker,
+          ),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (pendingAttachments.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (var i = 0; i < pendingAttachments.length; i++)
-                      InputChip(
-                        key: Key('pending_attachment_$i'),
-                        avatar: const Icon(Icons.image_outlined, size: 16),
-                        label: Text(
-                          pendingAttachments[i].filename,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        onDeleted: () => onRemoveAttachment(i),
-                      ),
-                  ],
-                ),
-              ),
-            Row(
+      ),
+    );
+  }
+
+  bool _shouldShowDateDivider(List<TimelineItem> items, int index) {
+    if (index == 0) return items[0].createdAt > 0;
+    final prev = items[index - 1].createdAt;
+    final curr = items[index].createdAt;
+    if (prev <= 0 || curr <= 0) return false;
+    final prevDt = DateTime.fromMillisecondsSinceEpoch(prev).toLocal();
+    final currDt = DateTime.fromMillisecondsSinceEpoch(curr).toLocal();
+    if (prevDt.year != currDt.year ||
+        prevDt.month != currDt.month ||
+        prevDt.day != currDt.day) {
+      return true;
+    }
+    return curr - prev >= 30 * 60 * 1000;
+  }
+
+  String? _findLatestUserMessageId(List<TimelineItem> items) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      if (items[i].isUser) return items[i].id;
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final isWide = MediaQuery.sizeOf(context).width >= PsyberTheme.desktopBreakpoint;
+
+    return Scaffold(
+      key: _scaffoldKey,
+      drawer: LeftArchiveDrawer(
+        controller: widget.controller,
+        onOpenSettings: _toggleSettings,
+        imagePicker: widget.imagePicker,
+      ),
+      endDrawer: RightActivityDrawer(
+        controller: widget.controller,
+      ),
+      body: Row(
+        children: [
+          Expanded(
+            child: Column(
               children: [
-                IconButton(
-                  key: const Key('pick_image_button'),
-                  tooltip: '选择图片',
-                  onPressed: (sending || uploadingImage) ? null : onPickImage,
-                  icon: uploadingImage
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.image_outlined, color: PsyberTheme.inkMuted),
-                ),
-                IconButton(
-                  key: const Key('open_stickers_button'),
-                  tooltip: '发送贴纸',
-                  onPressed: sending ? null : onOpenStickers,
-                  icon: const Icon(
-                    Icons.emoji_emotions_outlined,
-                    color: PsyberTheme.inkMuted,
+                ValueListenableBuilder<DoorStatus>(
+                  valueListenable: widget.controller.doorNotifier,
+                  builder: (context, door, _) => ValueListenableBuilder<bool>(
+                    valueListenable: widget.controller.showReconnectingHintNotifier,
+                    builder: (context, showHint, _) =>
+                        ValueListenableBuilder<SettingsSnapshot?>(
+                      valueListenable: widget.controller.settingsNotifier,
+                      builder: (context, settings, _) =>
+                          ValueListenableBuilder<ActivitySessionView?>(
+                        valueListenable: widget.controller.activeActivityNotifier,
+                        builder: (context, activity, _) => DoorThresholdBar(
+                          door: door,
+                          showReconnectingHint: showHint,
+                          settings: settings,
+                          activeActivity: activity,
+                          onOpenLeftDrawer: () => _scaffoldKey.currentState?.openDrawer(),
+                          onOpenRightDrawer: () => _scaffoldKey.currentState?.openEndDrawer(),
+                          onOpenSettings: _toggleSettings,
+                        ),
+                      ),
+                    ),
                   ),
+                ),
+                ValueListenableBuilder<ActivitySessionView?>(
+                  valueListenable: widget.controller.activeActivityNotifier,
+                  builder: (context, activity, _) {
+                    if (activity == null) return const SizedBox.shrink();
+                    return ActivityBannerSlot(
+                      session: activity,
+                      profile: widget.controller.profileNotifier.value,
+                      onEndActivity: widget.controller.endActiveCinema,
+                    );
+                  },
                 ),
                 Expanded(
-                  child: TextField(
-                    key: const Key('chat_input_field'),
-                    controller: controller,
-                    minLines: 1,
-                    maxLines: 4,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => onSend(),
-                    decoration: InputDecoration(
-                      hintText: isDoorNote ? '从门缝塞一张纸条（不会打扰对方）…' : '说点什么…',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: PsyberTheme.hairline),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      isDense: true,
+                  child: ValueListenableBuilder<ExpressionPayload?>(
+                    valueListenable: widget.controller.expressionNotifier,
+                    builder: (context, expr, child) => AtmosphereOverlay(
+                      atmosphere: expr?.atmosphere,
+                      child: child!,
+                    ),
+                    child: Column(
+                      children: [
+                        ValueListenableBuilder<String?>(
+                          valueListenable: widget.controller.turnErrorNotifier,
+                          builder: (context, err, _) {
+                            if (err == null || err.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            return Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 9,
+                              ),
+                              color: PsyberTheme.dangerSoft,
+                              child: Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: PsyberTheme.readingMaxWidth,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          err,
+                                          key: const Key('turn_error_banner'),
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            color: PsyberTheme.dangerInk,
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.close,
+                                          size: 16,
+                                          color: PsyberTheme.dangerInk,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 24,
+                                          minHeight: 24,
+                                        ),
+                                        onPressed: () =>
+                                            widget.controller.turnErrorNotifier.value = null,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        Expanded(
+                          child: Stack(
+                            children: [
+                              ValueListenableBuilder<List<TimelineItem>>(
+                                valueListenable: widget.controller.timelineNotifier,
+                                builder: (context, items, _) {
+                                  final hasMore = widget.controller.hasMoreHistory;
+                                  final headerCount = hasMore ? 1 : 0;
+                                  final latestUserId = _findLatestUserMessageId(items);
+                                  return ValueListenableBuilder<bool>(
+                                    valueListenable: widget.controller.recallEvalModeNotifier,
+                                    builder: (context, evalEnabled, _) {
+                                      return ValueListenableBuilder<DoorStatus>(
+                                        valueListenable: widget.controller.doorNotifier,
+                                        builder: (context, door, _) {
+                                          return ListView.builder(
+                                            controller: _scrollController,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 14,
+                                            ),
+                                            itemCount: headerCount + items.length + 1,
+                                            itemBuilder: (context, index) {
+                                              if (hasMore && index == 0) {
+                                                return Center(
+                                                  child: TextButton(
+                                                    key: const Key('load_older_history_button'),
+                                                    onPressed: _loadingOlder ? null : _loadOlder,
+                                                    child: Text(
+                                                      _loadingOlder ? '加载中…' : '加载更早消息',
+                                                    ),
+                                                  ),
+                                                );
+                                              }
+                                              final msgIndex = index - headerCount;
+                                              if (msgIndex == items.length) {
+                                                return ValueListenableBuilder<ActiveTurnState?>(
+                                                  valueListenable:
+                                                      widget.controller.activeTurnNotifier,
+                                                  builder: (context, active, _) {
+                                                    if (active == null) {
+                                                      if (items.isEmpty) {
+                                                        return Padding(
+                                                          padding: const EdgeInsets.only(top: 96),
+                                                          child: _EmptyRoomState(door: door),
+                                                        );
+                                                      }
+                                                      return const SizedBox.shrink();
+                                                    }
+                                                    return StreamingAssistantBubble(
+                                                      active: active,
+                                                      onAbort: widget.controller.abortActiveTurn,
+                                                    );
+                                                  },
+                                                );
+                                              }
+                                              final item = items[msgIndex];
+                                              final showDivider =
+                                                  _shouldShowDateDivider(items, msgIndex);
+
+                                              Widget entry;
+                                              if (item.isMemoryTask) {
+                                                entry = MemoryTaskRow(item: item);
+                                              } else if (item.isSystemNotice) {
+                                                entry = SystemNoticeRow(item: item);
+                                              } else {
+                                                entry = MessageBubbleRow(
+                                                  item: item,
+                                                  controller: widget.controller,
+                                                  showRecallBar: evalEnabled,
+                                                  isLatestUserMessage: item.id == latestUserId,
+                                                  doorState: door.state,
+                                                );
+                                              }
+
+                                              if (!showDivider) return entry;
+                                              return Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  TimelineDateDivider(epochMs: item.createdAt),
+                                                  entry,
+                                                ],
+                                              );
+                                            },
+                                          );
+                                        },
+                                      );
+                                    },
+                                  );
+                                },
+                              ),
+                              if (_showScrollToBottom)
+                                Positioned(
+                                  right: 20,
+                                  bottom: 14,
+                                  child: Material(
+                                    color: colors.letterSurface,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
+                                      side: BorderSide(color: colors.hairline),
+                                    ),
+                                    child: InkWell(
+                                      key: const Key('scroll_to_bottom_button'),
+                                      borderRadius: BorderRadius.circular(18),
+                                      onTap: _scrollToBottom,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 6,
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              Icons.arrow_downward,
+                                              size: 14,
+                                              color: colors.inkDeep,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              '回到底部',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                                color: colors.inkDeep,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        ValueListenableBuilder<DoorStatus>(
+                          valueListenable: widget.controller.doorNotifier,
+                          builder: (context, door, _) => AdaptiveComposer(
+                            door: door,
+                            controller: _inputController,
+                            pendingAttachments: _pendingAttachments,
+                            uploadingImage: _uploadingImage,
+                            sending: _sending,
+                            onPickImage: _pickAndUploadImage,
+                            onOpenStickers: _openStickerSheet,
+                            onRemoveAttachment: (idx) {
+                              setState(() => _pendingAttachments.removeAt(idx));
+                            },
+                            onSend: _send,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  key: const Key('chat_send_button'),
-                  onPressed: sending ? null : onSend,
-                  child: Text(isDoorNote ? '塞纸条' : '发送'),
-                ),
               ],
+            ),
+          ),
+          if (isWide && _showDesktopSettings)
+            Container(
+              width: 372,
+              decoration: BoxDecoration(
+                color: colors.mineralCanvas,
+                border: Border(left: BorderSide(color: colors.hairline)),
+              ),
+              child: SettingsPanelContent(
+                controller: widget.controller,
+                imagePicker: widget.imagePicker,
+                onClose: () => setState(() => _showDesktopSettings = false),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyRoomState extends StatelessWidget {
+  const _EmptyRoomState({required this.door});
+
+  final DoorStatus door;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              door.state.isDoorNoteMode ? '门关着，屋里安静得很。' : '门刚推开，屋里还没落笔。',
+              style: PsyberTheme.editorialSerif.copyWith(
+                fontSize: 17,
+                color: PsyberTheme.inkQuiet,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              door.state.isDoorNoteMode
+                  ? '可以在下方塞一张纸条，等对方想看的时候再看。'
+                  : '随便打个招呼，或者先送一张贴纸开始认识。',
+              style: const TextStyle(fontSize: 13, color: PsyberTheme.inkFaint),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
