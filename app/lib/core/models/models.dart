@@ -214,17 +214,23 @@ class StickerView {
     required this.id,
     required this.label,
     required this.url,
+    this.pack = 'default',
+    this.useCount = 0,
   });
 
   final String id;
   final String label;
   final String url;
+  final String pack;
+  final int useCount;
 
   factory StickerView.fromJson(Map<String, dynamic> json) {
     return StickerView(
       id: json['id'] as String? ?? '',
       label: json['label'] as String? ?? '',
       url: json['url'] as String? ?? '',
+      pack: json['pack'] as String? ?? 'default',
+      useCount: (json['useCount'] as num?)?.toInt() ?? 0,
     );
   }
 }

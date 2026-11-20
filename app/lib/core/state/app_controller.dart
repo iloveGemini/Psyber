@@ -275,14 +275,24 @@ class AppController {
     );
   }
 
+  Future<List<StickerView>> loadStickers() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return const <StickerView>[];
+    return _api.listStickers(profile);
+  }
+
   Future<SendMessageResult?> sendMessage(
     String rawText, {
     List<String>? attachments,
+    String? stickerId,
   }) async {
     final profile = profileNotifier.value;
     final text = rawText.trim();
     final hasAttachments = attachments != null && attachments.isNotEmpty;
-    if (profile == null || (text.isEmpty && !hasAttachments)) return null;
+    final hasSticker = stickerId != null && stickerId.trim().isNotEmpty;
+    if (profile == null || (text.isEmpty && !hasAttachments && !hasSticker)) {
+      return null;
+    }
 
     turnErrorNotifier.value = null;
     final clientMessageId = _generateClientMessageId();
@@ -291,6 +301,7 @@ class AppController {
       clientMessageId: clientMessageId,
       content: text,
       attachments: attachments,
+      stickerId: hasSticker ? stickerId.trim() : null,
     );
     if (_disposed) return res;
     _upsertTimelineItem(res.message);

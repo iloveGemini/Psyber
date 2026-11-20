@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:psyber_app/core/media/image_picker.dart';
 import 'package:psyber_app/core/models/models.dart';
 import 'package:psyber_app/core/network/api_client.dart';
 import 'package:psyber_app/core/state/app_controller.dart';
@@ -12,6 +13,9 @@ class FakePsyberApiClient implements PsyberApiClient {
   GenesisStatus genesis = GenesisStatus.completedDefault;
   DoorStatus door = DoorStatus.initial;
   List<TimelineItem> history = <TimelineItem>[];
+  List<StickerView> stickers = <StickerView>[];
+  final List<Map<String, Object?>> sentPayloads = <Map<String, Object?>>[];
+  int mediaUploadCount = 0;
   final Map<String, List<RecallTraceItem>> recallByTurn =
       <String, List<RecallTraceItem>>{};
   final List<Map<String, Object?>> feedbackSubmitted = <Map<String, Object?>>[];
@@ -113,12 +117,18 @@ class FakePsyberApiClient implements PsyberApiClient {
     required String filename,
     required String mimeType,
   }) async {
+    mediaUploadCount += 1;
     return UploadedMedia(
       hash: 'a' * 64,
       url: '/api/v1/media/${'a' * 64}',
       mimeType: mimeType,
       size: bytes.length,
     );
+  }
+
+  @override
+  Future<List<StickerView>> listStickers(ConnectionProfile profile) async {
+    return List<StickerView>.from(stickers);
   }
 
   @override
@@ -129,8 +139,22 @@ class FakePsyberApiClient implements PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
   }) async {
+    sentPayloads.add({
+      'content': content,
+      'attachments': attachments,
+      'stickerId': stickerId,
+    });
     final isClosed = door.state.isDoorNoteMode;
     final nextSeq = (history.isEmpty ? 0 : history.last.seq) + 1;
+    StickerView? matchedSticker;
+    if (stickerId != null) {
+      for (final s in stickers) {
+        if (s.id == stickerId) {
+          matchedSticker = s;
+          break;
+        }
+      }
+    }
     final msg = TimelineItem(
       id: 'ev_$nextSeq',
       seq: nextSeq,
@@ -140,6 +164,8 @@ class FakePsyberApiClient implements PsyberApiClient {
       role: 'user',
       kind: isClosed ? 'door_note' : 'chat',
       content: content,
+      attachments: attachments ?? const <String>[],
+      sticker: matchedSticker,
       createdAt: 1795046400000 + nextSeq * 1000,
     );
     history.add(msg);
@@ -380,5 +406,61 @@ void main() {
     expect(api.streamOpenCount, greaterThan(prevStreamCount));
     expect(api.historyFetchCount, greaterThan(prevHistoryCount));
     expect(controller.turnErrorNotifier.value, isNull);
+  });
+
+  testWidgets('发图上传预览并发送纯图消息，以及打开贴纸面板发送贴纸', (tester) async {
+    final api = FakePsyberApiClient()
+      ..stickers = const [
+        StickerView(id: 'hug', label: '抱抱', url: ''),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(
+      PsyberApp(
+        controller: controller,
+        imagePicker: () async => const PickedImage(
+          bytes: [137, 80, 78, 71],
+          filename: 'sunset.png',
+          mimeType: 'image/png',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('pick_image_button')));
+    await tester.pumpAndSettle();
+    expect(api.mediaUploadCount, 1);
+    expect(find.byKey(const Key('pending_attachment_0')), findsOneWidget);
+    expect(find.text('sunset.png'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('chat_send_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pending_attachment_0')), findsNothing);
+    expect(api.sentPayloads.length, 1);
+    expect(api.sentPayloads.first['attachments'], ['a' * 64]);
+
+    await tester.tap(find.byKey(const Key('open_stickers_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('sticker_option_hug')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('sticker_option_hug')));
+    await tester.pumpAndSettle();
+    expect(api.sentPayloads.length, 2);
+    expect(api.sentPayloads[1]['stickerId'], 'hug');
+    expect(find.text('[贴纸：抱抱]'), findsOneWidget);
   });
 }

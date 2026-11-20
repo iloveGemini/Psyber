@@ -119,11 +119,18 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
     const pairJson = (await pairRes.json()) as { token: string; deviceId: string };
     expect(pairJson.token.startsWith("psb_")).toBe(true);
 
-    // 凭新签发 Token 正常访问受保护端点
+    // 凭新签发 Token 正常访问受保护端点（含 /door 与 /stickers）
     const doorRes = await runtime.app.request("/api/v1/door", {
       headers: { authorization: `Bearer ${pairJson.token}` },
     });
     expect(doorRes.status).toBe(200);
+
+    const stickersRes = await runtime.app.request("/api/v1/stickers", {
+      headers: { authorization: `Bearer ${pairJson.token}` },
+    });
+    expect(stickersRes.status).toBe(200);
+    const stickersJson = (await stickersRes.json()) as { items: unknown[] };
+    expect(Array.isArray(stickersJson.items)).toBe(true);
 
     // 2. 写入一条待整理对话
     runtime.events.append({

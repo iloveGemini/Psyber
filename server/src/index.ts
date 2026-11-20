@@ -1,6 +1,5 @@
 import os from "node:os";
 import path from "node:path";
-import { createModels } from "@earendil-works/pi-ai";
 import type { Database } from "bun:sqlite";
 import type { Hono } from "hono";
 import { createApp } from "./api/app.ts";
@@ -32,12 +31,8 @@ import {
   type TidyTaskType,
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
-import {
-  PiAiChatClient,
-  type ChatModelClient,
-  type ChatStreamChunk,
-  type ChatStreamRequest,
-} from "./llm/client.ts";
+import type { ChatModelClient } from "./llm/client.ts";
+import { DynamicChatModel } from "./llm/router.ts";
 import { MemoryIndex } from "./memory/index.ts";
 import { MemoryTools, isAllowedWritePath } from "./memory/tools.ts";
 import {
@@ -60,77 +55,7 @@ export function resolveDataDir(): string {
   return path.resolve(raw);
 }
 
-/** 未配置模型凭证时的安全兜底客户端：经标准 SSE turn.error 引导用户配置 BYOK 凭证 */
-export class UnconfiguredChatModel implements ChatModelClient {
-  readonly contextWindow = 200_000;
-
-  async *stream(): AsyncIterable<ChatStreamChunk> {
-    yield {
-      type: "error",
-      code: "AUTH_EXPIRED",
-      message: "尚未配置主对话模型凭证，请先完成 Genesis 或在设置中填入 API Key",
-      retryable: false,
-    };
-  }
-}
-
-/**
- * 动态主对话模型路由器：每次调用按最新 config.llm.slots.chat + credentials.json 解析，
- * 已配置且在 pi-ai 注册表中命中时委托给 PiAiChatClient，未配置时平滑回落 UnconfiguredChatModel。
- */
-export class DynamicChatModel implements ChatModelClient {
-  private readonly fallback = new UnconfiguredChatModel();
-  private readonly models = createModels();
-  private _contextWindow = 200_000;
-
-  constructor(
-    private readonly dataDir: string,
-    private readonly getConfig: () => PsyberConfig,
-  ) {}
-
-  get contextWindow(): number {
-    return this._contextWindow;
-  }
-
-  async *stream(request: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
-    const cfg = this.getConfig();
-    const chatRef = cfg.llm?.slots?.chat;
-    if (!chatRef?.provider || !chatRef?.model) {
-      yield* this.fallback.stream();
-      return;
-    }
-
-    const creds = await loadCredentials(this.dataDir);
-    const apiKey = creds.apiKeys[chatRef.provider];
-    if (!apiKey) {
-      yield* this.fallback.stream();
-      return;
-    }
-
-    const providerCfg = cfg.llm?.providers?.[chatRef.provider];
-    const providerId = providerCfg?.kind ?? chatRef.provider;
-    const model =
-      this.models.getModel(providerId, chatRef.model) ??
-      this.models.getModel(chatRef.provider, chatRef.model);
-    if (!model) {
-      yield {
-        type: "error",
-        code: "PROVIDER_ERROR",
-        message: `未在模型目录中找到 ${chatRef.provider}/${chatRef.model}，请检查设置`,
-        retryable: false,
-      };
-      return;
-    }
-
-    const client = new PiAiChatClient(this.models, model, apiKey);
-    this._contextWindow = client.contextWindow;
-    yield* client.stream({
-      ...request,
-      temperature: request.temperature ?? chatRef.temperature,
-      maxTokens: request.maxTokens ?? chatRef.maxTokens,
-    });
-  }
-}
+export { DynamicChatModel } from "./llm/router.ts";
 
 export interface BootOptions {
   dataDir?: string;
@@ -233,7 +158,11 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     fetchImpl: opts.fetchImpl,
   });
 
-  const chatModel = opts.chatModel ?? new DynamicChatModel(dataDir, () => config);
+  const chatModel =
+    opts.chatModel ?? new DynamicChatModel({ dataDir, getConfig: () => config, slot: "chat" });
+  const tidyModel =
+    opts.chatModel ??
+    new DynamicChatModel({ dataDir, getConfig: () => config, slot: "memory_task" });
 
   // 运行时作息与异步队列状态
   let lastBedtimeNightDate = events.getBedtimeNightDate();
@@ -294,7 +223,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
             events,
             memoryIndex,
             memoryTools,
-            chatModel,
+            chatModel: tidyModel,
           },
           { taskType, nightDate: targetNight },
         );

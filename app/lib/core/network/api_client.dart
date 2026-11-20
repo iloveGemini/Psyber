@@ -95,6 +95,8 @@ abstract class PsyberApiClient {
     required String mimeType,
   });
 
+  Future<List<StickerView>> listStickers(ConnectionProfile profile);
+
   Future<SendMessageResult> sendMessage(
     ConnectionProfile profile, {
     required String clientMessageId,
@@ -359,6 +361,22 @@ class HttpPsyberApiClient implements PsyberApiClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  @override
+  Future<List<StickerView>> listStickers(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/stickers');
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    final raw = json['items'];
+    if (raw is! List<dynamic>) return const <StickerView>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(StickerView.fromJson)
+        .toList(growable: false);
   }
 
   @override

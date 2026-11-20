@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'core/media/image_picker.dart';
 import 'core/models/models.dart';
 import 'core/network/api_client.dart';
 import 'core/state/app_controller.dart';
@@ -24,9 +25,11 @@ class PsyberApp extends StatelessWidget {
   const PsyberApp({
     super.key,
     required this.controller,
+    this.imagePicker,
   });
 
   final AppController controller;
+  final ImageFilePicker? imagePicker;
 
   @override
   Widget build(BuildContext context) {
@@ -46,7 +49,10 @@ class PsyberApp extends StatelessWidget {
               if (genesis != null && !genesis.initialized) {
                 return GenesisPage(controller: controller);
               }
-              return ChatPage(controller: controller);
+              return ChatPage(
+                controller: controller,
+                imagePicker: imagePicker,
+              );
             },
           );
         },

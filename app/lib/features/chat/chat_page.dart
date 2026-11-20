@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/media/image_picker.dart';
 import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
@@ -12,7 +13,7 @@ import 'widgets/thinking_card.dart';
 
 /// Ring 1 主聊天页：
 /// - 仅在 paused/hidden 切后台时静默中止 SSE、回前台合并重连不弹红条（桌面失焦 inactive 不断流）
-/// - 门状态顶栏与门缝纸条输入框自适应切换
+/// - 门状态顶栏与门缝纸条输入框自适应切换（含发图上传与贴纸面板）
 /// - ListView.builder 虚拟化时间线 + 顶部按需分页加载 + 独立流式轮次槽（防整页高频重绘）
 /// - 基础 ExpressionRenderer（色温光罩 + 触觉 + 气泡微动效 + 贴纸/附件图片渲染）
 /// - 默认关闭、按需开启的召回标注浮条
@@ -20,18 +21,29 @@ class ChatPage extends StatefulWidget {
   const ChatPage({
     super.key,
     required this.controller,
+    this.imagePicker,
   });
 
   final AppController controller;
+  final ImageFilePicker? imagePicker;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
 
+class _PendingAttachment {
+  const _PendingAttachment({required this.hash, required this.filename});
+
+  final String hash;
+  final String filename;
+}
+
 class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
+  final List<_PendingAttachment> _pendingAttachments = <_PendingAttachment>[];
   bool _sending = false;
+  bool _uploadingImage = false;
   bool _loadingOlder = false;
 
   @override
@@ -69,11 +81,18 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   Future<void> _send() async {
     final text = _inputController.text.trim();
-    if (text.isEmpty || _sending) return;
+    if ((text.isEmpty && _pendingAttachments.isEmpty) || _sending) return;
     setState(() => _sending = true);
     try {
-      await widget.controller.sendMessage(text);
+      final attachmentHashes = _pendingAttachments.map((a) => a.hash).toList(growable: false);
+      await widget.controller.sendMessage(
+        text,
+        attachments: attachmentHashes.isEmpty ? null : attachmentHashes,
+      );
       _inputController.clear();
+      if (mounted) {
+        setState(() => _pendingAttachments.clear());
+      }
       _scrollToBottom();
     } on ApiException catch (e) {
       widget.controller.turnErrorNotifier.value = e.message;
@@ -82,6 +101,108 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Future<void> _pickAndUploadImage() async {
+    if (_uploadingImage) return;
+    setState(() => _uploadingImage = true);
+    try {
+      final picker = widget.imagePicker ?? defaultPlatformImagePicker;
+      final picked = await picker();
+      if (picked == null || !mounted) return;
+      final uploaded = await widget.controller.uploadImage(
+        bytes: picked.bytes,
+        filename: picked.filename,
+        mimeType: picked.mimeType,
+      );
+      if (uploaded == null || !mounted) return;
+      setState(() {
+        _pendingAttachments.add(
+          _PendingAttachment(hash: uploaded.hash, filename: picked.filename),
+        );
+      });
+    } on ApiException catch (e) {
+      widget.controller.turnErrorNotifier.value = e.message;
+    } catch (_) {
+      widget.controller.turnErrorNotifier.value = '图片上传失败，请稍后重试';
+    } finally {
+      if (mounted) setState(() => _uploadingImage = false);
+    }
+  }
+
+  Future<void> _sendSticker(StickerView sticker) async {
+    if (_sending) return;
+    setState(() => _sending = true);
+    try {
+      await widget.controller.sendMessage('', stickerId: sticker.id);
+      _scrollToBottom();
+    } on ApiException catch (e) {
+      widget.controller.turnErrorNotifier.value = e.message;
+    } catch (_) {
+      widget.controller.turnErrorNotifier.value = '发送贴纸失败，请稍后重试';
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  void _openStickerSheet() {
+    final stickersFuture = widget.controller.loadStickers();
+    unawaited(
+      showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: PsyberTheme.paperCard,
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '选择贴纸',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 12),
+              FutureBuilder<List<StickerView>>(
+                future: stickersFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                    );
+                  }
+                  final items = snapshot.data ?? const <StickerView>[];
+                  if (items.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        '暂无可用贴纸，可将图片放入数据目录的 stickers/ 文件夹后重启同步。',
+                        style: TextStyle(fontSize: 13, color: PsyberTheme.inkMuted),
+                      ),
+                    );
+                  }
+                  return Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final sticker in items)
+                        ActionChip(
+                          key: Key('sticker_option_${sticker.id}'),
+                          label: Text(sticker.label),
+                          onPressed: () {
+                            Navigator.of(ctx).pop();
+                            unawaited(_sendSticker(sticker));
+                          },
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _loadOlder() async {
@@ -281,7 +402,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
               builder: (context, door, _) => _AdaptiveComposer(
                 door: door,
                 controller: _inputController,
+                pendingAttachments: _pendingAttachments,
+                uploadingImage: _uploadingImage,
                 sending: _sending,
+                onPickImage: _pickAndUploadImage,
+                onOpenStickers: _openStickerSheet,
+                onRemoveAttachment: (idx) {
+                  setState(() => _pendingAttachments.removeAt(idx));
+                },
                 onSend: _send,
               ),
             ),
@@ -524,13 +652,23 @@ class _AdaptiveComposer extends StatelessWidget {
   const _AdaptiveComposer({
     required this.door,
     required this.controller,
+    required this.pendingAttachments,
+    required this.uploadingImage,
     required this.sending,
+    required this.onPickImage,
+    required this.onOpenStickers,
+    required this.onRemoveAttachment,
     required this.onSend,
   });
 
   final DoorStatus door;
   final TextEditingController controller;
+  final List<_PendingAttachment> pendingAttachments;
+  final bool uploadingImage;
   final bool sending;
+  final VoidCallback onPickImage;
+  final VoidCallback onOpenStickers;
+  final void Function(int index) onRemoveAttachment;
   final VoidCallback onSend;
 
   @override
@@ -561,32 +699,79 @@ class _AdaptiveComposer extends StatelessWidget {
           color: isDoorNote ? PsyberTheme.doorNotePaper : PsyberTheme.paperCard,
           border: const Border(top: BorderSide(color: PsyberTheme.hairline)),
         ),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: TextField(
-                key: const Key('chat_input_field'),
-                controller: controller,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => onSend(),
-                decoration: InputDecoration(
-                  hintText: isDoorNote ? '从门缝塞一张纸条（不会打扰对方）…' : '说点什么…',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: PsyberTheme.hairline),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  isDense: true,
+            if (pendingAttachments.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (var i = 0; i < pendingAttachments.length; i++)
+                      InputChip(
+                        key: Key('pending_attachment_$i'),
+                        avatar: const Icon(Icons.image_outlined, size: 16),
+                        label: Text(
+                          pendingAttachments[i].filename,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        onDeleted: () => onRemoveAttachment(i),
+                      ),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              key: const Key('chat_send_button'),
-              onPressed: sending ? null : onSend,
-              child: Text(isDoorNote ? '塞纸条' : '发送'),
+            Row(
+              children: [
+                IconButton(
+                  key: const Key('pick_image_button'),
+                  tooltip: '选择图片',
+                  onPressed: (sending || uploadingImage) ? null : onPickImage,
+                  icon: uploadingImage
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.image_outlined, color: PsyberTheme.inkMuted),
+                ),
+                IconButton(
+                  key: const Key('open_stickers_button'),
+                  tooltip: '发送贴纸',
+                  onPressed: sending ? null : onOpenStickers,
+                  icon: const Icon(
+                    Icons.emoji_emotions_outlined,
+                    color: PsyberTheme.inkMuted,
+                  ),
+                ),
+                Expanded(
+                  child: TextField(
+                    key: const Key('chat_input_field'),
+                    controller: controller,
+                    minLines: 1,
+                    maxLines: 4,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => onSend(),
+                    decoration: InputDecoration(
+                      hintText: isDoorNote ? '从门缝塞一张纸条（不会打扰对方）…' : '说点什么…',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: PsyberTheme.hairline),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  key: const Key('chat_send_button'),
+                  onPressed: sending ? null : onSend,
+                  child: Text(isDoorNote ? '塞纸条' : '发送'),
+                ),
+              ],
             ),
           ],
         ),

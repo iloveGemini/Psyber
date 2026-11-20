@@ -297,6 +297,18 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
+  // 静态贴纸列表（对齐 Spec 04 §2.3）
+  app.get("/api/v1/stickers", (c) => {
+    const items = deps.events.listStickers(50).map((s) => ({
+      id: s.id,
+      label: s.label,
+      pack: s.pack,
+      url: `/api/v1/media/${s.mediaHash}`,
+      useCount: s.useCount,
+    }));
+    return c.json({ items });
+  });
+
   // 脱敏设置读写（绝不返回任何明文令牌或密钥）
   app.get("/api/v1/settings", async (c) => {
     const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
