@@ -7,7 +7,16 @@ export interface Clock {
 }
 
 export class SystemClock implements Clock {
-  constructor(public readonly timeZone: string = "Asia/Shanghai") {}
+  private readonly tzSource: string | (() => string);
+
+  constructor(timeZone: string | (() => string) = "Asia/Shanghai") {
+    this.tzSource = timeZone;
+  }
+
+  get timeZone(): string {
+    return typeof this.tzSource === "function" ? this.tzSource() : this.tzSource;
+  }
+
   now(): number {
     return Date.now();
   }

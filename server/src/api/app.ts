@@ -58,6 +58,8 @@ export interface AppDeps {
   media?: MediaStore;
   /** 用户新消息（chat / door_note）落盘时回调，用于立即重置 consecutiveUnansweredWakes = 0 */
   onUserMessagePersisted?: () => void;
+  /** 设置变更（PATCH /api/v1/settings）后回调，用于热更新作息心跳定时器 */
+  onSettingsUpdated?: () => void;
   /** 仅在明确部署于可信反向代理后时才信任 x-forwarded-for */
   trustProxy?: boolean;
   /** 自定义获取客户端连接 IP（用于 /auth/pair 防爆破限流） */
@@ -323,10 +325,14 @@ export function createApp(deps: AppDeps): Hono {
           }
         };
 
+        const foreground = c.req.query("foreground") !== "false";
         send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
-        const unsubscribe = deps.sse?.subscribe((frame) => {
-          send(formatSseFrame(frame));
-        });
+        const unsubscribe = deps.sse?.subscribe(
+          (frame) => {
+            send(formatSseFrame(frame));
+          },
+          { foreground },
+        );
         const timer = setInterval(() => {
           send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
         }, 25_000);

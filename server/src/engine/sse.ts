@@ -17,24 +17,33 @@ export interface SseFrame {
 
 type Listener = (frame: SseFrame) => void;
 
+interface SubscriptionMeta {
+  listener: Listener;
+  foreground: boolean;
+}
+
 /**
- * Ring 1 极简 SSE 广播中心：支持 7 类核心事件 + ping，单进程内存扇出给全部在线客户端。
+ * Ring 1 极简 SSE 广播中心：支持核心事件 + ping，维护各连接前后台标记以支撑离线通知抑制。
  */
 export class SseHub {
-  private readonly listeners = new Set<Listener>();
+  private readonly subscriptions = new Set<SubscriptionMeta>();
 
-  subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
+  subscribe(listener: Listener, opts: { foreground?: boolean } = {}): () => void {
+    const entry: SubscriptionMeta = {
+      listener,
+      foreground: opts.foreground !== false,
+    };
+    this.subscriptions.add(entry);
     return () => {
-      this.listeners.delete(listener);
+      this.subscriptions.delete(entry);
     };
   }
 
   emit(event: Ring1SseEventName, data: Record<string, unknown>): void {
     const frame: SseFrame = { event, data };
-    for (const listener of this.listeners) {
+    for (const sub of this.subscriptions) {
       try {
-        listener(frame);
+        sub.listener(frame);
       } catch {
         // 单个客户端断连不影响其他订阅者
       }
@@ -42,7 +51,16 @@ export class SseHub {
   }
 
   get subscriberCount(): number {
-    return this.listeners.size;
+    return this.subscriptions.size;
+  }
+
+  /** 当前活跃的前台客户端订阅数（仅计 foreground !== false 的连接，对齐 Spec 03 §3.1） */
+  get foregroundSubscriberCount(): number {
+    let count = 0;
+    for (const sub of this.subscriptions) {
+      if (sub.foreground) count += 1;
+    }
+    return count;
   }
 }
 

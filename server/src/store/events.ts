@@ -361,4 +361,52 @@ export class EventStore {
       .query("UPDATE stickers SET use_count = use_count + 1, last_used_at = ? WHERE id = ?")
       .run(this.clock.now(), stickerId);
   }
+
+  getBedtimeNightDate(): string | null {
+    const row = this.db
+      .query("SELECT meta_json FROM task_cursors WHERE task_key = 'bedtime'")
+      .get() as { meta_json: string | null } | null;
+    if (!row?.meta_json) return null;
+    try {
+      const parsed = JSON.parse(row.meta_json) as { last_gist_date?: unknown };
+      return typeof parsed.last_gist_date === "string" && parsed.last_gist_date
+        ? parsed.last_gist_date
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  getLastInteractionMs(): number | null {
+    const row = this.db
+      .query(
+        `SELECT MAX(created_at) AS ts FROM events
+         WHERE status = 'active' AND kind IN ('chat', 'wake', 'door_note')`,
+      )
+      .get() as { ts: number | null } | null;
+    return typeof row?.ts === "number" ? row.ts : null;
+  }
+
+  getLastWakeMs(): number | null {
+    const row = this.db
+      .query(
+        `SELECT MAX(created_at) AS ts FROM events
+         WHERE status = 'active' AND kind = 'wake'`,
+      )
+      .get() as { ts: number | null } | null;
+    return typeof row?.ts === "number" ? row.ts : null;
+  }
+
+  getOldestUnreadDoorNoteMs(): number | null {
+    const cursor = this.getCursor("door_notes_read") ?? "";
+    const row = this.db
+      .query(
+        `SELECT created_at FROM events
+         WHERE kind = 'door_note' AND status = 'active' AND id > ?
+         ORDER BY seq ASC
+         LIMIT 1`,
+      )
+      .get(cursor) as { created_at: number } | null;
+    return row ? row.created_at : null;
+  }
 }

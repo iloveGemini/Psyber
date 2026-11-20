@@ -366,6 +366,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       await saveConfig(deps.dataDir, cfg);
     }
 
+    deps.onSettingsUpdated?.();
     return c.json({ ok: true, settings: sanitizeSettings(cfg, creds) });
   });
 }
