@@ -2,7 +2,7 @@
 version: 3
 name: revision.md
 slot: memory_task
-description: C2.7 住户复核修订轮 Prompt（第一人称自主决定修改或驳回，并输出统计摘要）
+description: C2.7 住户复核修订轮 Prompt（Ring 1.5 可选复核启用，Ring 1 主流程不调用；第一人称自主决定修改或驳回）
 ---
 刚才的写后复核对我的这批笔记提出了以下带出处的提醒：
 {{FILTERED_ISSUES_JSON}}

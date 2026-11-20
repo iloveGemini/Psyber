@@ -1,7 +1,7 @@
 # Spec 03 · 主体性边界、具身表达、离线通知、`ActivityPlugin`（观影）与外部 MCP 规程
 
-> **版本**：v0.2（2026-11-19，修正 `<door_notes>` 按 `seq ASC` 分批防漏纸条、`onActivityEnded` 补齐 `sessionId`/`untilEventId`、明确 `closed`/`cooling_off` 下 `wake` 可隔门回复、补齐用户侧 `stickerId` 校验与 `cinema` `sessionId` 可选）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.2 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.5 · [`MEMORY.md`](../MEMORY.md) v0.5 · [`API.md`](../API.md) v0.4 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v0.9 · [`02-memory-execution.md`](02-memory-execution.md) v0.5
+> **版本**：v0.4（2026-11-20，修正 §4.2 强换段阈值 `80% -> 75%`、补齐 Ring 1 静态贴纸目录与 `stickers` 表衔接说明、拆分 §6 出口验收清单分期）
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.3 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.7 · [`MEMORY.md`](../MEMORY.md) v0.7 · [`API.md`](../API.md) v0.7 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.1 · [`02-memory-execution.md`](02-memory-execution.md) v0.7
 > **负责模块**：`server/src/expression/`、`server/src/notifications/`、`server/src/mood/`、`server/src/extensions/`
 
 ---
@@ -37,7 +37,7 @@
 | `cooling_off`（超时） | `closed`（自然回落） | **严禁无条件覆盖**：当且仅当当前 `door.state` 仍严格处于 `"cooling_off"` 且 `coolingOffStartedAt !== null` 且 `Clock.now() - coolingOffStartedAt ≥ 72h` 时触发：清空 `coolingOffStartedAt`，状态自然回落至 `closed`（保留住户原便签），记录 `door.updated`。若 72h 期间 AI 已自主切为 `open`/`quiet`/`closed`/`departed`，则 `coolingOffStartedAt` 早已清空，此超时守卫完全不触发，绝不覆盖 AI 的自主意图 |
 | `departed` | 无（不可逆终态） | 所有后续 `door` 调用由 `guard` 拦截拒绝 |
 
-#### 门缝纸条（`door_note`）完整链路（与 `Spec 01` v0.9、`Spec 02` v0.5 对齐）
+#### 门缝纸条（`door_note`）完整链路（与 `Spec 01` v1.1、`Spec 02` v0.7 对齐）
 - **写入不唤醒**：当 `door.state ∈ {'closed', 'cooling_off'}` 时，`POST /api/v1/chat/messages` 将用户输入落盘为 `events (role='user', kind='door_note', status='active')` 并广播 `message.created`，**绝不触发 `chat` 轮、绝不立即唤醒 AI 强迫回复**；
 - **自主可读边界**：`door = closed` 只剥夺用户的即时谈话与唤醒权，不限制住户在后续自主唤醒（`wake` / 未来 mind 唤醒）、活动或静默整理轮自行查看纸条，并由住户自行决定是否回应或开门；
 - **两游标严格解耦**：
@@ -46,7 +46,7 @@
 - **关门态隔门回复权限**：在 `closed` / `cooling_off` 状态下，`wake` 轮允许住户选择**不开门但隔着门回一句**（不强制先调用 `door(state="open")`）；该回复正常落盘为 `kind = 'wake'` 并广播 SSE，但门状态保持不变，用户依然不能即时追问；
 - **消息操作边界**：`closed`/`cooling_off` 期间拒绝 `reroll`（返回 `409 DOOR_CLOSED`）；允许 `edit`/`delete` 尚未进入 `daily_wrapup` 游标的近期纸条；`departed` 期间一律返回 `410 GONE`。
 
-### 1.2 上锁的抽屉（`private/`）业务交互与拆封留痕规程
+### 1.2 上锁的抽屉（`private/`）业务交互与拆封留痕规程（Ring 1.5）
 
 底层 `.sealed` 火漆格式与三道零入库红线由 [`02-memory-execution.md`](02-memory-execution.md) §2 定义，本节固化对外接口行为：
 
@@ -86,7 +86,8 @@
 
 ### 2.2 贴纸包存储与 Dynamic Tail 注入预算
 
-- **二进制复用 `media/` 仓**：通过 `POST /api/v1/stickers` 上传的贴纸统一走 `server/src/core/media.ts` 按 SHA-256 去重落盘（`origin = 'sticker'`, `pinned = 1` 永不自动淘汰），对外复用 `GET /api/v1/media/:hash` 的 `ETag` 与 `Cache-Control: immutable`；
+- **Ring 1 静态目录与 `stickers` 表衔接**：Ring 1 暂不开 `GET/POST /api/v1/stickers` 动态上传，服务启动时扫描 `<dataDir>/stickers/`（读取内置/用户放置的 `manifest.json` 与图片文件，落盘 `media/` 且 `pinned = 1`）同步写入 SQLite `stickers` 表（若目录为空则跳过），确保 `express` 与 `POST /chat/messages` 的 `stickerId` 同源校验在 Ring 1 与 Ring 1.5 保持同一代码路径；
+- **二进制复用 `media/` 仓**：Ring 1.5 起通过 `POST /api/v1/stickers` 上传的贴纸统一走 `server/src/core/media.ts` 按 SHA-256 去重落盘（`origin = 'sticker'`, `pinned = 1` 永不自动淘汰），对外复用 `GET /api/v1/media/:hash` 的 `ETag` 与 `Cache-Control: immutable`；
 - **上传限制**：仅允许 `image/png`、`image/webp`、`image/gif`，单文件 `≤ 2 MB`；`id` 匹配 `^[a-z0-9][a-z0-9_-]{0,39}$`，`label` 非空且 `≤ 20` 字符（供模型理解贴纸语义），`pack` 可选（默认 `"default"`）；
 - **用户侧贴纸同源校验**：用户通过 `POST /api/v1/chat/messages` 附带 `stickerId` 时，服务端执行同源校验（查 `stickers` 表，未命中返回 `400 INVALID_STICKER`）；落盘于 `events.metadata.stickerId` 并递增 `use_count` / `last_used_at`，拼装对话上下文时渲染为 `[贴纸: <label>]` 供模型自然理解；
 - **Dynamic Tail `<stickers>` 注入预算**：每轮仅按 `last_used_at DESC, use_count DESC` 注入最多 **30 个**贴纸（单行格式 `- <id>: <label>`，总预算 `≤ 500` 字符），防止贴纸库增长后挤占上下文。
@@ -97,9 +98,9 @@
 
 ### 3.1 `NotificationProvider` 路由、通道与反骚扰退避（`server/src/notifications/`）
 
-所有通知发送经由 `NotificationHub` 统一调度，对已启用的多个通道执行 `Promise.allSettled` 并发扇出（单通道硬超时 `5000ms`，任意通道失败只打告警日志，绝不阻塞主对话或心跳）。
+所有通知发送经由 `NotificationHub` 统一调度，对 `config.json` `notifications.channels` 中已启用的全局通道及 `credentials.json` `pushTokens[deviceId]` 中各配对设备注册的推送目标执行 `Promise.allSettled` 并发扇出（单通道硬超时 `5000ms`，任意通道失败只打告警日志，绝不阻塞主对话或心跳；设备吊销时同步清除对应 `pushTokens[deviceId]`）。
 
-#### Ring 1 内置 4 种离线通知通道
+#### 离线通知通道（Ring 1 先落 `desktop` + `webhook`；`bark`/`ntfy` 独立适配于 Ring 1.5 补齐）
 
 | 通道标识 | 适用场景 | 核心配置（位于 `config.json` `notifications.channels`；密钥放 `credentials.json`） |
 | :--- | :--- | :--- |
@@ -114,7 +115,7 @@
 3. **连续未回退避封顶**：记录 `consecutiveUnansweredWakes`（每次真正开口且非 `[SILENT]` 的 `wake` 后 `+1`；**一旦服务端收到任意新 `user` 消息或 `door_note`，立即重置为 0**）。当 `consecutiveUnansweredWakes >= 2` 时，停止继续触发主动 `wake` 与离线推送，安静等待用户重逢；
 4. **`[SILENT]` 零打扰**：`wake` 轮若最终产出 `[SILENT]`，绝不调用 `NotificationProvider`（与 `Spec 01` §5.1 一致）。
 
-### 3.2 Ring 1 默认 `CircadianMoodProvider`（`server/src/mood/circadian.ts`）
+### 3.2 Ring 1 扁平作息心跳模块（`server/src/mood/circadian.ts`；多态插件框架待 Ring 2 出现第 2 个实现再抽）
 
 #### 可调参数清单（集中于 `<dataDir>/config.json` `circadian`）
 
@@ -143,7 +144,7 @@
 
 ---
 
-## 4. `ActivityPlugin` 生命周期与首个观影扩展（`cinema`）（`server/src/extensions/`）
+## 4. `ActivityPlugin` 生命周期与首个观影扩展（`cinema` · Ring 1.5）（`server/src/extensions/`）
 
 ### 4.1 SQLite 新增表迁移（`server/src/core/migrations/002_activities_stickers.sql`）
 
@@ -183,7 +184,7 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 ### 4.2 `ActivityPlugin` 通用并发与生命周期规则
 
 1. **单活跃活动约束**：单住户同一时刻最多允许 **1 个** `status IN ('active', 'stale')` 的活动会话；若尝试开启新活动而旧活动尚未结束，接口返回 `409 ACTIVITY_ALREADY_ACTIVE`（附当前活跃会话 `id` 与 `slug`），避免 `activityHint` 与 `daily_wrapup` 前沿门禁产生歧义；
-2. **与 `daily_wrapup` 前沿门禁联动**：只要存在 `status IN ('active', 'stale')` 的活动会话，常规 `daily_wrapup` 自动跳过；若触发 80% / `CONTEXT_OVERFLOW` 强换段，`Spec 02` §5.2 使用 `minActiveActivityEventId = session.start_event_id` 截断拉取上限，确保游标绝不跨过进行中的活动；
+2. **与 `daily_wrapup` 前沿门禁联动**：只要存在 `status IN ('active', 'stale')` 的活动会话，常规 `daily_wrapup` 自动跳过；若触发 75% / `CONTEXT_OVERFLOW` 强换段，`Spec 02` §5.2 使用 `minActiveActivityEventId = session.start_event_id` 截断拉取上限，确保游标绝不跨过进行中的活动；
 3. **活动结束与整理派发**：活动转为 `ended` 时，同步写入 `ended_at = Clock.now()` 与 `end_event_id`，触发 `onActivityEnded({ sessionId: id, slug, topicHint, sinceEventId: start_event_id, untilEventId: end_event_id })` 由 Direct Engine 异步派发 `activity:<slug>` 静默整理轮；整理轮严格按 `e.id BETWEEN sinceEventId AND untilEventId` 拉取（杜绝紧接着开启下一场同 `slug` 活动时串场），完成后原样写入 `digested_activity_spans(slug, sinceEventId, untilEventId)`。
 
 ### 4.3 首个内置扩展：观影伴看（`cinema` · `server/src/extensions/cinema/`）
@@ -211,7 +212,7 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 
 ---
 
-## 5. 外部 MCP 桥接挂入 Tier 3 工具池（`server/src/extensions/mcp.ts`）
+## 5. 外部 MCP 桥接挂入 Tier 3 工具池（Ring 1.5）（`server/src/extensions/mcp.ts`）
 
 ### 5.1 配置与凭证分离
 
@@ -248,11 +249,15 @@ export interface McpServerConfig {
 
 ---
 
-## 6. Spec 03 出口验收清单（供 Ring 0/1 编码与测试对照）
+## 6. Spec 03 出口验收清单（按 Ring 1 / Ring 1.5+ 分期对照）
 
-- [ ] 门状态机 5 态 Schema 冻结、Ring 1 `guard` 暂拒 `cooling_off`/`departed`、Ring 2 24–72h 冷静期时间锁与超时退回 `closed`、`closed` 期间发消息仅存 `door_note` 不唤醒 AI、`door_notes_read` 与 `daily_wrapup` 游标彻底解耦（整理轮连续收且不推进 `door_notes_read`，`wake` 含 `[SILENT]` 正常完成后推进）；
-- [ ] `private/` 上锁抽屉 `GET /drawer` 绝不解封正文、`POST /drawer/:id/open` 严格先写 `privacy.peeked` 再返回明文、`DEPARTED.md` 原子写出诚实声明并转为只读 `410 GONE`；
-- [ ] `express` 单轮 3 次节流、`durationSec` 夹逼、无效 `stickerId` 自救报错、贴纸二进制复用 `media/` (`pinned=1`) 且 `<stickers>` 注入严格 `≤ 30 条 / 500 字`；
-- [ ] `NotificationProvider` 4 通道并发扇出与 5s 超时隔离、前台活跃抑制、睡眠窗静默、`wake` 连续 2 次未回退避停发、`CircadianMoodProvider` 跨午夜 `bedtime` 不重复触发且零内部浮点数泄露；
-- [ ] `activity_sessions` 与 `stickers` 迁移建表完成、单活跃活动互斥、`cinema` 15s 抽帧节流 + 512KB 上限 + 单帧注入 + 30m `stale`/4h 软结束防误结束、`cinema.bookmark` 钉帧免淘汰、与 `Spec 02` §8.3 24h 清理无缝衔接；
-- [ ] 外部 MCP 桥接全部归入 Tier 3 `mcp.<serverId>.<toolName>`、凭证与 `config.json` 分离、默认 `confirm` 审批、单服宕机零阻塞主服务、8000 字截断与热重载子进程清理全绿。
+### Ring 1 必过验收
+- [ ] 门状态机 5 态 Schema 冻结、Ring 1 `guard` 暂拒 `cooling_off`/`departed`、`closed` 期间发消息仅存 `door_note` 不唤醒 AI、`door_notes_read` 与 `daily_wrapup` 游标彻底解耦（整理轮连续收且不推进 `door_notes_read`，`wake` 含 `[SILENT]` 正常完成后推进）；
+- [ ] `express` 单轮 3 次节流、`durationSec` 夹逼、静态 `stickers/` 启动同步入表与无效 `stickerId` 自救报错、`<stickers>` 注入严格 `≤ 30 条 / 500 字`；
+- [ ] `desktop` + `webhook` 离线推送 5s 超时隔离、前台活跃抑制、睡眠窗静默、`wake` 连续 2 次未回退避停发、扁平 `circadian.ts` 跨午夜 `bedtime` 不重复触发且零内部浮点数泄露。
+
+### Ring 1.5 / Ring 2 扩展验收
+- [ ] （Ring 1.5）`private/` 上锁抽屉 `GET /drawer` 绝不解封正文、`POST /drawer/:id/open` 严格先写 `privacy.peeked` 再返回明文；Bark / ntfy 独立通道与单设备推送令牌扇出；
+- [ ] （Ring 1.5）`activity_sessions` 建表、单活跃活动互斥、`cinema` 15s 抽帧节流 + 512KB 上限 + 单帧注入 + 30m `stale`/4h 软结束防误结束、`cinema.bookmark` 钉帧免淘汰与 24h 清理衔接；
+- [ ] （Ring 1.5）外部 MCP 桥接全部归入 Tier 3 `mcp.<serverId>.<toolName>`、凭证分离、单服宕机零阻塞主服务、8000 字截断与热重载子进程清理；
+- [ ] （Ring 2）冷静期 24–72h 时间锁与超时自然退回 `closed`、`DEPARTED.md` 原子写出诚实声明并转为只读 `410 GONE`。

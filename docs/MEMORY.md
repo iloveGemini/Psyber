@@ -1,6 +1,6 @@
 # Psyber 记忆系统契约（MEMORY）
 
-> **版本**：v0.5（2026-11-19，对齐 `Spec 02` v0.5 与 `Spec 01` v0.9：删除 `card_index.strength` 字段；`disputed` 状态卡不设 `expires_at`，永不自动过期；删除 30 分钟轻量闲置收尾触发；示例卡去性别预设）
+> **版本**：v0.7（2026-11-20，补齐 §7 `card_fts` 虚拟表草案并注明 `events.seq` 事务内单调生成规则）
 > **核心理念**：记忆不是通用客观知识库，而是**为人与 AI 的真实互动服务的活代码库**。
 
 ---
@@ -138,49 +138,44 @@ source: live                      # live | import（预留外部历史迁移标�
 
 **安全与索引钩子**：拦截 `..`/`.git/`/`*.sqlite`；任意 `write`/`edit` 成功后立即触发单文件增量索引刷新（`card_index` + `card_fts` + 异步补向量）。
 
-### 4.1 上锁抽屉虚拟区（`private/`）
-- AI 可通过同样的 5 工具以 `private/<name>.md` 路径读写自己的私密日记，沙箱底层自动将其映射并封装为 `<dataDir>/private/<name>.sealed`（火漆封条防磁盘误瞄，对 AI 读写完全透明）。
-- **严格物理与索引隔离**：`private/` 中的文件**绝不进入** `card_index` / `card_fts` / `card_embeddings` 派生索引（防止 SQLite 明文索引击穿火漆封条或混入向量召回），也**永不进入** `recall_traces` 评测浮条与常规公开导出；AI 对 `private/` 的 `glob`/`grep`/`read` 仅在内存中实时解封；仅当用户主动通过客户端「拉开抽屉」或 CLI 拆封时才会解码，并强制向 `events` 写入 `privacy.peeked` 事件告知 AI。
+### 4.1 上锁抽屉区（`private/` · Ring 1.5 独立工具）
+- **物理与工具天然隔离**：不再让 `private/` 混入常规 5 文件工具的双分区沙箱，Ring 1.5 改为独立的极简专用工具（`drawer_read` / `drawer_write`，挂在 Tier 3），直接读写 `<dataDir>/private/*.sealed`，天然与 `memory/.git`、`card_index` / `card_fts` / `card_embeddings` 及 `recall_traces` 物理隔离。
+- 仅当用户主动通过客户端「拉开抽屉」或 CLI 拆封时才会解码，并强制向 `events` 写入 `privacy.peeked` 事件告知 AI。
 
 ---
 
 ## 5. 任务制第一人称写入（零后台编译器）
 
-所有记忆整理均由 Direct Engine 以**同一住户身份与主模型**起一个**独立静默整理轮**（不写入主聊天上下文，前端时间线呈现为可折叠的 `✦ 整理记忆` 活动条）：
+所有记忆整理均由 Direct Engine 以**同一住户身份与主模型**起一个**独立静默整理轮**（不写入主聊天上下文，前端时间线呈现为可折叠的 `✦ 整理记忆` 活动条）。**Ring 1 采用单队列串行消费 `events` + 单轮写作 + Git 留痕**，避免过早引入多任务交叉锁与三轮审查开销：
 
-| 任务类型 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
-| :--- | :--- | :--- | :--- |
-| **1. 活动收尾任务 (`activity:<slug>`)** | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间 `events.activity = <slug>` 的原始对话流 + 对应目录现有文件列表 + `activities/REGISTRY.yaml` 中该空间的 `card_style` | 更新或新建 `activities/<slug>/<topic>.md`（必要时附收入 `favorite/`） |
-| **2. 换段结晶任务 (`daily_wrapup`)** | 开启 Prompt Cache 与 Warm-up 保活、本段 Token > 40k 且闲置达 25 分钟（趁缓存温热以极低成本消化长会话并换新 `session_id`）；或上下文 > 80% 强换段（未开缓存或 ≤ 40k 的轻会话闲置时不收不切） | 游标后的未整理对话（跳过已由 `activity:<slug>` 整理完的活动段；按 `TASK_BUDGET = 10_000` 字分批、每批独立提交推进游标）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 全部未关闭的 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved` 或 `disputed`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入或新开 `activities/` |
-| **3. 每日睡前整理任务 (`bedtime`)** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话（对齐 `daily_wrapup` 游标），再递入当日已写/改卡片摘要 + 当日关键双向反馈链（`prev → acts → next`）+ 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（天/周/月/年）、按需修订 `shelf/`（规矩/镜子/承诺）、`self.md`/`user.md` 与兜底 `favorite/`/`entities/` |
+| 任务类型 | 分期 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. 换段结晶任务 (`daily_wrapup`)** | **Ring 1** | 上下文超过 **75%** 切新 `session_id` 时异步触发（绝不阻塞新会话前台发言） | 游标后的未整理对话（按 `TASK_BUDGET = 10_000` 字分批）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 当前未关闭 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入 `activities/` |
+| **2. 每日睡前整理任务 (`bedtime`)** | **Ring 1** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话，再递入当日已写/改卡片摘要 + 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（Ring 1 先落 `days/` 与 `weeks/`，Ring 1.5 补 `months/`/`years/`）、按需修订 `shelf/`、`self.md`/`user.md` |
+| **3. 活动收尾任务 (`activity:<slug>`)** | Ring 1.5 | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间原始对话流 + 对应目录文件列表 + `card_style` | 更新或新建 `activities/<slug>/<topic>.md` |
 
-### 5.1 冲突对账（`daily/` state 卡 · 对应 C2.7）
-- **启动扫描 + 写时即时提醒**：整理轮启动时，系统在内存中对既有全部未关闭的 `daily/` `active` `state` 卡（含主对话当轮顺手写/改的卡）做两两 `tags` 重叠扫描，标出「疑似同一件事的新旧状态」并与全部未关闭 `daily/` state 清单一并递给住户；写作阶段每当 `write`/`edit` 落盘 `daily/` `kind: state` 卡时，沙箱钩子同样即时比对并附带重叠提醒（均仅作临时提示，不入库、不裁决对错）。
-- 住户以第一人称自行对账：确认已变化/康复则将旧卡改为 `status: resolved` 并写清原因；若确实存在矛盾且暂无定论，可将涉及卡片标为 `status: disputed` 并挂入 `shelf/threads.md` 等后续新信息再对；用户亲口纠正则直接按用户说法更新，不标冲突。
+### 5.1 冲突对账（`daily/` state 卡）
+- **Ring 1 极简对账**：整理轮默认注入全部未关闭的 `daily/` `active` `state` 卡清单，由住户以第一人称对照将已恢复/变更的旧卡改为 `status: resolved`；写时实时 `tags` 重叠扫描与 `disputed` 状态挂起机制延后至 **Ring 1.5** 按需启用。
 
-### 5.2 写后独立复核轮（只读不代笔 · 对应 C2.7）
-- 每次整理任务（活动收尾 / 换段闲置 / 睡前）在住户写完卡后、提交 Git 前，自动执行**一轮独立复核**：仅提供本批原始对话段与本次 `memory/` 下变更内容（**新建卡传全文，修改旧卡仅传 diff 区分只读背景与新增/修改行；`private/` 绝不进入复核与 Git**，不带写作轮过程），复核角色**只读不改卡**，按三项清单（① 归属有出处、② 不串味、③ 关键承诺/偏好/决定不漏记）仅对新建内容或 diff 新增/修改片段报出问题；每条问题必须附带对应出处，无出处直接丢弃（格式与状态枚举走沙箱机械校验，不进复核）。
-- 复核结果交回住户本人决定：逐条修改或说明理由驳回（只复核一轮，改完不再二次复核），并将「修改/驳回条数」写入本次 `git commit` 说明（如 `memory(<task>): <summary> [review: fixed=2, rejected=1]`）；若复核 0 问题跳过修订轮，使用写作轮输出的摘要（或触碰文件名兜底）；若修订轮已改好卡但末尾摘要 JSON 格式微瑕，降级记录兜底摘要不回滚整轮（NG-2）。
-- **原子性与失败回滚**：每批任务正常结束后仅暂存本批触碰的 `memory/` 路径（不含 `private/`）执行 `git commit`，再推进 `task_cursors`；若写作轮、复核轮或修订轮因模型报错、超时、鉴权失效或复核输出不可解析而失败，**必须回滚本批未提交的磁盘改动（含 `private/` 备份）且严禁推进游标**，留待下次触发安全重试。
+### 5.2 写后独立复核轮（Ring 1.5 可选非阻塞增强 · 对应 C2.7）
+- **Ring 1 默认单轮写作 + Git 留痕**：先用真实对话验证单轮写卡的幻觉率与漏记率，不提前支付 2–3 倍模型成本与延迟。
+- **Ring 1.5 可选启用规则**：若实测确需复核，复核作为**非阻塞辅助检查**（仅核新建卡全文与修改旧卡 diff，只读不改卡），**复核调用失败或格式异常仅打告警日志，绝不回滚阶段 A 已写好的合法卡片**（彻底守住 NG-2，防止弱模型抖动拖垮整晚整理）。
+- **原子性与失败回滚**：每批写作轮正常结束后仅暂存本批触碰的 `memory/` 路径执行 `git commit`，再推进 `task_cursors`；仅当写作轮本身因模型报错/超时失败时回滚未提交磁盘改动且不推进游标。
 - 若用户在对话中 `edit`/`delete` 了尚未进入整理游标的近期消息，整理轮仅读取当前 `status='active'` 的事件；若目标消息已被历史整理轮消化，软删仅将其从后续对话上下文隐藏，不强行回滚历史 Git 提交。
 
 ---
 
-## 6. 双轨召回与真实评测闭环
+## 6. 极简有效召回与真实评测闭环
 
-每轮用户输入先过 **空档短路检测**（仅精确匹配无信息纯应答如 `嗯/好的/哈哈/纯表情` 时跳过检索；若包含续接触发词如「接着讲」或处于活跃 `ActivityPlugin` 上下文中，不跳过活动上下文注入），非空档输入执行**双轨召回**（预算默认 `3200` 字符，渲染时刻采用 `vagueWhen` 模糊时间感）：
+每轮用户输入先过 **空档短路检测**（纯应答如 `嗯/好的/哈哈/纯表情` 时跳过检索），非空档输入执行召回（总预算 `3200` 字符，渲染采用 `vagueWhen` 模糊时间感）：
 
-### 轨道 1 · 同活动强连续（Context-Routed Recall）
-- **触发来源**：① 当前活跃 `ActivityPlugin` 提供的 `activityHint` + `topicHint`（最高优先）；② 本轮话语命中 `REGISTRY.yaml` 中某空间的 `triggers`（或与空间描述向量高度匹配）。
-- **召回内容**：
-  - 优先挂载 `topicHint` 精准命中的当前卡片（如正在追的剧/连载的睡前故事），保证绝不断档吃书；
-  - 同目录下再按向量/近因补 1–2 张最相关的兄弟卡片（如“类似风格看过的片”）。
+### Ring 1 极简 3 步召回（先跑通真机、攒真实标注）
+1. **活动目录直挂**：若输入命中 `activities/REGISTRY.yaml` 某空间 `triggers`（或 Ring 1.5 活跃 `ActivityPlugin`），优先挂载该目录下最相关的 Top-3 活跃卡片；
+2. **全局相关性召回**：在其余活跃卡片（排除 `resolved`/`archived`/`faded` 与常驻前缀文件）上，若已配置 `embedding` 则按余弦相似度取 Top-5，未配置或超时则平滑降级为 SQLite FTS5 2-gram 检索；非活动闲聊时补近 72h 未过期 `daily/` 最多 2 条；
+3. **去重与裁剪**：跳过本会话近 2 小时内已召回的卡片（命中续接触发词豁免），按预算 `3200` 字符截断注入。
 
-### 轨道 2 · 跨活动语义互文（Cross-Activity Vector Resonance）
-- 在全部活跃卡片（含 `active` 与 `disputed`，排除轨道 1 已选与 `resolved`/`archived`；命中 `disputed` 卡时附轻量待确认标记）上执行 **向量相似度（正文 + `when_to_recall`）+ 实词 IDF 字面打分** RRF 融合，并支持接入可选 **`reranker` 模型槽位**对候选卡片做二阶段精排；
-- **异常降级**：当 `embedding` 或 `reranker` 服务离线或未配置时，自动平滑降级为 SQLite FTS5 + `when_to_recall` + IDF 字面打分，绝不阻塞主对话；
-- **跨目录高门槛**：仅当相似度超过高阈值（默认 `cos >= 0.65` 或强专名 IDF 命中）才浮现最多 **1–2 条**跨活动卡片，实现“看电影联想到上次睡前故事或日常对话”的自然互文，同时避免无关串场；
-- **日常近因兜底**：非特定活动闲聊时，附带近 72 小时内未过期的 `daily/`（最多 2 条）与会话内 2 小时去重（用户点名“刚才说的/再讲一遍”豁免）。
+### Ring 1.5 数据驱动调优（攒够 ≥ 100 条真实 `recall_feedback` 后按需启用）
+- 按真实标注数据再决定是否引入全库 IDF 覆盖率、单字 `LIKE` 兜底、`reranker` 二阶段精排、`access_count` 半衰期延寿与 `eval:recall --baseline` 回归守门。
 
 ### 真实召回评测闭环（`recall_traces` + `recall_feedback`）
 
@@ -196,7 +191,7 @@ source: live                      # live | import（预留外部历史迁移标�
 -- 1. 只追加原始事件流（支持消息版本组 edit/reroll/delete、幂等键、具身表达、工具调用回放与外部导入来源）
 CREATE TABLE events (
   id                TEXT PRIMARY KEY,          -- ULID
-  seq               INTEGER UNIQUE NOT NULL,   -- 全局单调递增序号（供 SSE Last-Event-ID 续传）
+  seq               INTEGER UNIQUE NOT NULL,   -- 全局单调递增序号（事务内单调递增生成，不依赖 SQLite 非主键自增）
   session_id        TEXT NOT NULL,
   turn_id           TEXT,                      -- 所属对话/任务轮 ID（关联 recall_traces / API turns）
   client_message_id TEXT UNIQUE,               -- 客户端幂等键（防多端/弱网重发）
@@ -230,6 +225,15 @@ CREATE TABLE card_index (
   content_hash   TEXT NOT NULL,
   created_at     INTEGER NOT NULL,        -- 取自 frontmatter created（供 30d 衰减与 72h 近因兜底）
   updated_at     INTEGER NOT NULL
+);
+
+-- 2b. CJK 友好 FTS5 全文索引（由 memory/**/*.md 经 TS 2-gram 预处理派生，完整 DDL 见 Spec 02）
+CREATE VIRTUAL TABLE card_fts USING fts5(
+  path UNINDEXED,
+  title_tokens,
+  trigger_tokens,
+  body_tokens,
+  tokenize = 'unicode61 remove_diacritics 2'
 );
 
 -- 3. 分模型向量缓存（切回旧模型零开销复用）

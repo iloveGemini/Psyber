@@ -2,7 +2,7 @@
 version: 3
 name: review.md
 slot: memory_task
-description: C2.7 写后独立复核轮 Prompt（只读视角；新建卡核全文，修改旧卡仅核本轮新增/修改片段）
+description: C2.7 写后独立复核轮 Prompt（Ring 1.5 可选非阻塞复核启用，Ring 1 主流程不调用；只读视角）
 ---
 你正在执行本次记忆整理的「写后独立复核」。你只有只读视角，不改任何文件，只负责对照「原始对话段」检查「本轮新建或修改的记忆卡片」是否存在失真或漏记。
 
