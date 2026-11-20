@@ -1,0 +1,291 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
+export type DoorState = "open" | "quiet" | "closed";
+
+export interface PairedDevice {
+  /** 设备唯一 ID */
+  deviceId: string;
+  /** Bearer Token 的 SHA-256 十六进制哈希（绝不明文存盘） */
+  tokenHash: string;
+  /** 设备展示名 */
+  deviceName: string;
+  /** 平台标识（macos / ios / android / windows / web） */
+  platform: string;
+  /** 配对时间戳（Unix 毫秒） */
+  createdAt: number;
+  /** 最近活跃时间戳（Unix 毫秒） */
+  lastSeenAt: number;
+}
+
+/**
+ * 召回引擎可调参数（集中维护于 <dataDir>/config.json 的 recall 节点）。
+ */
+export interface RecallConfig {
+  /** 单轮注入记忆卡片的字符总预算（单位：字符，默认 3200；调大可塞入更多历史细节但增加单轮上下文开销，调小更精简但可能截断长卡） */
+  charBudget: number;
+  /** 同一会话内已召回卡片的去重冷却窗口（单位：分钟，默认 120；调大减少重复提及旧事，调小允许更频繁再次提起） */
+  dedupWindowMin: number;
+  /** 闲聊时补挂近期日常卡片的时间窗口（单位：小时，默认 72；调大覆盖更多前几天日常，调小只看最近一两天） */
+  recentDailyWindowHours: number;
+  /** Embedding 向量请求单次超时阈值（单位：毫秒，默认 2500；调小更快降级为本地 FTS5，调大容忍慢网络但增加首字延迟） */
+  embedTimeoutMs: number;
+}
+
+export const DEFAULT_RECALL_CONFIG: RecallConfig = {
+  charBudget: 3200,
+  dedupWindowMin: 120,
+  recentDailyWindowHours: 72,
+  embedTimeoutMs: 2500,
+};
+
+/** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */
+export interface CircadianConfig {
+  /** 睡眠静默窗开始时刻（HH:mm，实例本地时区，默认 "23:30"；调早会更早触发睡前整理并进入静默） */
+  sleepStart: string;
+  /** 睡眠静默窗结束时刻（HH:mm，实例本地时区，默认 "07:30"；调晚会延长早晨免打扰） */
+  sleepEnd: string;
+  /** 心跳巡检间隔（单位：分钟，默认 30；调小响应更及时，调大更省后台开销） */
+  heartbeatIntervalMin: number;
+  /** 是否启用定时心跳主动唤醒（默认 true；关闭后仅保留睡前整理与正常聊天） */
+  proactiveEnabled: boolean;
+  /** 距上次互动至少间隔多久才考虑主动唤醒（单位：分钟，默认 240；调大更克制） */
+  proactiveMinGapMin: number;
+  /** 两次主动唤醒最小冷却间隔（单位：分钟，默认 180；调大减少模型额度消耗） */
+  proactiveCooldownMin: number;
+}
+
+export const DEFAULT_CIRCADIAN_CONFIG: CircadianConfig = {
+  sleepStart: "23:30",
+  sleepEnd: "07:30",
+  heartbeatIntervalMin: 30,
+  proactiveEnabled: true,
+  proactiveMinGapMin: 240,
+  proactiveCooldownMin: 180,
+};
+
+/** Ring 1 离线通知配置（仅桌面本地通知 + 通用 Webhook，绝不存明文密钥） */
+export interface NotificationsConfig {
+  desktop: { enabled: boolean };
+  webhook?: {
+    enabled: boolean;
+    url: string;
+    /** 引用 credentials.json 中 channelTokens 的键名（可选） */
+    credentialKey?: string;
+    /** 附加自定义 HTTP 请求头（不含明文密钥） */
+    headers?: Record<string, string>;
+  };
+}
+
+export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
+  desktop: { enabled: true },
+};
+
+export interface ModelRef {
+  provider: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface LlmConfig {
+  providers: Record<
+    string,
+    {
+      kind: "anthropic" | "openai" | "google" | "openai-compat";
+      authMode: "oauth" | "api_key";
+      baseUrl?: string;
+    }
+  >;
+  slots: {
+    chat?: ModelRef;
+    memory_task?: ModelRef;
+    vision?: ModelRef;
+    embedding?: ModelRef;
+    reranker?: ModelRef;
+  };
+  thinking: {
+    enabled: boolean;
+    budgetTokens?: number;
+  };
+}
+
+/**
+ * 单住户实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
+ */
+export interface PsyberConfig {
+  /** 实例唯一 UUID，用于多地址防串连校验与抽屉域分离；首次初始化生成，不可静默重置 */
+  instanceId: string;
+  /** IANA 时区标识，默认 "Asia/Shanghai"；影响本地日切分、作息静默窗、TTL 到期日与热备命名 */
+  timezone: string;
+  /** 一扇门状态机（Ring 1 仅开放 open/quiet/closed） */
+  door: {
+    /** 当前门状态，默认 "open"；设为 "closed" 时发消息落盘为 door_note 且不唤醒 AI */
+    state: DoorState;
+    /** 门牌留给对方的简短便签，默认 null */
+    note: string | null;
+    /** 最近一次门状态变更时间戳（Unix 毫秒） */
+    updatedAt: number;
+  };
+  /** 已配对客户端设备列表（仅存 token 哈希） */
+  auth: {
+    devices: PairedDevice[];
+  };
+  /** 召回可调参数（缺失字段自动回落 DEFAULT_RECALL_CONFIG） */
+  recall?: RecallConfig;
+  /** 作息静默窗与心跳参数 */
+  circadian?: CircadianConfig;
+  /** 离线通知通道配置 */
+  notifications?: NotificationsConfig;
+  /** LLM 槽位与 Provider 非敏感配置（明文 API Key 存 credentials.json） */
+  llm?: LlmConfig;
+  /** 是否已完成初生引导 */
+  genesisCompleted?: boolean;
+}
+
+/**
+ * 原子写二进制或文本文件（同文件系统 .tmp 暂存 + fsync 刷盘 + rename 替换），防止断电留下半截文件。
+ */
+export async function atomicWriteBytes(
+  dataDir: string,
+  absTarget: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  await fs.mkdir(path.dirname(absTarget), { recursive: true });
+  const tmpDir = path.join(dataDir, ".tmp");
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpPath = path.join(tmpDir, `${crypto.randomUUID()}.tmp`);
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(bytes);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, absTarget);
+}
+
+/**
+ * 原子写文件（同文件系统 .tmp 暂存 + fsync 刷盘 + rename 替换），防止断电留下半截文件。
+ */
+export async function atomicWriteFile(
+  dataDir: string,
+  absTarget: string,
+  content: string,
+): Promise<void> {
+  await fs.mkdir(path.dirname(absTarget), { recursive: true });
+  const tmpDir = path.join(dataDir, ".tmp");
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpPath = path.join(tmpDir, `${crypto.randomUUID()}.tmp`);
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(content, "utf8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, absTarget);
+}
+
+/** 初始化单住户数据目录骨架（Ring 1 仅建必需目录） */
+export async function initDataDir(dataDir: string): Promise<void> {
+  const dirs = [
+    dataDir,
+    path.join(dataDir, ".tmp"),
+    path.join(dataDir, "media"),
+    path.join(dataDir, "stickers"),
+    path.join(dataDir, "backups"),
+    path.join(dataDir, "memory"),
+    path.join(dataDir, "memory", "daily"),
+    path.join(dataDir, "memory", "shelf"),
+    path.join(dataDir, "memory", "favorite"),
+    path.join(dataDir, "memory", "gist", "days"),
+    path.join(dataDir, "memory", "gist", "weeks"),
+    path.join(dataDir, "memory", "activities"),
+    path.join(dataDir, "memory", "entities"),
+  ];
+  for (const d of dirs) {
+    await fs.mkdir(d, { recursive: true });
+  }
+}
+
+/**
+ * 读取或首次创建 config.json。
+ * 仅在文件不存在（ENOENT）时初始化新配置；若文件损坏或无权限则显式抛错，绝不静默覆盖 instanceId。
+ */
+export async function loadOrCreateConfig(
+  dataDir: string,
+  nowMs: number,
+  defaultTimeZone = "Asia/Shanghai",
+): Promise<PsyberConfig> {
+  const configPath = path.join(dataDir, "config.json");
+  let raw: string;
+  try {
+    raw = await fs.readFile(configPath, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      throw new Error(`无法读取配置文件 ${configPath}: ${(err as Error).message}`);
+    }
+    const cfg: PsyberConfig = {
+      instanceId: crypto.randomUUID(),
+      timezone: defaultTimeZone,
+      door: {
+        state: "open",
+        note: null,
+        updatedAt: nowMs,
+      },
+      auth: {
+        devices: [],
+      },
+      recall: { ...DEFAULT_RECALL_CONFIG },
+      circadian: { ...DEFAULT_CIRCADIAN_CONFIG },
+      notifications: { ...DEFAULT_NOTIFICATIONS_CONFIG },
+      genesisCompleted: false,
+    };
+    await saveConfig(dataDir, cfg);
+    return cfg;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`配置文件 ${configPath} JSON 损坏，已拒绝覆盖以保护 instanceId: ${(err as Error).message}`);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`配置文件 ${configPath} 结构非法，顶层必须为 JSON 对象`);
+  }
+  const cfg = parsed as Partial<PsyberConfig>;
+  if (typeof cfg.instanceId !== "string" || !cfg.instanceId.trim()) {
+    throw new Error(`配置文件 ${configPath} 缺少有效 instanceId`);
+  }
+  return {
+    instanceId: cfg.instanceId,
+    timezone: typeof cfg.timezone === "string" && cfg.timezone.trim() ? cfg.timezone : defaultTimeZone,
+    door: cfg.door ?? { state: "open", note: null, updatedAt: nowMs },
+    auth: {
+      devices: Array.isArray(cfg.auth?.devices) ? cfg.auth.devices : [],
+    },
+    recall: {
+      ...DEFAULT_RECALL_CONFIG,
+      ...(cfg.recall ?? {}),
+    },
+    circadian: {
+      ...DEFAULT_CIRCADIAN_CONFIG,
+      ...(cfg.circadian ?? {}),
+    },
+    notifications: {
+      ...DEFAULT_NOTIFICATIONS_CONFIG,
+      ...(cfg.notifications ?? {}),
+    },
+    llm: cfg.llm,
+    genesisCompleted: Boolean(cfg.genesisCompleted),
+  };
+}
+
+export async function saveConfig(dataDir: string, cfg: PsyberConfig): Promise<void> {
+  const targetPath = path.join(dataDir, "config.json");
+  await atomicWriteFile(dataDir, targetPath, JSON.stringify(cfg, null, 2) + "\n");
+}

@@ -1,0 +1,18 @@
+name: psyber_app
+description: Psyber Ring 1 thin Flutter client (pairing, SSE chat stream, door note, expression renderer, lazy recall feedback).
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
