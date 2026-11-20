@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
@@ -290,8 +291,8 @@ class _GenesisPageState extends State<GenesisPage> {
                             suffixIcon: IconButton(
                               icon: Icon(
                                 _obscureKey
-                                    ? Icons.visibility_outlined
-                                    : Icons.visibility_off_outlined,
+                                    ? PhosphorIconsLight.eye
+                                    : PhosphorIconsLight.eyeSlash,
                                 size: 18,
                                 color: PsyberTheme.inkQuiet,
                               ),

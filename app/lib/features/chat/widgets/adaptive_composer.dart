@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
 import '../../../shared/rich_message_text.dart';
@@ -180,7 +181,7 @@ class AdaptiveComposer extends StatelessWidget {
                           child: Row(
                             children: [
                               Icon(
-                                Icons.mark_email_unread_outlined,
+                                PhosphorIconsLight.envelopeSimpleOpen,
                                 size: 14,
                                 color: colors.thresholdAmber,
                               ),
@@ -232,7 +233,7 @@ class AdaptiveComposer extends StatelessWidget {
                                       child: CircularProgressIndicator(strokeWidth: 2),
                                     )
                                   : Icon(
-                                      Icons.image_outlined,
+                                      PhosphorIconsLight.image,
                                       size: 20,
                                       color: colors.inkQuiet,
                                     ),
@@ -242,7 +243,7 @@ class AdaptiveComposer extends StatelessWidget {
                               tooltip: '发送贴纸',
                               onPressed: sending ? null : onOpenStickers,
                               icon: Icon(
-                                Icons.emoji_emotions_outlined,
+                                PhosphorIconsLight.smiley,
                                 size: 20,
                                 color: colors.inkQuiet,
                               ),
@@ -354,13 +355,13 @@ class _PendingThumbChip extends StatelessWidget {
                     errorBuilder: (_, __, ___) => const SizedBox(
                       width: 34,
                       height: 34,
-                      child: Icon(Icons.image_outlined, size: 18, color: PsyberTheme.inkQuiet),
+                      child: Icon(PhosphorIconsLight.image, size: 18, color: PsyberTheme.inkQuiet),
                     ),
                   )
                 : const SizedBox(
                     width: 34,
                     height: 34,
-                    child: Icon(Icons.image_outlined, size: 18, color: PsyberTheme.inkQuiet),
+                    child: Icon(PhosphorIconsLight.image, size: 18, color: PsyberTheme.inkQuiet),
                   ),
           ),
           const SizedBox(width: 6),
@@ -378,7 +379,7 @@ class _PendingThumbChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             child: const Padding(
               padding: EdgeInsets.all(2),
-              child: Icon(Icons.close, size: 14, color: PsyberTheme.inkQuiet),
+              child: Icon(PhosphorIconsLight.x, size: 14, color: PsyberTheme.inkQuiet),
             ),
           ),
         ],

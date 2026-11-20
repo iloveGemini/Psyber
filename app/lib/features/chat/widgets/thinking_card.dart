@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../shared/theme.dart';
 
@@ -56,7 +57,7 @@ class _ThinkingCardState extends State<ThinkingCard> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    _expanded ? PhosphorIconsLight.caretUp : PhosphorIconsLight.caretDown,
                     size: 15,
                     color: colors.inkQuiet,
                   ),

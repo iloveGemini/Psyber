@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
@@ -126,14 +127,14 @@ class _DrawerModalState extends State<DrawerModal> {
                 children: [
                   if (_opened != null)
                     IconButton(
-                      icon: const Icon(Icons.arrow_back, size: 18),
+                      icon: const Icon(PhosphorIconsLight.arrowLeft, size: 18),
                       onPressed: () {
                         setState(() => _opened = null);
                         unawaited(_load());
                       },
                     ),
                   const Icon(
-                    Icons.lock_outline,
+                    PhosphorIconsLight.lock,
                     size: 18,
                     color: PsyberTheme.thresholdAmber,
                   ),
@@ -148,7 +149,7 @@ class _DrawerModalState extends State<DrawerModal> {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.close, size: 18),
+                    icon: const Icon(PhosphorIconsLight.x, size: 18),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ],
@@ -235,8 +236,8 @@ class _DrawerModalState extends State<DrawerModal> {
                                                 children: [
                                                   Icon(
                                                     entry.peeked
-                                                        ? Icons.lock_open_outlined
-                                                        : Icons.verified_outlined,
+                                                        ? PhosphorIconsLight.lockOpen
+                                                        : PhosphorIconsLight.sealCheck,
                                                     size: 16,
                                                     color: entry.peeked
                                                         ? PsyberTheme.thresholdAmber

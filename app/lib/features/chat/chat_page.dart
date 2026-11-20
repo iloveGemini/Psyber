@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/media/image_picker.dart';
 import '../../../core/models/models.dart';
@@ -335,7 +336,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                       ),
                                       IconButton(
                                         icon: const Icon(
-                                          Icons.close,
+                                          PhosphorIconsLight.x,
                                           size: 16,
                                           color: PsyberTheme.dangerInk,
                                         ),
@@ -452,12 +453,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   child: Material(
                                     color: colors.letterSurface,
                                     shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(18),
+                                      borderRadius: BorderRadius.circular(9),
                                       side: BorderSide(color: colors.hairline),
                                     ),
                                     child: InkWell(
                                       key: const Key('scroll_to_bottom_button'),
-                                      borderRadius: BorderRadius.circular(18),
+                                      borderRadius: BorderRadius.circular(9),
                                       onTap: _scrollToBottom,
                                       child: Padding(
                                         padding: const EdgeInsets.symmetric(
@@ -468,7 +469,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
                                             Icon(
-                                              Icons.arrow_downward,
+                                              PhosphorIconsLight.arrowDown,
                                               size: 14,
                                               color: colors.inkDeep,
                                             ),

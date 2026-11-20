@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/media/image_picker.dart';
 import '../../../core/models/models.dart';
@@ -43,19 +44,19 @@ class LeftArchiveDrawer extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(20, 16, 12, 10),
               child: Row(
                 children: [
-                  Icon(Icons.all_inbox_outlined, size: 20, color: colors.inkDeep),
+                  Icon(PhosphorIconsLight.archiveBox, size: 20, color: colors.inkDeep),
                   const SizedBox(width: 8),
                   Text(
                     '抽屉与档案',
                     style: PsyberTheme.editorialSerif.copyWith(
                       fontSize: 18,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w500,
                       color: colors.inkDeep,
                     ),
                   ),
                   const Spacer(),
                   IconButton(
-                    icon: const Icon(Icons.close, size: 18),
+                    icon: const Icon(PhosphorIconsLight.x, size: 18),
                     tooltip: '关闭抽屉',
                     onPressed: () => Navigator.of(context).pop(),
                   ),
@@ -77,17 +78,10 @@ class LeftArchiveDrawer extends StatelessWidget {
                 children: [
                   ListTile(
                     key: const Key('open_drawer_entry'),
-                    leading: Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: colors.thresholdAmberSoft,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(
-                        Icons.lock_outline,
-                        size: 18,
-                        color: colors.thresholdAmber,
-                      ),
+                    leading: Icon(
+                      PhosphorIconsLight.lock,
+                      size: 18,
+                      color: colors.thresholdAmber,
                     ),
                     title: const Text(
                       '上锁的抽屉',
@@ -97,7 +91,6 @@ class LeftArchiveDrawer extends StatelessWidget {
                       '住户的私密日记（拆封前必有二次确认）',
                       style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
                     ),
-                    trailing: const Icon(Icons.chevron_right, size: 18),
                     onTap: () {
                       Navigator.of(context).pop();
                       showDialog<void>(
@@ -110,17 +103,10 @@ class LeftArchiveDrawer extends StatelessWidget {
                     valueListenable: controller.doorNotifier,
                     builder: (context, door, _) {
                       return ListTile(
-                        leading: Container(
-                          padding: const EdgeInsets.all(7),
-                          decoration: BoxDecoration(
-                            color: colors.celadonWash,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Icon(
-                            Icons.markunread_mailbox_outlined,
-                            size: 18,
-                            color: colors.inkDeep,
-                          ),
+                        leading: Icon(
+                          PhosphorIconsLight.tray,
+                          size: 18,
+                          color: colors.inkDeep,
                         ),
                         title: const Text(
                           '门缝纸条归档',
@@ -151,7 +137,7 @@ class LeftArchiveDrawer extends StatelessWidget {
                                   ),
                                 ),
                               )
-                            : const Icon(Icons.chevron_right, size: 18),
+                            : null,
                         onTap: () {
                           // 可轻弹便签归档说明
                         },
@@ -159,17 +145,10 @@ class LeftArchiveDrawer extends StatelessWidget {
                     },
                   ),
                   ListTile(
-                    leading: Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: colors.celadonWash,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(
-                        Icons.auto_stories_outlined,
-                        size: 18,
-                        color: colors.inkDeep,
-                      ),
+                    leading: Icon(
+                      PhosphorIconsLight.bookOpen,
+                      size: 18,
+                      color: colors.inkDeep,
                     ),
                     title: const Text(
                       '生活记忆',
@@ -179,7 +158,6 @@ class LeftArchiveDrawer extends StatelessWidget {
                       '住户在夜间静默整理出的生活卡片',
                       style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
                     ),
-                    trailing: const Icon(Icons.chevron_right, size: 18),
                     onTap: () {
                       // 记忆漫步卡片
                     },
@@ -193,7 +171,7 @@ class LeftArchiveDrawer extends StatelessWidget {
               child: ListTile(
                 key: const Key('settings_button'),
                 dense: true,
-                leading: Icon(Icons.tune_outlined, size: 19, color: colors.inkDeep),
+                leading: Icon(PhosphorIconsLight.slidersHorizontal, size: 19, color: colors.inkDeep),
                 title: Text(
                   '偏好与系统设置',
                   style: TextStyle(
@@ -206,7 +184,6 @@ class LeftArchiveDrawer extends StatelessWidget {
                   '配对设备、模型路由、作息与日夜主题',
                   style: TextStyle(fontSize: 11, color: colors.inkQuiet),
                 ),
-                trailing: const Icon(Icons.chevron_right, size: 18),
                 onTap: () {
                   Navigator.of(context).pop();
                   onOpenSettings();
@@ -251,19 +228,19 @@ class RightActivityDrawer extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(20, 16, 12, 10),
               child: Row(
                 children: [
-                  Icon(Icons.widgets_outlined, size: 20, color: colors.inkDeep),
+                  Icon(PhosphorIconsLight.squaresFour, size: 20, color: colors.inkDeep),
                   const SizedBox(width: 8),
                   Text(
                     '常用活动',
                     style: PsyberTheme.editorialSerif.copyWith(
                       fontSize: 18,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w500,
                       color: colors.inkDeep,
                     ),
                   ),
                   const Spacer(),
                   IconButton(
-                    icon: const Icon(Icons.close, size: 18),
+                    icon: const Icon(PhosphorIconsLight.x, size: 18),
                     tooltip: '关闭抽屉',
                     onPressed: () => Navigator.of(context).pop(),
                   ),
@@ -301,7 +278,7 @@ class RightActivityDrawer extends StatelessWidget {
                           children: [
                             Row(
                               children: [
-                                Icon(Icons.movie_outlined, size: 18, color: colors.inkDeep),
+                                Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
                                 const SizedBox(width: 8),
                                 const Expanded(
                                   child: Text(
@@ -379,7 +356,7 @@ class RightActivityDrawer extends StatelessWidget {
                   const SizedBox(height: 14),
                   _ActivitySlotCard(
                     colors: colors,
-                    icon: Icons.timer_outlined,
+                    icon: PhosphorIconsLight.timer,
                     title: '自习专注室',
                     desc: '番茄钟与无声静默陪伴，适合工作、阅读或专注学习。',
                     chip: 'Ring 2 预留',
@@ -387,7 +364,7 @@ class RightActivityDrawer extends StatelessWidget {
                   const SizedBox(height: 10),
                   _ActivitySlotCard(
                     colors: colors,
-                    icon: Icons.water_drop_outlined,
+                    icon: PhosphorIconsLight.drop,
                     title: '雨声与白噪音',
                     desc: '轻柔的环境雨声与自然声景，营造安宁氛围。',
                     chip: 'Ring 2 预留',
@@ -395,7 +372,7 @@ class RightActivityDrawer extends StatelessWidget {
                   const SizedBox(height: 10),
                   _ActivitySlotCard(
                     colors: colors,
-                    icon: Icons.music_note_outlined,
+                    icon: PhosphorIconsLight.musicNote,
                     title: '双人音乐电台',
                     desc: '共享同一份歌单与旋律，实时同步歌词感受。',
                     chip: 'Ring 2 预留',

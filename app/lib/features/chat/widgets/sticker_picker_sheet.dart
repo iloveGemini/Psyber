@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
 import '../../../shared/theme.dart';
@@ -54,7 +55,7 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                   ),
                   const Spacer(),
                   IconButton(
-                    icon: const Icon(Icons.close, size: 18),
+                    icon: const Icon(PhosphorIconsLight.x, size: 18),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ],
@@ -177,14 +178,14 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                                                   },
                                                   fit: BoxFit.contain,
                                                   errorBuilder: (_, __, ___) => Icon(
-                                                    Icons.emoji_emotions_outlined,
+                                                    PhosphorIconsLight.smiley,
                                                     size: 28,
                                                     color: colors.inkQuiet,
                                                   ),
                                                 ),
                                               )
                                             : Icon(
-                                                Icons.emoji_emotions_outlined,
+                                                PhosphorIconsLight.smiley,
                                                 size: 28,
                                                 color: colors.inkQuiet,
                                               ),

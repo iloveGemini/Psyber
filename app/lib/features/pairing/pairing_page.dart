@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
@@ -221,7 +222,7 @@ class _PairingPageState extends State<PairingPage> {
                       child: Row(
                         children: [
                           Icon(
-                            _showHelp ? Icons.expand_less : Icons.help_outline,
+                            _showHelp ? PhosphorIconsLight.caretUp : PhosphorIconsLight.question,
                             size: 15,
                             color: PsyberTheme.inkQuiet,
                           ),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:flutter/services.dart';
 
 import 'theme.dart';
@@ -83,7 +84,7 @@ class RichMessageText extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.copy_outlined, size: 13, color: colors.inkQuiet),
+                            Icon(PhosphorIconsLight.copy, size: 13, color: colors.inkQuiet),
                             const SizedBox(width: 4),
                             Text(
                               '复制',

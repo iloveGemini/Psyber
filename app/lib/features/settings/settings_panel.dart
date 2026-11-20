@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../core/media/image_picker.dart';
 import '../../core/models/models.dart';
@@ -326,7 +327,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                                 setDialogState(() => pickedImage = res);
                               }
                             },
-                      icon: const Icon(Icons.image_outlined, size: 17),
+                      icon: const Icon(PhosphorIconsLight.image, size: 17),
                       label: Text(pickedImage == null ? '选择贴纸图片' : pickedImage!.filename),
                     ),
                     const SizedBox(height: 12),
@@ -438,7 +439,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                   child: _ThemeChip(
                     key: const Key('theme_mode_system'),
                     label: '跟随系统',
-                    icon: Icons.brightness_auto_outlined,
+                    icon: PhosphorIconsLight.circleHalf,
                     selected: currentMode == ThemeMode.system,
                     onTap: () => widget.controller.setThemeMode(ThemeMode.system),
                   ),
@@ -448,7 +449,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                   child: _ThemeChip(
                     key: const Key('theme_mode_light'),
                     label: '暖纸浅色',
-                    icon: Icons.light_mode_outlined,
+                    icon: PhosphorIconsLight.sun,
                     selected: currentMode == ThemeMode.light,
                     onTap: () => widget.controller.setThemeMode(ThemeMode.light),
                   ),
@@ -458,7 +459,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                   child: _ThemeChip(
                     key: const Key('theme_mode_dark'),
                     label: '曜夜深色',
-                    icon: Icons.dark_mode_outlined,
+                    icon: PhosphorIconsLight.moon,
                     selected: currentMode == ThemeMode.dark,
                     onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
                   ),
@@ -487,13 +488,13 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                 '房间与连接设置',
                 style: PsyberTheme.editorialSerif.copyWith(
                   fontSize: 17.5,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
               const Spacer(),
               IconButton(
                 key: const Key('close_settings_button'),
-                icon: const Icon(Icons.close, size: 19),
+                icon: const Icon(PhosphorIconsLight.x, size: 19),
                 tooltip: '关闭设置',
                 onPressed: widget.onClose,
               ),
@@ -549,7 +550,6 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                                 ],
                               ),
                             ),
-                            const Icon(Icons.chevron_right, size: 18, color: PsyberTheme.inkQuiet),
                           ],
                         ),
                       ),
@@ -578,7 +578,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                         ListTile(
                           key: const Key('open_drawer_entry'),
                           leading: const Icon(
-                            Icons.lock_outline,
+                            PhosphorIconsLight.lock,
                             size: 19,
                             color: PsyberTheme.thresholdAmber,
                           ),
@@ -587,7 +587,6 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                             '私密日记（拆封必留痕告知对方 · Ring 1.5）',
                             style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
                           ),
-                          trailing: const Icon(Icons.chevron_right, size: 18),
                           onTap: () {
                             unawaited(
                               showDialog<void>(
@@ -601,7 +600,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                         ListTile(
                           key: const Key('open_sticker_manager_entry'),
                           leading: Icon(
-                            Icons.add_reaction_outlined,
+                            PhosphorIconsLight.smiley,
                             size: 19,
                             color: colors.inkQuiet,
                           ),
@@ -610,7 +609,6 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                             '支持 PNG / WebP / GIF（Ring 1.5 动态贴纸库）',
                             style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
                           ),
-                          trailing: const Icon(Icons.chevron_right, size: 18),
                           onTap: _openStickerUploadDialog,
                         ),
                       ],
@@ -744,8 +742,8 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                               leading: Icon(
                                 snap.devices[i].platform == 'ios' ||
                                         snap.devices[i].platform == 'android'
-                                    ? Icons.smartphone_outlined
-                                    : Icons.laptop_mac_outlined,
+                                    ? PhosphorIconsLight.deviceMobile
+                                    : PhosphorIconsLight.laptop,
                                 size: 18,
                                 color: PsyberTheme.inkQuiet,
                               ),
@@ -807,7 +805,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                         ],
                         ListTile(
                           key: const Key('disconnect_device_button'),
-                          leading: const Icon(Icons.link_off, size: 18, color: PsyberTheme.dangerInk),
+                          leading: const Icon(PhosphorIconsLight.linkBreak, size: 18, color: PsyberTheme.dangerInk),
                           title: const Text(
                             '断开本机连接并重新配对',
                             style: TextStyle(fontSize: 13.5, color: PsyberTheme.dangerInk),

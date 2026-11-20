@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/models/models.dart';
@@ -131,7 +132,7 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
                       ),
                       const SizedBox(width: 4),
                       Icon(
-                        _expanded ? Icons.expand_less : Icons.expand_more,
+                        _expanded ? PhosphorIconsLight.caretUp : PhosphorIconsLight.caretDown,
                         size: 14,
                         color: PsyberTheme.inkFaint,
                       ),
@@ -219,7 +220,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                 right: 12,
                 child: IconButton(
                   style: IconButton.styleFrom(backgroundColor: Colors.black54),
-                  icon: const Icon(Icons.close, color: Colors.white),
+                  icon: const Icon(PhosphorIconsLight.x, color: Colors.white),
                   onPressed: () => Navigator.of(ctx).pop(),
                 ),
               ),
@@ -314,7 +315,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
             children: [
               if (item.content.trim().isNotEmpty)
                 ListTile(
-                  leading: const Icon(Icons.copy_outlined, size: 19),
+                  leading: const Icon(PhosphorIconsLight.copy, size: 19),
                   title: const Text('复制文字'),
                   onTap: () {
                     unawaited(Clipboard.setData(ClipboardData(text: item.content)));
@@ -324,7 +325,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (canEdit)
                 ListTile(
                   key: Key('edit_msg_${item.id}'),
-                  leading: const Icon(Icons.edit_outlined, size: 19),
+                  leading: const Icon(PhosphorIconsLight.pencilSimple, size: 19),
                   title: const Text('编辑并重发'),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -334,7 +335,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (canReroll)
                 ListTile(
                   key: Key('reroll_msg_${item.id}'),
-                  leading: const Icon(Icons.refresh_outlined, size: 19),
+                  leading: const Icon(PhosphorIconsLight.arrowClockwise, size: 19),
                   title: const Text('再说一次（Reroll）'),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -345,7 +346,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                 ListTile(
                   key: Key('delete_msg_${item.id}'),
                   leading: const Icon(
-                    Icons.delete_outline,
+                    PhosphorIconsLight.trash,
                     size: 19,
                     color: PsyberTheme.dangerInk,
                   ),
@@ -559,7 +560,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                               )
                                           : null,
                                       child: Icon(
-                                        Icons.chevron_left,
+                                        PhosphorIconsLight.caretLeft,
                                         size: 16,
                                         color: item.version > 1
                                             ? PsyberTheme.inkQuiet
@@ -581,7 +582,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                               )
                                           : null,
                                       child: Icon(
-                                        Icons.chevron_right,
+                                        PhosphorIconsLight.caretRight,
                                         size: 16,
                                         color: item.version < item.versionCount
                                             ? PsyberTheme.inkQuiet
@@ -627,7 +628,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         ),
         child: IconButton(
           key: Key('msg_more_${widget.item.id}'),
-          icon: const Icon(Icons.more_horiz, size: 17, color: PsyberTheme.inkQuiet),
+          icon: const Icon(PhosphorIconsLight.dotsThree, size: 17, color: PsyberTheme.inkQuiet),
           tooltip: '消息操作',
           padding: const EdgeInsets.all(4),
           constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
@@ -727,7 +728,7 @@ class StreamingAssistantBubble extends StatelessWidget {
                           minimumSize: Size.zero,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        icon: const Icon(Icons.stop_circle_outlined, size: 15),
+                        icon: const Icon(PhosphorIconsLight.stopCircle, size: 15),
                         label: const Text('停止生成', style: TextStyle(fontSize: 12)),
                       ),
                     ),

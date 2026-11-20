@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
 import '../../../shared/theme.dart';
@@ -73,7 +74,7 @@ class ActivityBannerSlot extends StatelessWidget {
                       height: 32,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => Icon(
-                        Icons.movie_outlined,
+                        PhosphorIconsLight.filmStrip,
                         size: 18,
                         color: colors.inkDeep,
                       ),
@@ -81,7 +82,7 @@ class ActivityBannerSlot extends StatelessWidget {
                   ),
                   const SizedBox(width: 10),
                 ] else ...[
-                  Icon(Icons.movie_outlined, size: 18, color: colors.inkDeep),
+                  Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
                   const SizedBox(width: 8),
                 ],
                 Expanded(

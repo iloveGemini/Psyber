@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
 import '../../../shared/theme.dart';
@@ -109,7 +110,7 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                         icon: Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            const Icon(Icons.all_inbox_outlined, size: 21),
+                            const Icon(PhosphorIconsLight.archiveBox, size: 21),
                             if (door.unreadDoorNotes > 0)
                               Positioned(
                                 right: -2,
@@ -165,7 +166,7 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                                             'P',
                                             style: PsyberTheme.editorialSerif.copyWith(
                                               fontSize: 16,
-                                              fontWeight: FontWeight.w600,
+                                              fontWeight: FontWeight.w500,
                                               color: colors.inkDeep,
                                             ),
                                           ),
@@ -201,7 +202,7 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                                             'Psyber',
                                             style: PsyberTheme.editorialSerif.copyWith(
                                               fontSize: 15,
-                                              fontWeight: FontWeight.w600,
+                                              fontWeight: FontWeight.w500,
                                               color: colors.inkDeep,
                                             ),
                                           ),
@@ -252,8 +253,8 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                                           const SizedBox(width: 2),
                                           Icon(
                                             _expanded
-                                                ? Icons.keyboard_arrow_up
-                                                : Icons.keyboard_arrow_down,
+                                                ? PhosphorIconsLight.caretUp
+                                                : PhosphorIconsLight.caretDown,
                                             size: 15,
                                             color: colors.inkFaint,
                                           ),
@@ -293,8 +294,8 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                           children: [
                             Icon(
                               widget.activeActivity != null
-                                  ? Icons.movie_outlined
-                                  : Icons.widgets_outlined,
+                                  ? PhosphorIconsLight.filmStrip
+                                  : PhosphorIconsLight.squaresFour,
                               size: 21,
                             ),
                             if (widget.activeActivity != null)
@@ -370,7 +371,7 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                             style: TextStyle(
                               fontSize: 12.5,
                               color: colors.inkQuiet,
-                              height: 1.45,
+                              height: 1.6,
                             ),
                           ),
                           if (circadian != null) ...[
