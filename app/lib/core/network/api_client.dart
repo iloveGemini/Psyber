@@ -216,6 +216,25 @@ abstract class PsyberApiClient {
     String id,
   );
 
+  /// Ring 1.5：读取设置页消耗统计（今日/累计/按日/按模型费用与 Prompt Cache 命中率）。
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile);
+
+  /// Ring 1.5：一键模型连通测试。
+  Future<LlmTestResult> testLlmModel(
+    ConnectionProfile profile, {
+    required String provider,
+    required String model,
+  });
+
+  /// Ring 1.5：上传双人头像（who 为 user 或 resident）。
+  Future<String> uploadAvatar(
+    ConnectionProfile profile, {
+    required String who,
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+  });
+
   /// 打开 SSE 实时事件流；调用方取消订阅时自动断开底层连接。
   Stream<SseEventFrame> openEventStream(
     ConnectionProfile profile, {
@@ -937,6 +956,77 @@ class HttpPsyberApiClient implements PsyberApiClient {
       body: const {'confirmed': true},
     );
     return DrawerOpenedContent.fromJson(json);
+  }
+
+  @override
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/usage/stats');
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    return UsageStatsSnapshot.fromJson(json);
+  }
+
+  @override
+  Future<LlmTestResult> testLlmModel(
+    ConnectionProfile profile, {
+    required String provider,
+    required String model,
+  }) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/llm/test');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {'provider': provider, 'model': model},
+      timeout: const Duration(seconds: 20),
+    );
+    return LlmTestResult.fromJson(json);
+  }
+
+  @override
+  Future<String> uploadAvatar(
+    ConnectionProfile profile, {
+    required String who,
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+  }) async {
+    final boundary = '----psyberavt${DateTime.now().microsecondsSinceEpoch}';
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/avatars/$who');
+    final client = _clientFactory();
+    client.connectionTimeout = const Duration(seconds: 20);
+    try {
+      final req = await client.postUrl(uri).timeout(const Duration(seconds: 20));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${profile.token}');
+      req.headers.set(
+        HttpHeaders.contentTypeHeader,
+        'multipart/form-data; boundary=$boundary',
+      );
+      final header = '--$boundary\r\n'
+          'Content-Disposition: form-data; name="file"; filename="$filename"\r\n'
+          'Content-Type: $mimeType\r\n\r\n';
+      req.add(utf8.encode(header));
+      req.add(bytes);
+      req.add(utf8.encode('\r\n--$boundary--\r\n'));
+      final res = await req.close().timeout(const Duration(seconds: 20));
+      final rawText = await utf8.decodeStream(res).timeout(const Duration(seconds: 20));
+      final map = _safeDecodeMap(rawText);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final err = map['error'];
+        final errMap = err is Map<String, dynamic> ? err : const <String, dynamic>{};
+        throw ApiException(
+          statusCode: res.statusCode,
+          code: errMap['code'] as String? ?? 'HTTP_${res.statusCode}',
+          message: errMap['message'] as String? ?? '头像上传失败（HTTP ${res.statusCode}）',
+        );
+      }
+      return map['url'] as String? ?? '';
+    } finally {
+      client.close(force: true);
+    }
   }
 
   @override

@@ -32,7 +32,7 @@ import {
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
 import type { ChatModelClient } from "./llm/client.ts";
-import { DynamicChatModel } from "./llm/router.ts";
+import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
 import { MemoryIndex } from "./memory/index.ts";
 import { MemoryTools, isAllowedWritePath } from "./memory/tools.ts";
@@ -68,8 +68,10 @@ export interface BootOptions {
   chatModel?: ChatModelClient;
   /** 可注入桌面通知发送器，供离线测试阻断系统弹窗 */
   desktopSender?: (payload: NotificationPayload) => Promise<void>;
-  /** 可注入 fetch 实现，供离线测试阻断 Webhook 外网请求 */
+  /** 可注入 fetch 实现，供离线测试阻断外网请求 */
   fetchImpl?: typeof fetch;
+  /** 可注入模型探测工厂，供 /api/v1/llm/test 离线测试 */
+  llmTestClientFactory?: (resolved: ResolvedByokSlot) => ChatModelClient;
   /** 是否启动后台定时心跳（生产默认 true，单测可传 false 后手动调用 tickHeartbeat） */
   startHeartbeatTimer?: boolean;
 }
@@ -384,6 +386,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     onSettingsUpdated: () => {
       rescheduleHeartbeatTimer();
     },
+    fetchImpl: opts.fetchImpl,
+    llmTestClientFactory: opts.llmTestClientFactory,
   });
 
   const waitForIdle = async (): Promise<void> => {

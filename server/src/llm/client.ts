@@ -10,6 +10,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 
+import type { ThinkingLevel } from "../core/config.ts";
 import type { ToolDefinition } from "../tools/registry.ts";
 
 export type LlmErrorCode =
@@ -80,6 +81,8 @@ export interface ChatStreamRequest {
   sessionId?: string;
   temperature?: number;
   maxTokens?: number;
+  thinkingLevel?: ThinkingLevel;
+  thinkingBudgetTokens?: number;
   signal?: AbortSignal;
 }
 
@@ -205,11 +208,17 @@ export class PiAiChatClient implements ChatModelClient {
       tools,
     };
 
+    const reasoning =
+      request.thinkingLevel && request.thinkingLevel !== "off" && this.model.reasoning
+        ? request.thinkingLevel
+        : undefined;
+
     const eventStream = this.models.streamSimple(this.model, context, {
       apiKey: this.apiKey,
       sessionId: request.sessionId,
       temperature: request.temperature,
       maxTokens: request.maxTokens,
+      ...(reasoning ? { reasoning } : {}),
       cacheRetention: "short",
       signal: request.signal,
     });

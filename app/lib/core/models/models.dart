@@ -912,7 +912,13 @@ class SettingsSnapshot {
     this.timezone = 'Asia/Shanghai',
     this.providers = const <String, ProviderSettingsView>{},
     this.chatSlot,
+    this.fallbackSlots = const <ModelSlotView>[],
     this.thinkingEnabled = true,
+    this.thinkingLevel = 'medium',
+    this.chatContextLimit,
+    this.soloContextLimit,
+    this.userAvatarUrl,
+    this.residentAvatarUrl,
     this.circadian = const CircadianSettings(),
     this.desktopNotifyEnabled = true,
     this.webhookEnabled = false,
@@ -924,7 +930,13 @@ class SettingsSnapshot {
   final String timezone;
   final Map<String, ProviderSettingsView> providers;
   final ModelSlotView? chatSlot;
+  final List<ModelSlotView> fallbackSlots;
   final bool thinkingEnabled;
+  final String thinkingLevel;
+  final int? chatContextLimit;
+  final int? soloContextLimit;
+  final String? userAvatarUrl;
+  final String? residentAvatarUrl;
   final CircadianSettings circadian;
   final bool desktopNotifyEnabled;
   final bool webhookEnabled;
@@ -955,8 +967,31 @@ class SettingsSnapshot {
     final chatSlot = rawChat is Map<String, dynamic>
         ? ModelSlotView.fromJson(rawChat)
         : null;
+    final rawFallbacks = slots['fallbacks'];
+    final fallbackSlots = <ModelSlotView>[];
+    if (rawFallbacks is List<dynamic>) {
+      for (final f in rawFallbacks) {
+        if (f is Map<String, dynamic>) {
+          fallbackSlots.add(ModelSlotView.fromJson(f));
+        }
+      }
+    }
     final thinking = llm['thinking'] is Map<String, dynamic>
         ? llm['thinking'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final thinkingEnabled = thinking['enabled'] != false;
+    final rawLevel = thinking['level'] as String?;
+    final thinkingLevel = (rawLevel == 'off' ||
+            rawLevel == 'low' ||
+            rawLevel == 'medium' ||
+            rawLevel == 'high')
+        ? rawLevel!
+        : (thinkingEnabled ? 'medium' : 'off');
+    final rawLimits = llm['contextLimits'] is Map<String, dynamic>
+        ? llm['contextLimits'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final rawAvatars = json['avatars'] is Map<String, dynamic>
+        ? json['avatars'] as Map<String, dynamic>
         : const <String, dynamic>{};
 
     final rawCircadian = json['circadian'] is Map<String, dynamic>
@@ -966,8 +1001,6 @@ class SettingsSnapshot {
     final rawNotif = json['notifications'] is Map<String, dynamic>
         ? json['notifications'] as Map<String, dynamic>
         : const <String, dynamic>{};
-    // 兼容服务端 Ring 1 结构 {desktop: {enabled}, webhook: {enabled, url}}
-    // 以及 Spec 04 预留结构 {channels: {desktop: {enabled}}}
     final rawChannels = rawNotif['channels'] is Map<String, dynamic>
         ? rawNotif['channels'] as Map<String, dynamic>
         : rawNotif;
@@ -992,7 +1025,13 @@ class SettingsSnapshot {
       timezone: json['timezone'] as String? ?? 'Asia/Shanghai',
       providers: providers,
       chatSlot: chatSlot,
-      thinkingEnabled: thinking['enabled'] != false,
+      fallbackSlots: fallbackSlots,
+      thinkingEnabled: thinkingEnabled,
+      thinkingLevel: thinkingLevel,
+      chatContextLimit: (rawLimits['chat'] as num?)?.toInt(),
+      soloContextLimit: (rawLimits['solo'] as num?)?.toInt(),
+      userAvatarUrl: rawAvatars['userUrl'] as String?,
+      residentAvatarUrl: rawAvatars['residentUrl'] as String?,
       circadian: CircadianSettings.fromJson(rawCircadian),
       desktopNotifyEnabled: desktopMap['enabled'] != false,
       webhookEnabled: webhookMap['enabled'] == true,
@@ -1001,6 +1040,119 @@ class SettingsSnapshot {
       recallEvalNoticeResident: json['recallEvalNoticeResident'] == true,
     );
   }
+}
+
+@immutable
+class UsageBucket {
+  const UsageBucket({
+    this.turnCount = 0,
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+    this.cacheHitRate = 0.0,
+    this.estimatedCostUsd = 0.0,
+  });
+
+  final int turnCount;
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
+  final double cacheHitRate;
+  final double estimatedCostUsd;
+
+  factory UsageBucket.fromJson(Map<String, dynamic> json) {
+    return UsageBucket(
+      turnCount: (json['turnCount'] as num?)?.toInt() ?? 0,
+      inputTokens: (json['inputTokens'] as num?)?.toInt() ?? 0,
+      outputTokens: (json['outputTokens'] as num?)?.toInt() ?? 0,
+      cacheReadTokens: (json['cacheReadTokens'] as num?)?.toInt() ?? 0,
+      cacheWriteTokens: (json['cacheWriteTokens'] as num?)?.toInt() ?? 0,
+      cacheHitRate: (json['cacheHitRate'] as num?)?.toDouble() ?? 0.0,
+      estimatedCostUsd: (json['estimatedCostUsd'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+@immutable
+class DailyUsageEntry {
+  const DailyUsageEntry({required this.date, required this.bucket});
+  final String date;
+  final UsageBucket bucket;
+
+  factory DailyUsageEntry.fromJson(Map<String, dynamic> json) => DailyUsageEntry(
+        date: json['date'] as String? ?? '',
+        bucket: UsageBucket.fromJson(json),
+      );
+}
+
+@immutable
+class ModelUsageEntry {
+  const ModelUsageEntry({required this.model, required this.bucket});
+  final String model;
+  final UsageBucket bucket;
+
+  factory ModelUsageEntry.fromJson(Map<String, dynamic> json) => ModelUsageEntry(
+        model: json['model'] as String? ?? 'unknown',
+        bucket: UsageBucket.fromJson(json),
+      );
+}
+
+@immutable
+class UsageStatsSnapshot {
+  const UsageStatsSnapshot({
+    this.today = const UsageBucket(),
+    this.total = const UsageBucket(),
+    this.daily = const <DailyUsageEntry>[],
+    this.byModel = const <ModelUsageEntry>[],
+  });
+
+  final UsageBucket today;
+  final UsageBucket total;
+  final List<DailyUsageEntry> daily;
+  final List<ModelUsageEntry> byModel;
+
+  factory UsageStatsSnapshot.fromJson(Map<String, dynamic> json) {
+    final rawToday = json['today'];
+    final rawTotal = json['total'];
+    final rawDaily = json['daily'];
+    final rawByModel = json['byModel'];
+    return UsageStatsSnapshot(
+      today: rawToday is Map<String, dynamic>
+          ? UsageBucket.fromJson(rawToday)
+          : const UsageBucket(),
+      total: rawTotal is Map<String, dynamic>
+          ? UsageBucket.fromJson(rawTotal)
+          : const UsageBucket(),
+      daily: rawDaily is List<dynamic>
+          ? rawDaily
+              .whereType<Map<String, dynamic>>()
+              .map(DailyUsageEntry.fromJson)
+              .toList(growable: false)
+          : const <DailyUsageEntry>[],
+      byModel: rawByModel is List<dynamic>
+          ? rawByModel
+              .whereType<Map<String, dynamic>>()
+              .map(ModelUsageEntry.fromJson)
+              .toList(growable: false)
+          : const <ModelUsageEntry>[],
+    );
+  }
+}
+
+@immutable
+class LlmTestResult {
+  const LlmTestResult({required this.ok, required this.latencyMs, this.error});
+  final bool ok;
+  final int latencyMs;
+  final String? error;
+
+  factory LlmTestResult.fromJson(Map<String, dynamic> json) => LlmTestResult(
+        ok: json['ok'] == true,
+        latencyMs: (json['latencyMs'] as num?)?.toInt() ?? 0,
+        error: json['error'] as String?,
+      );
 }
 
 /// Ring 1.5 活动会话视图（如观影伴看 cinema）。

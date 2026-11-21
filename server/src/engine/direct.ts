@@ -17,6 +17,7 @@ import type {
   ChatUserContent,
   LlmErrorCode,
 } from "../llm/client.ts";
+import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
 import { parseCardMarkdown } from "../memory/frontmatter.ts";
 import { buildGistBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
@@ -209,8 +210,18 @@ export class DirectEngine {
     return this.sessionId;
   }
 
+  private computeEffectiveRolloverLimit(mode: "chat" | "wake" = "chat"): number {
+    const baseLimit = Math.max(1, Math.floor(this.deps.chatModel.contextWindow * ROLLOVER_RATIO));
+    const limits = this.deps.getConfig().llm?.contextLimits;
+    const custom = mode === "wake" ? limits?.solo : limits?.chat;
+    if (typeof custom === "number" && Number.isFinite(custom) && custom >= 1000) {
+      return Math.min(baseLimit, Math.floor(custom));
+    }
+    return baseLimit;
+  }
+
   getContextUsage(): ContextUsageSnapshot {
-    const limitTokens = Math.max(1, Math.floor(this.deps.chatModel.contextWindow * ROLLOVER_RATIO));
+    const limitTokens = this.computeEffectiveRolloverLimit("chat");
     const ratio = Math.min(1, Math.max(0, this.lastUsedTokens / limitTokens));
     return {
       usedTokens: this.lastUsedTokens,
@@ -688,15 +699,26 @@ export class DirectEngine {
       kind: "general" | "screen";
     }> = [];
 
-    const currentModelId = this.deps.chatModel.modelId;
-    if (
-      opts.mode === "chat" &&
-      currentModelId &&
-      this.lastAssistantModel &&
-      this.lastAssistantModel !== currentModelId
-    ) {
-      opts.callbacks?.onModelSwitched?.({ turnId, model: currentModelId });
-    }
+    const cfgForTurn = this.deps.getConfig();
+    const effectiveThinkingLevel = resolveEffectiveThinkingLevel(cfgForTurn);
+    const effectiveThinkingBudget = cfgForTurn.llm?.thinking?.budgetTokens;
+    const rolloverLimitTokens = this.computeEffectiveRolloverLimit(opts.mode);
+    let activeModelId = this.deps.chatModel.modelId;
+    let modelSwitchBroadcasted = false;
+    const maybeBroadcastModelSwitch = (modelId: string | undefined, reason?: string) => {
+      if (
+        modelSwitchBroadcasted ||
+        opts.mode !== "chat" ||
+        !modelId ||
+        !this.lastAssistantModel ||
+        this.lastAssistantModel === modelId
+      ) {
+        return;
+      }
+      modelSwitchBroadcasted = true;
+      opts.callbacks?.onModelSwitched?.({ turnId, model: modelId, reason });
+    };
+    maybeBroadcastModelSwitch(activeModelId);
 
     let fullText = "";
     let fullThinking = "";
@@ -733,11 +755,18 @@ export class DirectEngine {
           messages,
           tools: tier1Tools,
           sessionId: this.sessionId,
+          thinkingLevel: effectiveThinkingLevel,
+          thinkingBudgetTokens: effectiveThinkingBudget,
           signal: opts.signal,
         })) {
           if (opts.signal?.aborted) {
             aborted = true;
             break;
+          }
+          const latestModelId = this.deps.chatModel.modelId;
+          if (latestModelId && latestModelId !== activeModelId) {
+            activeModelId = latestModelId;
+            maybeBroadcastModelSwitch(activeModelId, "fallback");
           }
           if (chunk.type === "thinking_delta") {
             producedOutputInAttempt = true;
@@ -771,14 +800,14 @@ export class DirectEngine {
           } else if (chunk.type === "usage") {
             this.lastUsedTokens = chunk.totalTokens;
             lastUsage = {
-              ...(currentModelId ? { model: currentModelId } : {}),
+              ...(activeModelId ? { model: activeModelId } : {}),
               inputTokens: chunk.inputTokens,
               outputTokens: chunk.outputTokens,
               ...(chunk.cacheReadTokens !== undefined ? { cacheReadTokens: chunk.cacheReadTokens } : {}),
               ...(chunk.cacheWriteTokens !== undefined ? { cacheWriteTokens: chunk.cacheWriteTokens } : {}),
               ...(chunk.estimatedCostUsd !== undefined ? { estimatedCostUsd: chunk.estimatedCostUsd } : {}),
             };
-            if (chunk.totalTokens >= this.deps.chatModel.contextWindow * ROLLOVER_RATIO) {
+            if (chunk.totalTokens >= rolloverLimitTokens) {
               rolledOver = true;
             }
           } else if (chunk.type === "error") {
@@ -968,7 +997,7 @@ export class DirectEngine {
       if (shareCount > 0 && toolCtx.shares) metadata.shares = toolCtx.shares;
       if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
       if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
-      if (currentModelId) metadata.model = currentModelId;
+      if (activeModelId) metadata.model = activeModelId;
       if (lastUsage) metadata.usage = lastUsage;
       if (recallCount > 0) metadata.recallCount = recallCount;
       if (aborted) metadata.aborted = true;
@@ -985,8 +1014,8 @@ export class DirectEngine {
       });
       persisted = event;
       opts.callbacks?.onAssistantPersisted?.(event);
-      if (currentModelId) {
-        this.lastAssistantModel = currentModelId;
+      if (activeModelId) {
+        this.lastAssistantModel = activeModelId;
       }
     }
 

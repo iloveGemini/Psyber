@@ -1,6 +1,22 @@
 import 'package:flutter/material.dart';
 
-/// Psyber「静室信笺」配色系统（融合 Roxy Warm Paper / Warm Dark 日夜双色）：
+/// Ring 1.5 五套克制暖调手账色板
+enum PsyberPalette {
+  warmPaper('暖纸白', false, Color(0xFFF9F9F7), Color(0xFF3C3C38)),
+  obsidianNight('曜夜暖黑', true, Color(0xFF1F1F1D), Color(0xFFDEDED7)),
+  duskGlow('暮色晚霞', false, Color(0xFFFAF4F0), Color(0xFF6B4E45)),
+  autumnLatte('秋日暖咖', false, Color(0xFFF6F1E9), Color(0xFF5A4636)),
+  vintageManor('复古庄园', true, Color(0xFF1E221E), Color(0xFFD5C7A3));
+
+  const PsyberPalette(this.label, this.isDark, this.swatchBg, this.swatchAccent);
+
+  final String label;
+  final bool isDark;
+  final Color swatchBg;
+  final Color swatchAccent;
+}
+
+/// Psyber「静室信笺」配色系统（支持 5 套克制暖调手账色板 + 跟随系统）：
 /// - 日间态（Warm Paper）：暖纸白画布 (#F9F9F7)、纯白卡片 (#FFFFFF)、暖黑墨色 (#30302D)；
 /// - 夜间态（Warm Dark）：曜夜暖黑 (#1F1F1D)、暗调升面 (#292927)、纸白浅字 (#F1F1ED)；
 /// - 琥珀色仅留给门状态阈值与未读门缝纸条，克制零噪音。
@@ -110,6 +126,102 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     userText: Color(0xFFF1F1ED),       // Roxy Dark --user-text
     isDark: true,
   );
+
+  /// 暮色晚霞：低饱和浅暖杏纸 + 陶土深墨
+  static const duskGlow = PsyberColors(
+    mineralCanvas: Color(0xFFFAF4F0),
+    letterSurface: Color(0xFFFFFCF9),
+    celadonWash: Color(0xFFF3E9E2),
+    slipPaper: Color(0xFFFDF3E7),
+    codeSurface: Color(0xFFF2E8E1),
+    inkDeep: Color(0xFF362A26),
+    inkQuiet: Color(0xFF8E7B74),
+    inkFaint: Color(0xFFB5A49D),
+    hairline: Color(0xFFE9DDD5),
+    hairlineWarm: Color(0xFFE6D4C6),
+    accent: Color(0xFF6B4E45),
+    onAccent: Color(0xFFFFFFFF),
+    accentSoft: Color(0xFFF1E5DF),
+    accentBorder: Color(0xFFD8C2B8),
+    statusSuccess: Color(0xFF5D7A63),
+    statusSuccessSoft: Color(0xFFEEF3EF),
+    thresholdAmber: Color(0xFFB9721B),
+    thresholdAmberSoft: Color(0xFFFAF0E2),
+    dangerInk: Color(0xFFC06B52),
+    dangerSoft: Color(0xFFF9EAE4),
+    userBubble: Color(0xFFF2E7E0),
+    userText: Color(0xFF362A26),
+    isDark: false,
+  );
+
+  /// 秋日暖咖：燕麦牛皮纸 + 深烘咖啡墨
+  static const autumnLatte = PsyberColors(
+    mineralCanvas: Color(0xFFF6F1E9),
+    letterSurface: Color(0xFFFDFBF7),
+    celadonWash: Color(0xFFECE4D8),
+    slipPaper: Color(0xFFF9F0DE),
+    codeSurface: Color(0xFFECE5DA),
+    inkDeep: Color(0xFF332920),
+    inkQuiet: Color(0xFF8A7B6B),
+    inkFaint: Color(0xFFB0A394),
+    hairline: Color(0xFFE2D8C8),
+    hairlineWarm: Color(0xFFDCCEB7),
+    accent: Color(0xFF5A4636),
+    onAccent: Color(0xFFFFFFFF),
+    accentSoft: Color(0xFFEDE4D7),
+    accentBorder: Color(0xFFD0BFA8),
+    statusSuccess: Color(0xFF56735B),
+    statusSuccessSoft: Color(0xFFEDF2EE),
+    thresholdAmber: Color(0xFFB57214),
+    thresholdAmberSoft: Color(0xFFF9EEDB),
+    dangerInk: Color(0xFFB86646),
+    dangerSoft: Color(0xFFF7E8E1),
+    userBubble: Color(0xFFEBE3D7),
+    userText: Color(0xFF332920),
+    isDark: false,
+  );
+
+  /// 复古庄园：深松墨绿夜色 + 羊皮暖金字
+  static const vintageManor = PsyberColors(
+    mineralCanvas: Color(0xFF1C201D),
+    letterSurface: Color(0xFF252A26),
+    celadonWash: Color(0xFF2F3530),
+    slipPaper: Color(0xFF2B2821),
+    codeSurface: Color(0xFF202521),
+    inkDeep: Color(0xFFECE7DA),
+    inkQuiet: Color(0xFF989B90),
+    inkFaint: Color(0xFF6B7065),
+    hairline: Color(0xFF39403A),
+    hairlineWarm: Color(0xFF443E32),
+    accent: Color(0xFFD5C7A3),
+    onAccent: Color(0xFF20241F),
+    accentSoft: Color(0xFF353C35),
+    accentBorder: Color(0xFF535B4E),
+    statusSuccess: Color(0xFF6E9A7A),
+    statusSuccessSoft: Color(0xFF233227),
+    thresholdAmber: Color(0xFFD6A44C),
+    thresholdAmberSoft: Color(0xFF393121),
+    dangerInk: Color(0xFFD67B63),
+    dangerSoft: Color(0xFF3A2925),
+    userBubble: Color(0xFF2E342F),
+    userText: Color(0xFFECE7DA),
+    isDark: true,
+  );
+
+  static PsyberColors forPalette(PsyberPalette palette) {
+    switch (palette) {
+      case PsyberPalette.warmPaper:
+        return PsyberColors.light;
+      case PsyberPalette.obsidianNight:
+        return PsyberColors.dark;
+      case PsyberPalette.duskGlow:
+        return PsyberColors.duskGlow;
+      case PsyberPalette.autumnLatte:
+        return PsyberColors.autumnLatte;
+      case PsyberPalette.vintageManor:
+        return PsyberColors.vintageManor;
+    }
+  }
 
   @override
   PsyberColors copyWith({
@@ -248,97 +360,19 @@ class PsyberTheme {
             : PsyberColors.light);
   }
 
-  static ThemeData light() {
-    final colors = PsyberColors.light;
-    final scheme = ColorScheme.fromSeed(
-      seedColor: colors.accent,
-      brightness: Brightness.light,
-      primary: colors.accent,
-      onPrimary: colors.onAccent,
-      surface: colors.mineralCanvas,
-      onSurface: colors.inkDeep,
-      outline: colors.hairline,
-      error: colors.dangerInk,
-    );
-
-    final border = OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
-      borderSide: BorderSide(color: colors.hairline),
-    );
-    final focusedBorder = OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
-      borderSide: BorderSide(color: colors.accent, width: 1.2),
-    );
-
-    return ThemeData(
-      useMaterial3: true,
-      brightness: Brightness.light,
-      colorScheme: scheme,
-      scaffoldBackgroundColor: colors.mineralCanvas,
-      appBarTheme: AppBarTheme(
-        backgroundColor: colors.mineralCanvas,
-        foregroundColor: colors.inkDeep,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-      ),
-      textTheme: TextTheme(
-        bodyMedium: TextStyle(color: colors.inkDeep, fontSize: 15, height: 1.58),
-        bodySmall: TextStyle(color: colors.inkQuiet, fontSize: 13, height: 1.45),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        filled: true,
-        fillColor: colors.letterSurface,
-        border: border,
-        enabledBorder: border,
-        focusedBorder: focusedBorder,
-        labelStyle: TextStyle(color: colors.inkQuiet, fontSize: 13.5),
-        hintStyle: TextStyle(color: colors.inkFaint, fontSize: 14),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          backgroundColor: colors.accent,
-          foregroundColor: colors.onAccent,
-          elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
-        ),
-      ),
-      textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(
-          foregroundColor: colors.inkDeep,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          textStyle: const TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
-        ),
-      ),
-      switchTheme: SwitchThemeData(
-        thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return Colors.white;
-          return colors.inkQuiet;
-        }),
-        trackColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return colors.accent;
-          return colors.celadonWash;
-        }),
-        trackOutlineColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return colors.accent;
-          return colors.hairline;
-        }),
-      ),
-      dividerColor: colors.hairline,
-      dividerTheme: DividerThemeData(color: colors.hairline, thickness: 1, space: 1),
-      extensions: const <ThemeExtension<dynamic>>[
-        PsyberColors.light,
-      ],
-    );
+  static ThemeData fromPalette(PsyberPalette palette) {
+    return _buildTheme(PsyberColors.forPalette(palette));
   }
 
-  static ThemeData dark() {
-    final colors = PsyberColors.dark;
+  static ThemeData light() => _buildTheme(PsyberColors.light);
+
+  static ThemeData dark() => _buildTheme(PsyberColors.dark);
+
+  static ThemeData _buildTheme(PsyberColors colors) {
+    final brightness = colors.isDark ? Brightness.dark : Brightness.light;
     final scheme = ColorScheme.fromSeed(
       seedColor: colors.accent,
-      brightness: Brightness.dark,
+      brightness: brightness,
       primary: colors.accent,
       onPrimary: colors.onAccent,
       surface: colors.mineralCanvas,
@@ -358,7 +392,7 @@ class PsyberTheme {
 
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: brightness,
       colorScheme: scheme,
       scaffoldBackgroundColor: colors.mineralCanvas,
       appBarTheme: AppBarTheme(
@@ -400,7 +434,9 @@ class PsyberTheme {
       ),
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) return colors.onAccent;
+          if (states.contains(WidgetState.selected)) {
+            return colors.isDark ? colors.onAccent : Colors.white;
+          }
           return colors.inkQuiet;
         }),
         trackColor: WidgetStateProperty.resolveWith((states) {
@@ -414,9 +450,7 @@ class PsyberTheme {
       ),
       dividerColor: colors.hairline,
       dividerTheme: DividerThemeData(color: colors.hairline, thickness: 1, space: 1),
-      extensions: const <ThemeExtension<dynamic>>[
-        PsyberColors.dark,
-      ],
+      extensions: <ThemeExtension<dynamic>>[colors],
     );
   }
 }

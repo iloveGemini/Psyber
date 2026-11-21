@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { Clock } from "../core/clock.ts";
+import { localDay, type Clock } from "../core/clock.ts";
 import { ulid } from "../core/ulid.ts";
 
 export type EventRole = "user" | "assistant" | "system" | "task";
@@ -983,4 +983,159 @@ export class EventStore {
       .all(cursor, Math.max(1, limit)) as EventRow[];
     return rows.map(mapRow);
   }
+
+  /** 汇总 Token 消耗、Prompt Cache 命中率与预估费用（GET /api/v1/usage/stats，绝不常驻主聊天面） */
+  getUsageStats(timeZone: string): {
+    today: UsageBucket;
+    total: UsageBucket;
+    daily: Array<{ date: string } & UsageBucket>;
+    byModel: Array<{ model: string } & UsageBucket>;
+  } {
+    const rows = this.db
+      .query(
+        `SELECT metadata, created_at FROM events
+         WHERE role = 'assistant'
+           AND metadata IS NOT NULL
+           AND metadata LIKE '%"usage"%'
+         ORDER BY seq ASC`,
+      )
+      .all() as Array<{ metadata: string | null; created_at: number }>;
+
+    const todayKey = localDay(this.clock.now(), timeZone);
+    const makeAcc = () => ({
+      turnCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCostUsd: 0,
+    });
+    const totalAcc = makeAcc();
+    const todayAcc = makeAcc();
+    const dailyMap = new Map<string, ReturnType<typeof makeAcc>>();
+    const modelMap = new Map<string, ReturnType<typeof makeAcc>>();
+
+    const addTo = (
+      acc: ReturnType<typeof makeAcc>,
+      u: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+        estimatedCostUsd: number;
+      },
+    ) => {
+      acc.turnCount += 1;
+      acc.inputTokens += u.inputTokens;
+      acc.outputTokens += u.outputTokens;
+      acc.cacheReadTokens += u.cacheReadTokens;
+      acc.cacheWriteTokens += u.cacheWriteTokens;
+      acc.estimatedCostUsd += u.estimatedCostUsd;
+    };
+
+    for (const row of rows) {
+      if (!row.metadata) continue;
+      try {
+        const meta = JSON.parse(row.metadata) as {
+          model?: unknown;
+          usage?: {
+            model?: unknown;
+            inputTokens?: unknown;
+            outputTokens?: unknown;
+            cacheReadTokens?: unknown;
+            cacheWriteTokens?: unknown;
+            estimatedCostUsd?: unknown;
+          };
+        };
+        const u = meta.usage;
+        if (!u || typeof u !== "object") continue;
+        const parsed = {
+          inputTokens:
+            typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens) ? u.inputTokens : 0,
+          outputTokens:
+            typeof u.outputTokens === "number" && Number.isFinite(u.outputTokens)
+              ? u.outputTokens
+              : 0,
+          cacheReadTokens:
+            typeof u.cacheReadTokens === "number" && Number.isFinite(u.cacheReadTokens)
+              ? u.cacheReadTokens
+              : 0,
+          cacheWriteTokens:
+            typeof u.cacheWriteTokens === "number" && Number.isFinite(u.cacheWriteTokens)
+              ? u.cacheWriteTokens
+              : 0,
+          estimatedCostUsd:
+            typeof u.estimatedCostUsd === "number" && Number.isFinite(u.estimatedCostUsd)
+              ? u.estimatedCostUsd
+              : 0,
+        };
+        const modelName =
+          typeof u.model === "string" && u.model.trim()
+            ? u.model.trim()
+            : typeof meta.model === "string" && meta.model.trim()
+              ? meta.model.trim()
+              : "unknown";
+        const dayKey = localDay(row.created_at, timeZone);
+
+        addTo(totalAcc, parsed);
+        if (dayKey === todayKey) addTo(todayAcc, parsed);
+
+        let dAcc = dailyMap.get(dayKey);
+        if (!dAcc) {
+          dAcc = makeAcc();
+          dailyMap.set(dayKey, dAcc);
+        }
+        addTo(dAcc, parsed);
+
+        let mAcc = modelMap.get(modelName);
+        if (!mAcc) {
+          mAcc = makeAcc();
+          modelMap.set(modelName, mAcc);
+        }
+        addTo(mAcc, parsed);
+      } catch {
+        // 忽略损坏 JSON
+      }
+    }
+
+    const finalize = (acc: ReturnType<typeof makeAcc>): UsageBucket => {
+      const denom = acc.inputTokens + acc.cacheReadTokens;
+      const cacheHitRate = denom > 0 ? Number((acc.cacheReadTokens / denom).toFixed(4)) : 0;
+      return {
+        turnCount: acc.turnCount,
+        inputTokens: acc.inputTokens,
+        outputTokens: acc.outputTokens,
+        cacheReadTokens: acc.cacheReadTokens,
+        cacheWriteTokens: acc.cacheWriteTokens,
+        cacheHitRate,
+        estimatedCostUsd: Number(acc.estimatedCostUsd.toFixed(6)),
+      };
+    };
+
+    const daily = Array.from(dailyMap.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .slice(0, 14)
+      .map(([date, acc]) => ({ date, ...finalize(acc) }));
+
+    const byModel = Array.from(modelMap.entries())
+      .map(([model, acc]) => ({ model, ...finalize(acc) }))
+      .sort((a, b) => b.estimatedCostUsd - a.estimatedCostUsd || b.inputTokens - a.inputTokens);
+
+    return {
+      today: finalize(todayAcc),
+      total: finalize(totalAcc),
+      daily,
+      byModel,
+    };
+  }
+}
+
+export interface UsageBucket {
+  turnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheHitRate: number;
+  estimatedCostUsd: number;
 }

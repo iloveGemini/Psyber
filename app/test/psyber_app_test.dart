@@ -12,6 +12,7 @@ import 'package:psyber_app/core/storage/session_storage.dart';
 import 'package:psyber_app/features/chat/widgets/timeline_items.dart';
 import 'package:psyber_app/features/settings/settings_panel.dart';
 import 'package:psyber_app/main.dart';
+import 'package:psyber_app/shared/theme.dart';
 
 class FakePsyberApiClient implements PsyberApiClient {
   GenesisStatus genesis = GenesisStatus.completedDefault;
@@ -69,6 +70,32 @@ class FakePsyberApiClient implements PsyberApiClient {
   UserStatus userStatus = UserStatus.initial;
   final List<String> retractedIds = <String>[];
   final List<String> openedShareIds = <String>[];
+  UsageStatsSnapshot usageStats = const UsageStatsSnapshot(
+    today: UsageBucket(
+      turnCount: 3,
+      inputTokens: 4000,
+      outputTokens: 600,
+      cacheReadTokens: 3000,
+      cacheHitRate: 0.4286,
+      estimatedCostUsd: 0.0125,
+    ),
+    total: UsageBucket(
+      turnCount: 12,
+      inputTokens: 20000,
+      outputTokens: 3000,
+      cacheReadTokens: 15000,
+      cacheHitRate: 0.4286,
+      estimatedCostUsd: 0.054,
+    ),
+    byModel: [
+      ModelUsageEntry(
+        model: 'gpt-4o',
+        bucket: UsageBucket(turnCount: 12, estimatedCostUsd: 0.054),
+      ),
+    ],
+  );
+  final List<String> uploadedAvatars = <String>[];
+  int llmTestCount = 0;
 
   StreamController<SseEventFrame>? _streamController;
 
@@ -503,6 +530,46 @@ class FakePsyberApiClient implements PsyberApiClient {
       throw const ApiException(statusCode: 404, code: 'NOT_FOUND', message: '条目不存在');
     }
     return content;
+  }
+
+  @override
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile) async => usageStats;
+
+  @override
+  Future<LlmTestResult> testLlmModel(
+    ConnectionProfile profile, {
+    required String provider,
+    required String model,
+  }) async {
+    llmTestCount += 1;
+    return const LlmTestResult(ok: true, latencyMs: 128);
+  }
+
+  @override
+  Future<String> uploadAvatar(
+    ConnectionProfile profile, {
+    required String who,
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+  }) async {
+    uploadedAvatars.add(who);
+    final url = '/api/v1/media/avatar_$who';
+    settings = SettingsSnapshot(
+      timezone: settings.timezone,
+      providers: settings.providers,
+      chatSlot: settings.chatSlot,
+      thinkingEnabled: settings.thinkingEnabled,
+      thinkingLevel: settings.thinkingLevel,
+      userAvatarUrl: who == 'user' ? url : settings.userAvatarUrl,
+      residentAvatarUrl: who == 'resident' ? url : settings.residentAvatarUrl,
+      circadian: settings.circadian,
+      desktopNotifyEnabled: settings.desktopNotifyEnabled,
+      webhookEnabled: settings.webhookEnabled,
+      webhookUrl: settings.webhookUrl,
+      devices: settings.devices,
+    );
+    return url;
   }
 
   @override
@@ -957,6 +1024,8 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).last,
     );
+    await tester.ensureVisible(find.text('保存作息与通知'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('保存作息与通知'));
     await tester.pumpAndSettle();
     expect(api.settingsPatches.length, 1);
@@ -1649,6 +1718,76 @@ void main() {
 
       expect(api.userStatus.moodText, '有点累，刚下班');
       expect(find.text('有点累，刚下班'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '设置页支持一键测连通、思考档位、消耗统计、双人头像上传与 5 套暖调色板切换',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(
+        PsyberApp(
+          controller: controller,
+          imagePicker: () async => const PickedImage(
+            bytes: [137, 80, 78, 71],
+            filename: 'avatar.png',
+            mimeType: 'image/png',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('settings_button')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('test_llm_button')));
+      await tester.pumpAndSettle();
+      expect(api.llmTestCount, 1);
+      expect(find.text('连通正常 · 128 ms'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('thinking_level_low')));
+      await tester.pumpAndSettle();
+      expect(api.settingsPatches.isNotEmpty, isTrue);
+
+      await tester.tap(find.byKey(const Key('load_usage_stats_button')));
+      await tester.pumpAndSettle();
+      expect(find.text('\$0.0125'), findsOneWidget);
+      expect(find.textContaining('42.9%'), findsWidgets);
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('palette_autumnLatte')),
+        200,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.tap(find.byKey(const Key('upload_user_avatar_button')));
+      await tester.pumpAndSettle();
+      expect(api.uploadedAvatars, ['user']);
+      expect(find.text('我的头像已更新'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('palette_autumnLatte')));
+      await tester.pumpAndSettle();
+      expect(controller.paletteNotifier.value, PsyberPalette.autumnLatte);
     },
   );
 }

@@ -44,6 +44,14 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
   String? _rhythmError;
   bool _hydrated = false;
   bool _dirty = false;
+  bool _testingLlm = false;
+  String? _llmTestHint;
+  bool _llmTestOk = true;
+  bool _loadingUsage = false;
+  UsageStatsSnapshot? _usageStats;
+  String? _usageError;
+  bool _uploadingAvatar = false;
+  String? _avatarHint;
 
   @override
   void initState() {
@@ -467,49 +475,324 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     );
   }
 
+  Future<void> _handleTestLlm(ModelSlotView? slot) async {
+    if (slot == null || slot.provider.isEmpty || slot.model.isEmpty || _testingLlm) return;
+    setState(() {
+      _testingLlm = true;
+      _llmTestHint = null;
+    });
+    try {
+      final res = await widget.controller.testLlmModel(
+        provider: slot.provider,
+        model: slot.model,
+      );
+      if (!mounted || res == null) return;
+      setState(() {
+        _testingLlm = false;
+        _llmTestOk = res.ok;
+        _llmTestHint = res.ok ? '连通正常 · ${res.latencyMs} ms' : (res.error ?? '连通测试失败');
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testingLlm = false;
+        _llmTestOk = false;
+        _llmTestHint = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _testingLlm = false;
+        _llmTestOk = false;
+        _llmTestHint = '连通测试失败，请检查网络';
+      });
+    }
+  }
+
+  Future<void> _handleLoadUsageStats() async {
+    if (_loadingUsage) return;
+    setState(() {
+      _loadingUsage = true;
+      _usageError = null;
+    });
+    try {
+      final stats = await widget.controller.loadUsageStats();
+      if (!mounted) return;
+      setState(() {
+        _usageStats = stats;
+        _loadingUsage = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingUsage = false;
+        _usageError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadingUsage = false;
+        _usageError = '暂时无法拉取消耗统计';
+      });
+    }
+  }
+
+  Future<void> _handleUploadAvatar(String who) async {
+    if (_uploadingAvatar) return;
+    final picker = widget.imagePicker ?? defaultPlatformImagePicker;
+    final picked = await picker();
+    if (picked == null || !mounted) return;
+    setState(() {
+      _uploadingAvatar = true;
+      _avatarHint = null;
+    });
+    try {
+      await widget.controller.uploadAvatar(
+        who: who,
+        bytes: picked.bytes,
+        filename: picked.filename,
+        mimeType: picked.mimeType,
+      );
+      if (!mounted) return;
+      setState(() {
+        _uploadingAvatar = false;
+        _avatarHint = who == 'resident' ? '住户头像已更新' : '我的头像已更新';
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploadingAvatar = false;
+        _avatarHint = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _uploadingAvatar = false;
+        _avatarHint = '头像上传失败，请稍后重试';
+      });
+    }
+  }
+
   Widget _buildThemeModeSelector(BuildContext context) {
+    final colors = context.colors;
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: widget.controller.themeModeNotifier,
       builder: (context, currentMode, _) {
-        return _SurfaceBox(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            child: Row(
+        return ValueListenableBuilder<PsyberPalette?>(
+          valueListenable: widget.controller.paletteNotifier,
+          builder: (context, currentPalette, _) {
+            return _SurfaceBox(
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_system'),
+                            label: '跟随系统',
+                            icon: PhosphorIconsLight.circleHalf,
+                            selected: currentPalette == null && currentMode == ThemeMode.system,
+                            onTap: () => widget.controller.setPalette(null),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_light'),
+                            label: '暖纸浅色',
+                            icon: PhosphorIconsLight.sun,
+                            selected: currentPalette == null && currentMode == ThemeMode.light,
+                            onTap: () => widget.controller.setThemeMode(ThemeMode.light),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_dark'),
+                            label: '曜夜深色',
+                            icon: PhosphorIconsLight.moon,
+                            selected: currentPalette == null && currentMode == ThemeMode.dark,
+                            onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '手账色板（5 套）',
+                      style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final palette in PsyberPalette.values)
+                          InkWell(
+                            key: Key('palette_${palette.name}'),
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () => widget.controller.setPalette(palette),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: currentPalette == palette
+                                    ? colors.accentSoft
+                                    : colors.mineralCanvas,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: currentPalette == palette
+                                      ? colors.accentBorder
+                                      : colors.hairline,
+                                  width: currentPalette == palette ? 1.3 : 1.0,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Container(
+                                    width: 11,
+                                    height: 11,
+                                    decoration: BoxDecoration(
+                                      color: palette.swatchBg,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: palette.swatchAccent,
+                                        width: 2,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    palette.label,
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: currentPalette == palette
+                                          ? FontWeight.w600
+                                          : FontWeight.w400,
+                                      color: currentPalette == palette
+                                          ? colors.inkDeep
+                                          : colors.inkQuiet,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildUsageStatsCard(BuildContext context) {
+    final colors = context.colors;
+    final stats = _usageStats;
+    String fmtUsd(double v) => '\$${v.toStringAsFixed(4)}';
+    String fmtPct(double r) => '${(r * 100).toStringAsFixed(1)}%';
+
+    return _SurfaceBox(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          key: const Key('usage_stats_section'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
               children: [
-                Expanded(
-                  child: _ThemeChip(
-                    key: const Key('theme_mode_system'),
-                    label: '跟随系统',
-                    icon: PhosphorIconsLight.circleHalf,
-                    selected: currentMode == ThemeMode.system,
-                    onTap: () => widget.controller.setThemeMode(ThemeMode.system),
+                Text(
+                  'Token 与费用统计',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w500,
+                    color: colors.inkDeep,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _ThemeChip(
-                    key: const Key('theme_mode_light'),
-                    label: '暖纸浅色',
-                    icon: PhosphorIconsLight.sun,
-                    selected: currentMode == ThemeMode.light,
-                    onTap: () => widget.controller.setThemeMode(ThemeMode.light),
+                const Spacer(),
+                TextButton(
+                  key: const Key('load_usage_stats_button'),
+                  onPressed: _loadingUsage ? null : () => unawaited(_handleLoadUsageStats()),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _ThemeChip(
-                    key: const Key('theme_mode_dark'),
-                    label: '曜夜深色',
-                    icon: PhosphorIconsLight.moon,
-                    selected: currentMode == ThemeMode.dark,
-                    onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
+                  child: Text(
+                    _loadingUsage ? '拉取中…' : (stats == null ? '查看统计' : '刷新'),
+                    style: const TextStyle(fontSize: 12),
                   ),
                 ),
               ],
             ),
-          ),
-        );
-      },
+            if (_usageError != null) ...[
+              const SizedBox(height: 6),
+              Text(_usageError!, style: TextStyle(fontSize: 12, color: colors.dangerInk)),
+            ] else if (stats == null) ...[
+              const SizedBox(height: 4),
+              Text(
+                '按需拉取今日/累计消耗与 Prompt Cache 命中率，不常驻主聊天面。',
+                style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _UsageMetricTile(
+                      label: '今日费用',
+                      value: fmtUsd(stats.today.estimatedCostUsd),
+                      sub: '${stats.today.turnCount} 轮 · 命中 ${fmtPct(stats.today.cacheHitRate)}',
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _UsageMetricTile(
+                      label: '累计费用',
+                      value: fmtUsd(stats.total.estimatedCostUsd),
+                      sub: '${stats.total.turnCount} 轮 · 命中 ${fmtPct(stats.total.cacheHitRate)}',
+                    ),
+                  ),
+                ],
+              ),
+              if (stats.byModel.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text('按模型', style: TextStyle(fontSize: 11, color: colors.inkQuiet)),
+                const SizedBox(height: 4),
+                for (final m in stats.byModel.take(4))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            m.model,
+                            style: PsyberTheme.monoStyle.copyWith(
+                              fontSize: 11.5,
+                              color: colors.inkDeep,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          '${m.bucket.turnCount} 轮 · ${fmtUsd(m.bucket.estimatedCostUsd)}',
+                          style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -560,45 +843,145 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                 children: [
                   const _SectionLabel('模型与凭证'),
                   _SurfaceBox(
-                    child: InkWell(
-                      key: const Key('open_model_config_tile'),
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: _openModelConfigDialog,
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    slot != null && slot.model.isNotEmpty
-                                        ? '${slot.provider} · ${slot.model}'
-                                        : '尚未设置主对话模型',
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        InkWell(
+                          key: const Key('open_model_config_tile'),
+                          onTap: _openModelConfigDialog,
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        slot != null && slot.model.isNotEmpty
+                                            ? '${slot.provider} · ${slot.model}'
+                                            : '尚未设置主对话模型',
+                                        style: const TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        configured
+                                            ? '凭证已配置（点击热切换模型或 Key）'
+                                            : '点击填写 API Key 与模型 ID',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: configured
+                                              ? colors.inkQuiet
+                                              : colors.thresholdAmber,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (slot != null && slot.model.isNotEmpty)
+                                  TextButton(
+                                    key: const Key('test_llm_button'),
+                                    onPressed: _testingLlm
+                                        ? null
+                                        : () => unawaited(_handleTestLlm(slot)),
+                                    child: Text(
+                                      _testingLlm ? '测试中…' : '测连通',
+                                      style: const TextStyle(fontSize: 12),
                                     ),
                                   ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    configured ? '凭证已配置（点击热切换模型或 Key）' : '点击填写 API Key 与模型 ID',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: configured
-                                          ? colors.inkQuiet
-                                          : colors.thresholdAmber,
-                                    ),
-                                  ),
-                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (_llmTestHint != null)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                            child: Text(
+                              _llmTestHint!,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: _llmTestOk ? colors.statusSuccess : colors.dangerInk,
                               ),
                             ),
-                          ],
+                          ),
+                        const Divider(height: 1),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '思考深度档位',
+                                style: TextStyle(fontSize: 12, color: colors.inkQuiet),
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                children: [
+                                  for (final entry in const [
+                                    ('off', '关闭'),
+                                    ('low', '轻度'),
+                                    ('medium', '标准'),
+                                    ('high', '深度'),
+                                  ])
+                                    Expanded(
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                                        child: InkWell(
+                                          key: Key('thinking_level_${entry.$1}'),
+                                          borderRadius: BorderRadius.circular(8),
+                                          onTap: () => unawaited(
+                                            widget.controller.patchSettings({
+                                              'llm': {
+                                                'thinking': {
+                                                  'enabled': entry.$1 != 'off',
+                                                  'level': entry.$1,
+                                                },
+                                              },
+                                            }),
+                                          ),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(vertical: 6),
+                                            alignment: Alignment.center,
+                                            decoration: BoxDecoration(
+                                              color: (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                                  ? colors.accentSoft
+                                                  : colors.mineralCanvas,
+                                              borderRadius: BorderRadius.circular(8),
+                                              border: Border.all(
+                                                color: (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                                    ? colors.accentBorder
+                                                    : colors.hairline,
+                                              ),
+                                            ),
+                                            child: Text(
+                                              entry.$2,
+                                              style: TextStyle(
+                                                fontSize: 11.5,
+                                                fontWeight:
+                                                    (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                                        ? FontWeight.w600
+                                                        : FontWeight.w400,
+                                                color: colors.inkDeep,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
+                  const SizedBox(height: 18),
+                  const _SectionLabel('消耗统计'),
+                  _buildUsageStatsCard(context),
                   const SizedBox(height: 18),
                   const _SectionLabel('互动与评测'),
                   _SurfaceBox(
@@ -843,7 +1226,50 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  const _SectionLabel('外观主题'),
+                  const _SectionLabel('居所头像与外观'),
+                  _SurfaceBox(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  key: const Key('upload_resident_avatar_button'),
+                                  onPressed: _uploadingAvatar
+                                      ? null
+                                      : () => unawaited(_handleUploadAvatar('resident')),
+                                  icon: const Icon(PhosphorIconsLight.sparkle, size: 15),
+                                  label: const Text('住户头像', style: TextStyle(fontSize: 12)),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  key: const Key('upload_user_avatar_button'),
+                                  onPressed: _uploadingAvatar
+                                      ? null
+                                      : () => unawaited(_handleUploadAvatar('user')),
+                                  icon: const Icon(PhosphorIconsLight.user, size: 15),
+                                  label: const Text('我的头像', style: TextStyle(fontSize: 12)),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_avatarHint != null) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              _avatarHint!,
+                              style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
                   _buildThemeModeSelector(context),
                 ],
               );
@@ -1094,6 +1520,48 @@ class _ThemeChip extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _UsageMetricTile extends StatelessWidget {
+  const _UsageMetricTile({
+    required this.label,
+    required this.value,
+    required this.sub,
+  });
+
+  final String label;
+  final String value;
+  final String sub;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: colors.mineralCanvas,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(fontSize: 11, color: colors.inkQuiet)),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: PsyberTheme.monoStyle.copyWith(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: colors.inkDeep,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(sub, style: TextStyle(fontSize: 10.5, color: colors.inkQuiet)),
+        ],
       ),
     );
   }

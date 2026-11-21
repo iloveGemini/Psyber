@@ -7,6 +7,8 @@ import type { MediaStore } from "../core/media.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
+import type { ChatModelClient } from "../llm/client.ts";
+import type { ResolvedByokSlot } from "../llm/router.ts";
 import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
@@ -98,6 +100,10 @@ export interface AppDeps {
   trustProxy?: boolean;
   /** 自定义获取客户端连接 IP（用于 /auth/pair 防爆破限流） */
   getClientIp?: (req: Request) => string;
+  /** 可注入 fetch 实现（用于 /llm/models 离线测试） */
+  fetchImpl?: typeof fetch;
+  /** 可注入 LLM 探测工厂（用于 /llm/test 离线测试） */
+  llmTestClientFactory?: (resolved: ResolvedByokSlot) => ChatModelClient;
 }
 
 /**

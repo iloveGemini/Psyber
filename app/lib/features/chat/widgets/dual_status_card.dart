@@ -102,39 +102,44 @@ class _DualStatusCardState extends State<DualStatusCard> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return ValueListenableBuilder<DoorStatus>(
-      valueListenable: widget.controller.doorNotifier,
-      builder: (context, door, _) => ValueListenableBuilder<ActiveTurnState?>(
-        valueListenable: widget.controller.activeTurnNotifier,
-        builder: (context, activeTurn, _) => ValueListenableBuilder<UserStatus>(
-          valueListenable: widget.controller.userStatusNotifier,
-          builder: (context, userStatus, _) {
-            final isReplying = activeTurn != null;
-            final doorLabel = _describeDoor(door, isReplying);
-            final residentDotColor = door.state == DoorState.open
-                ? colors.statusSuccess
-                : (door.state == DoorState.departed
-                    ? colors.inkFaint
-                    : colors.thresholdAmber);
-            final residentNote = door.note?.trim();
+    return ValueListenableBuilder<SettingsSnapshot?>(
+      valueListenable: widget.controller.settingsNotifier,
+      builder: (context, settingsSnap, _) => ValueListenableBuilder<DoorStatus>(
+        valueListenable: widget.controller.doorNotifier,
+        builder: (context, door, _) => ValueListenableBuilder<ActiveTurnState?>(
+          valueListenable: widget.controller.activeTurnNotifier,
+          builder: (context, activeTurn, _) => ValueListenableBuilder<UserStatus>(
+            valueListenable: widget.controller.userStatusNotifier,
+            builder: (context, userStatus, _) {
+              final profile = widget.controller.profileNotifier.value;
+              final isReplying = activeTurn != null;
+              final doorLabel = _describeDoor(door, isReplying);
+              final residentDotColor = door.state == DoorState.open
+                  ? colors.statusSuccess
+                  : (door.state == DoorState.departed
+                      ? colors.inkFaint
+                      : colors.thresholdAmber);
+              final residentNote = door.note?.trim();
 
-            return Container(
-              key: const Key('dual_status_card'),
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Row 1: 住户（头像在左，门牌心绪气泡在右）
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _StatusAvatar(
-                        icon: PhosphorIconsLight.sparkle,
-                        bgColor: colors.celadonWash,
-                        iconColor: colors.inkDeep,
-                        dotColor: residentDotColor,
-                      ),
+              return Container(
+                key: const Key('dual_status_card'),
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Row 1: 住户（头像在左，门牌心绪气泡在右）
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _StatusAvatar(
+                          icon: PhosphorIconsLight.sparkle,
+                          bgColor: colors.celadonWash,
+                          iconColor: colors.inkDeep,
+                          dotColor: residentDotColor,
+                          imageUrl: settingsSnap?.residentAvatarUrl,
+                          profile: profile,
+                        ),
                       const SizedBox(width: 9),
                       Expanded(
                         child: Column(
@@ -335,6 +340,8 @@ class _DualStatusCardState extends State<DualStatusCard> {
                         bgColor: colors.accentSoft,
                         iconColor: colors.inkDeep,
                         dotColor: userStatus.undisturbed ? colors.thresholdAmber : null,
+                        imageUrl: settingsSnap?.userAvatarUrl,
+                        profile: profile,
                       ),
                     ],
                   ),
@@ -418,7 +425,8 @@ class _DualStatusCardState extends State<DualStatusCard> {
                 ],
               ),
             );
-          },
+            },
+          ),
         ),
       ),
     );
@@ -431,16 +439,21 @@ class _StatusAvatar extends StatelessWidget {
     required this.bgColor,
     required this.iconColor,
     this.dotColor,
+    this.imageUrl,
+    this.profile,
   });
 
   final IconData icon;
   final Color bgColor;
   final Color iconColor;
   final Color? dotColor;
+  final String? imageUrl;
+  final ConnectionProfile? profile;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final hasImage = imageUrl != null && imageUrl!.isNotEmpty && profile != null;
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -452,7 +465,15 @@ class _StatusAvatar extends StatelessWidget {
             shape: BoxShape.circle,
             border: Border.all(color: colors.hairline),
           ),
-          child: Icon(icon, size: 16, color: iconColor),
+          clipBehavior: Clip.antiAlias,
+          child: hasImage
+              ? Image.network(
+                  profile!.resolveMediaUrl(imageUrl!),
+                  headers: {'Authorization': 'Bearer ${profile!.token}'},
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Icon(icon, size: 16, color: iconColor),
+                )
+              : Icon(icon, size: 16, color: iconColor),
         ),
         if (dotColor != null)
           Positioned(

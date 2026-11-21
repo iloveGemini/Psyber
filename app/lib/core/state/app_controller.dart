@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import '../../shared/theme.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
 import '../storage/session_storage.dart';
@@ -115,8 +116,22 @@ class AppController {
   final ValueNotifier<ThemeMode> themeModeNotifier =
       ValueNotifier<ThemeMode>(ThemeMode.system);
 
+  /// Ring 1.5 五套克制暖调手账色板（null 表示跟随系统日夜切换）。
+  final ValueNotifier<PsyberPalette?> paletteNotifier =
+      ValueNotifier<PsyberPalette?>(null);
+
   void setThemeMode(ThemeMode mode) {
+    paletteNotifier.value = null;
     themeModeNotifier.value = mode;
+  }
+
+  void setPalette(PsyberPalette? palette) {
+    paletteNotifier.value = palette;
+    if (palette == null) {
+      themeModeNotifier.value = ThemeMode.system;
+    } else {
+      themeModeNotifier.value = palette.isDark ? ThemeMode.dark : ThemeMode.light;
+    }
   }
 
   StreamSubscription<SseEventFrame>? _sseSub;
@@ -641,6 +656,42 @@ class AppController {
     return _api.openDrawerEntry(profile, id);
   }
 
+  Future<UsageStatsSnapshot?> loadUsageStats() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.getUsageStats(profile);
+  }
+
+  Future<LlmTestResult?> testLlmModel({
+    required String provider,
+    required String model,
+  }) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.testLlmModel(profile, provider: provider, model: model);
+  }
+
+  Future<String?> uploadAvatar({
+    required String who,
+    required List<int> bytes,
+    required String filename,
+    required String mimeType,
+  }) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    final url = await _api.uploadAvatar(
+      profile,
+      who: who,
+      bytes: bytes,
+      filename: filename,
+      mimeType: mimeType,
+    );
+    if (!_disposed) {
+      await loadSettings();
+    }
+    return url;
+  }
+
   Future<void> abortActiveTurn() async {
     final profile = profileNotifier.value;
     final active = activeTurnNotifier.value;
@@ -1000,5 +1051,6 @@ class AppController {
     activeActivityNotifier.dispose();
     recallEvalModeNotifier.dispose();
     themeModeNotifier.dispose();
+    paletteNotifier.dispose();
   }
 }

@@ -12,6 +12,11 @@ import {
 } from "../core/config.ts";
 import { loadCredentials, saveCredentials, type StoredCredentials } from "../core/credentials.ts";
 import { MAX_MEDIA_UPLOAD_BYTES, MediaStore } from "../core/media.ts";
+import {
+  discoverProviderModels,
+  resolveEffectiveThinkingLevel,
+  testModelConnection,
+} from "../llm/router.ts";
 import { applyGenesisMemory, getGenesisNamedStatus } from "../memory/genesis.ts";
 import type { AppDeps } from "./app.ts";
 import { hashBearerToken } from "./app.ts";
@@ -43,12 +48,26 @@ function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials) {
     }
   }
 
+  const effectiveLevel = resolveEffectiveThinkingLevel(cfg);
   return {
     timezone: cfg.timezone,
     llm: {
       providers,
       slots: cfg.llm?.slots ?? {},
-      thinking: cfg.llm?.thinking ?? { enabled: true },
+      thinking: {
+        enabled: effectiveLevel !== "off",
+        level: effectiveLevel,
+        ...(cfg.llm?.thinking?.budgetTokens !== undefined
+          ? { budgetTokens: cfg.llm.thinking.budgetTokens }
+          : {}),
+      },
+      ...(cfg.llm?.contextLimits ? { contextLimits: cfg.llm.contextLimits } : {}),
+    },
+    avatars: {
+      ...(cfg.avatars?.userHash ? { userUrl: `/api/v1/media/${cfg.avatars.userHash}` } : {}),
+      ...(cfg.avatars?.residentHash
+        ? { residentUrl: `/api/v1/media/${cfg.avatars.residentHash}` }
+        : {}),
     },
     userStatus: {
       moodText: cfg.userStatus?.moodText ?? null,
@@ -368,10 +387,34 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       cfg.recall = { ...(cfg.recall ?? DEFAULT_RECALL_CONFIG), ...body.recall };
     }
     if (body.llm && typeof body.llm === "object") {
+      const rawLevel = body.llm.thinking?.level;
+      if (
+        rawLevel !== undefined &&
+        rawLevel !== "off" &&
+        rawLevel !== "low" &&
+        rawLevel !== "medium" &&
+        rawLevel !== "high"
+      ) {
+        return c.json(
+          { error: { code: "INVALID_SETTINGS", message: "llm.thinking.level 须为 off/low/medium/high" } },
+          400,
+        );
+      }
+      const mergedThinking = {
+        ...(cfg.llm?.thinking ?? { enabled: true }),
+        ...(body.llm.thinking ?? {}),
+      };
+      if (rawLevel !== undefined) {
+        mergedThinking.enabled = rawLevel !== "off";
+      }
+      const mergedLimits = body.llm.contextLimits
+        ? { ...(cfg.llm?.contextLimits ?? {}), ...body.llm.contextLimits }
+        : cfg.llm?.contextLimits;
       cfg.llm = {
         providers: { ...(cfg.llm?.providers ?? {}), ...(body.llm.providers ?? {}) },
         slots: { ...(cfg.llm?.slots ?? {}), ...(body.llm.slots ?? {}) },
-        thinking: { ...(cfg.llm?.thinking ?? { enabled: true }), ...(body.llm.thinking ?? {}) },
+        thinking: mergedThinking,
+        ...(mergedLimits ? { contextLimits: mergedLimits } : {}),
       };
     }
     if (Array.isArray(body.revokeDeviceIds) && body.revokeDeviceIds.length > 0) {
@@ -449,5 +492,88 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     }
     deps.sse?.emit("user_status.updated", { moodText, undisturbed, updatedAt });
     return c.json({ moodText, undisturbed, updatedAt });
+  });
+
+  // Ring 1.5 模型自动发现与一键连通测试
+  app.get("/api/v1/llm/models", async (c) => {
+    const provider = c.req.query("provider")?.trim() || undefined;
+    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
+    const models = await discoverProviderModels(deps.getConfig(), creds, provider, deps.fetchImpl);
+    return c.json({ models });
+  });
+
+  app.post("/api/v1/llm/test", async (c) => {
+    let body: { provider?: string; model?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+    const modelId = typeof body.model === "string" ? body.model.trim() : "";
+    if (!providerId || !modelId) {
+      return c.json({ error: { code: "INVALID_REQUEST", message: "缺少 provider 或 model" } }, 400);
+    }
+    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
+    const result = await testModelConnection({
+      config: deps.getConfig(),
+      creds,
+      providerId,
+      modelId,
+      clientFactory: deps.llmTestClientFactory,
+    });
+    return c.json(result);
+  });
+
+  // Ring 1.5 设置页独立消耗统计（今日/累计/按日/按模型费用与 Prompt Cache 命中率）
+  app.get("/api/v1/usage/stats", (c) => {
+    const cfg = deps.getConfig();
+    return c.json(deps.events.getUsageStats(cfg.timezone));
+  });
+
+  // Ring 1.5 双人头像上传（POST /api/v1/avatars/:who，上限 5 MB，落盘 media/ 且 pinned = 1）
+  app.post("/api/v1/avatars/:who", async (c) => {
+    const who = c.req.param("who");
+    if (who !== "user" && who !== "resident") {
+      return c.json({ error: { code: "INVALID_AVATAR_TARGET", message: "头像目标仅支持 user 或 resident" } }, 400);
+    }
+    const mediaStore =
+      deps.media ?? (deps.db && deps.dataDir ? new MediaStore(deps.db, deps.dataDir) : null);
+    if (!mediaStore) {
+      return c.json({ error: { code: "MEDIA_UNAVAILABLE", message: "媒体仓未就绪" } }, 503);
+    }
+    const formData = await c.req.formData().catch(() => null);
+    const file = formData?.get("file");
+    if (!(file instanceof File)) {
+      return c.json({ error: { code: "MISSING_FILE", message: "缺少 multipart file 字段" } }, 400);
+    }
+    const maxAvatarBytes = 5 * 1024 * 1024;
+    if (file.size > maxAvatarBytes) {
+      return c.json({ error: { code: "PAYLOAD_TOO_LARGE", message: "头像图片大小超过 5 MB 上限" } }, 413);
+    }
+    const mimeType = file.type || "image/png";
+    if (!mimeType.startsWith("image/")) {
+      return c.json({ error: { code: "INVALID_MEDIA_TYPE", message: "头像仅支持图片格式" } }, 400);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const saved = await mediaStore.save({
+      bytes,
+      mimeType,
+      origin: "user_upload",
+      nowMs: deps.clock.now(),
+    });
+    const cfg = deps.getConfig();
+    cfg.avatars = {
+      ...(cfg.avatars ?? {}),
+      ...(who === "user" ? { userHash: saved.hash } : { residentHash: saved.hash }),
+    };
+    if (deps.dataDir) {
+      await saveConfig(deps.dataDir, cfg);
+    }
+    return c.json({
+      who,
+      hash: saved.hash,
+      url: saved.url,
+    });
   });
 }

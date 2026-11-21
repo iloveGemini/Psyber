@@ -81,11 +81,20 @@ export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
   desktop: { enabled: true },
 };
 
+export type ThinkingLevel = "off" | "low" | "medium" | "high";
+
 export interface ModelRef {
   provider: string;
   model: string;
   temperature?: number;
   maxTokens?: number;
+}
+
+export interface ContextLimitsConfig {
+  /** 聊天对话换段上限（Token），缺省按模型窗口 75% */
+  chat?: number;
+  /** 独处/主动唤醒换段上限（Token），缺省按模型窗口 75% */
+  solo?: number;
 }
 
 export interface LlmConfig {
@@ -99,6 +108,7 @@ export interface LlmConfig {
   >;
   slots: {
     chat?: ModelRef;
+    fallbacks?: ModelRef[];
     memory_task?: ModelRef;
     vision?: ModelRef;
     embedding?: ModelRef;
@@ -106,8 +116,15 @@ export interface LlmConfig {
   };
   thinking: {
     enabled: boolean;
+    level?: ThinkingLevel;
     budgetTokens?: number;
   };
+  contextLimits?: ContextLimitsConfig;
+}
+
+export interface AvatarsConfig {
+  userHash?: string;
+  residentHash?: string;
 }
 
 /**
@@ -151,6 +168,8 @@ export interface PsyberConfig {
   circadian?: CircadianConfig;
   /** 离线通知通道配置 */
   notifications?: NotificationsConfig;
+  /** 双人头像内容寻址哈希（落盘 media/ 且 pinned = 1） */
+  avatars?: AvatarsConfig;
   /** LLM 槽位与 Provider 非敏感配置（明文 API Key 存 credentials.json） */
   llm?: LlmConfig;
   /** 是否已完成初生引导 */
@@ -306,6 +325,16 @@ export async function loadOrCreateConfig(
         }
       : undefined,
     recallEvalNoticeResident: Boolean(cfg.recallEvalNoticeResident),
+    avatars: cfg.avatars
+      ? {
+          ...(typeof cfg.avatars.userHash === "string" && cfg.avatars.userHash.trim()
+            ? { userHash: cfg.avatars.userHash.trim() }
+            : {}),
+          ...(typeof cfg.avatars.residentHash === "string" && cfg.avatars.residentHash.trim()
+            ? { residentHash: cfg.avatars.residentHash.trim() }
+            : {}),
+        }
+      : undefined,
     llm: cfg.llm,
     genesisCompleted: Boolean(cfg.genesisCompleted),
   };
