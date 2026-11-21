@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
@@ -7,11 +11,203 @@ import '../../../core/state/app_controller.dart';
 import '../../../shared/theme.dart';
 import '../../settings/drawer_modal.dart';
 
-/// 左抽屉（抽屉与档案）：
-/// - 收纳上锁私密日记（private/*.sealed）
-/// - 门缝纸条归档
-/// - 生活记忆漫步
-/// - 底部角落优雅收纳「偏好与系统设置」
+/// 左区面板正文：复用于窄屏遮罩抽屉与宽屏可折叠侧边栏。
+class LeftArchivePanelContent extends StatelessWidget {
+  const LeftArchivePanelContent({
+    super.key,
+    required this.controller,
+    required this.onOpenSettings,
+    this.isSidebar = false,
+    this.onCollapse,
+    this.imagePicker,
+  });
+
+  final AppController controller;
+  final VoidCallback onOpenSettings;
+  final bool isSidebar;
+  final VoidCallback? onCollapse;
+  final ImageFilePicker? imagePicker;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            (isSidebar && isMacOs) ? 38 : 16,
+            12,
+            10,
+          ),
+          child: Row(
+            children: [
+              Icon(PhosphorIconsLight.archiveBox, size: 19, color: colors.inkDeep),
+              const SizedBox(width: 8),
+              Text(
+                '抽屉与档案',
+                style: PsyberTheme.editorialSerif.copyWith(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w500,
+                  color: colors.inkDeep,
+                ),
+              ),
+              const Spacer(),
+              if (!isSidebar || onCollapse != null)
+                IconButton(
+                  icon: Icon(
+                    isSidebar ? PhosphorIconsLight.sidebarSimple : PhosphorIconsLight.x,
+                    size: 18,
+                  ),
+                  tooltip: isSidebar ? '收起侧边栏' : '关闭抽屉',
+                  onPressed: isSidebar ? onCollapse : () => Navigator.of(context).pop(),
+                ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            '存放私密日记与门缝纸条。',
+            style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.4),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Divider(height: 1, color: colors.hairline),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              ListTile(
+                key: const Key('open_drawer_entry'),
+                leading: Icon(
+                  PhosphorIconsLight.lock,
+                  size: 18,
+                  color: colors.thresholdAmber,
+                ),
+                title: const Text(
+                  '上锁的抽屉',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                ),
+                subtitle: Text(
+                  '私密日记（拆封会留痕并告知对方）',
+                  style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                ),
+                onTap: () {
+                  if (!isSidebar) {
+                    Navigator.of(context).pop();
+                  }
+                  unawaited(
+                    showDialog<void>(
+                      context: context,
+                      builder: (_) => DrawerModal(controller: controller),
+                    ),
+                  );
+                },
+              ),
+              ValueListenableBuilder<DoorStatus>(
+                valueListenable: controller.doorNotifier,
+                builder: (context, door, _) {
+                  return ListTile(
+                    key: const Key('door_notes_archive_entry'),
+                    leading: Icon(
+                      PhosphorIconsLight.tray,
+                      size: 18,
+                      color: colors.inkDeep,
+                    ),
+                    title: const Text(
+                      '门缝纸条归档',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                    ),
+                    subtitle: Text(
+                      door.unreadDoorNotes > 0
+                          ? '有 ${door.unreadDoorNotes} 张未拆封纸条'
+                          : '关门或休息时投递的纸条均保留于此',
+                      style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                    ),
+                    trailing: door.unreadDoorNotes > 0
+                        ? Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colors.thresholdAmberSoft,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '${door.unreadDoorNotes} 张',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: colors.thresholdAmber,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          )
+                        : null,
+                    onTap: () {
+                      final messenger = ScaffoldMessenger.maybeOf(context);
+                      if (!isSidebar) {
+                        Navigator.of(context).pop();
+                      }
+                      messenger?.hideCurrentSnackBar();
+                      messenger?.showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            door.unreadDoorNotes > 0
+                                ? '有 ${door.unreadDoorNotes} 张门缝纸条尚未拆封，可在聊天流中查看'
+                                : '关门或休息时投递的纸条均保留在聊天流中',
+                          ),
+                          duration: const Duration(seconds: 3),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+        Divider(height: 1, color: colors.hairline),
+        Material(
+          color: isSidebar ? Colors.transparent : colors.mineralCanvas,
+          child: ListTile(
+            key: const Key('settings_button'),
+            dense: true,
+            leading: Icon(
+              PhosphorIconsLight.slidersHorizontal,
+              size: 19,
+              color: colors.inkDeep,
+            ),
+            title: Text(
+              '偏好与设置',
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w500,
+                color: colors.inkDeep,
+              ),
+            ),
+            subtitle: Text(
+              '模型、作息、通知、设备与外观',
+              style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+            ),
+            onTap: () {
+              if (!isSidebar) {
+                Navigator.of(context).pop();
+              }
+              onOpenSettings();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 窄屏左抽屉（抽屉与档案）：带圆角与遮罩的移动端滑出抽屉。
 class LeftArchiveDrawer extends StatelessWidget {
   const LeftArchiveDrawer({
     super.key,
@@ -37,157 +233,277 @@ class LeftArchiveDrawer extends StatelessWidget {
         ),
       ),
       child: SafeArea(
+        child: LeftArchivePanelContent(
+          controller: controller,
+          onOpenSettings: onOpenSettings,
+          imagePicker: imagePicker,
+        ),
+      ),
+    );
+  }
+}
+
+/// 宽屏无遮罩左侧边栏（248px，极细右边框区分主阅读空间）。
+class LeftArchiveSidebar extends StatelessWidget {
+  const LeftArchiveSidebar({
+    super.key,
+    required this.controller,
+    required this.onOpenSettings,
+    required this.onCollapse,
+    this.imagePicker,
+  });
+
+  final AppController controller;
+  final VoidCallback onOpenSettings;
+  final VoidCallback onCollapse;
+  final ImageFilePicker? imagePicker;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+
+    return Container(
+      key: const Key('desktop_left_sidebar'),
+      width: 248,
+      decoration: BoxDecoration(
+        border: Border(right: BorderSide(color: colors.hairline)),
+      ),
+      child: Material(
+        color: colors.mineralCanvas,
+        child: SafeArea(
+          child: LeftArchivePanelContent(
+            controller: controller,
+            onOpenSettings: onOpenSettings,
+            isSidebar: true,
+            onCollapse: onCollapse,
+            imagePicker: imagePicker,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 常用活动卡片主体：复用于窄屏右抽屉与桌面端就近弹出的轻量 Popover。
+class ActivityCardBody extends StatelessWidget {
+  const ActivityCardBody({
+    super.key,
+    required this.controller,
+    required this.onAfterEnd,
+  });
+
+  final AppController controller;
+  final VoidCallback onAfterEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return ValueListenableBuilder<ActivitySessionView?>(
+      valueListenable: controller.activeActivityNotifier,
+      builder: (context, activity, _) {
+        final isActive = activity != null;
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: isActive ? colors.celadonWash : colors.mineralCanvas,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isActive ? colors.accentBorder : colors.hairline,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '放映伴看',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isActive ? colors.statusSuccessSoft : colors.letterSurface,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: colors.hairline),
+                    ),
+                    child: Text(
+                      isActive ? '伴看进行中' : '已就绪',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: isActive ? colors.statusSuccess : colors.inkQuiet,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                isActive
+                    ? '正在一起看：${activity.title.isEmpty ? '伴看视频' : activity.title}'
+                    : '播放视频时可在一旁同步观看并轻声交流。',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: colors.inkQuiet,
+                  height: 1.45,
+                ),
+              ),
+              if (isActive) ...[
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton(
+                    key: const Key('end_activity_button'),
+                    onPressed: () async {
+                      await controller.endActiveCinema();
+                      if (context.mounted) {
+                        onAfterEnd();
+                      }
+                    },
+                    style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      minimumSize: Size.zero,
+                    ),
+                    child: const Text('结束伴看', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 桌面端右上角就近弹出的常用活动轻量 Popover（无黑幕遮罩，高度自适应）。
+Future<void> showActivityPopover(
+  BuildContext context, {
+  required GlobalKey anchorKey,
+  required AppController controller,
+}) {
+  double top = 56;
+  double right = 16;
+  final anchorCtx = anchorKey.currentContext;
+  if (anchorCtx != null) {
+    final box = anchorCtx.findRenderObject() as RenderBox?;
+    final overlay = Overlay.maybeOf(context)?.context.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize && overlay != null && overlay.hasSize) {
+      final bottomRight = box.localToGlobal(
+        Offset(box.size.width, box.size.height),
+        ancestor: overlay,
+      );
+      top = bottomRight.dy + 8;
+      final maxRight = math.max(12.0, overlay.size.width - 312.0);
+      right = (overlay.size.width - bottomRight.dx).clamp(12.0, maxRight);
+    }
+  }
+
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: '关闭常用活动',
+    barrierColor: Colors.transparent,
+    transitionDuration: const Duration(milliseconds: 140),
+    pageBuilder: (dialogCtx, _, __) {
+      return Stack(
+        children: [
+          Positioned(
+            top: top,
+            right: right,
+            width: 296,
+            child: ActivityPopoverCard(
+              controller: controller,
+              onClose: () => Navigator.of(dialogCtx).pop(),
+            ),
+          ),
+        ],
+      );
+    },
+    transitionBuilder: (ctx, anim, _, child) {
+      return FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+        child: child,
+      );
+    },
+  );
+}
+
+class ActivityPopoverCard extends StatelessWidget {
+  const ActivityPopoverCard({
+    super.key,
+    required this.controller,
+    required this.onClose,
+  });
+
+  final AppController controller;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Material(
+      key: const Key('activity_popover_card'),
+      color: colors.letterSurface,
+      elevation: 6,
+      shadowColor: Colors.black.withValues(alpha: 0.08),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: colors.hairline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 12, 10),
-              child: Row(
-                children: [
-                  Icon(PhosphorIconsLight.archiveBox, size: 20, color: colors.inkDeep),
-                  const SizedBox(width: 8),
-                  Text(
-                    '抽屉与档案',
-                    style: PsyberTheme.editorialSerif.copyWith(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w500,
-                      color: colors.inkDeep,
-                    ),
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(PhosphorIconsLight.x, size: 18),
-                    tooltip: '关闭抽屉',
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text(
-                '存放住户的私密日记、门缝纸条与往事记录。',
-                style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.4),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Divider(height: 1, color: colors.hairline),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                children: [
-                  ListTile(
-                    key: const Key('open_drawer_entry'),
-                    leading: Icon(
-                      PhosphorIconsLight.lock,
-                      size: 18,
-                      color: colors.thresholdAmber,
-                    ),
-                    title: const Text(
-                      '上锁的抽屉',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: const Text(
-                      '住户的私密日记（拆封前必有二次确认）',
-                      style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
-                    ),
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      showDialog<void>(
-                        context: context,
-                        builder: (_) => DrawerModal(controller: controller),
-                      );
-                    },
-                  ),
-                  ValueListenableBuilder<DoorStatus>(
-                    valueListenable: controller.doorNotifier,
-                    builder: (context, door, _) {
-                      return ListTile(
-                        leading: Icon(
-                          PhosphorIconsLight.tray,
-                          size: 18,
-                          color: colors.inkDeep,
-                        ),
-                        title: const Text(
-                          '门缝纸条归档',
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                        ),
-                        subtitle: Text(
-                          door.unreadDoorNotes > 0
-                              ? '有 ${door.unreadDoorNotes} 张未拆封纸条'
-                              : '关门独处或休息时投递的纸条均存放在此',
-                          style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-                        ),
-                        trailing: door.unreadDoorNotes > 0
-                            ? Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: colors.thresholdAmberSoft,
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  '${door.unreadDoorNotes} 张',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: colors.thresholdAmber,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              )
-                            : null,
-                        onTap: () {
-                          // 可轻弹便签归档说明
-                        },
-                      );
-                    },
-                  ),
-                  ListTile(
-                    leading: Icon(
-                      PhosphorIconsLight.bookOpen,
-                      size: 18,
-                      color: colors.inkDeep,
-                    ),
-                    title: const Text(
-                      '生活记忆',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: const Text(
-                      '住户在夜间静默整理出的生活卡片',
-                      style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
-                    ),
-                    onTap: () {
-                      // 记忆漫步卡片
-                    },
-                  ),
-                ],
-              ),
-            ),
-            Divider(height: 1, color: colors.hairline),
-            Material(
-              color: colors.mineralCanvas,
-              child: ListTile(
-                key: const Key('settings_button'),
-                dense: true,
-                leading: Icon(PhosphorIconsLight.slidersHorizontal, size: 19, color: colors.inkDeep),
-                title: Text(
-                  '偏好与系统设置',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
+            Row(
+              children: [
+                Icon(PhosphorIconsLight.squaresFour, size: 17, color: colors.inkDeep),
+                const SizedBox(width: 7),
+                Text(
+                  '常用活动',
+                  style: PsyberTheme.editorialSerif.copyWith(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w500,
                     color: colors.inkDeep,
                   ),
                 ),
-                subtitle: Text(
-                  '配对设备、模型路由、作息与日夜主题',
-                  style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(PhosphorIconsLight.x, size: 16),
+                  tooltip: '关闭',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                  onPressed: onClose,
                 ),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  onOpenSettings();
-                },
+              ],
+            ),
+            const SizedBox(height: 10),
+            ActivityCardBody(
+              controller: controller,
+              onAfterEnd: onClose,
+            ),
+            const SizedBox(height: 12),
+            Center(
+              child: Text(
+                '更多共处活动将陆续加入',
+                style: TextStyle(fontSize: 11.5, color: colors.inkFaint),
               ),
             ),
           ],
@@ -197,9 +513,7 @@ class LeftArchiveDrawer extends StatelessWidget {
   }
 }
 
-/// 右抽屉（常用活动）：
-/// - 放映伴看（Cinema）活动实时卡片与快捷操作
-/// - 预留的扩展场景插槽（专注自习、白噪音雨声、双人电台）
+/// 窄屏右抽屉（常用活动）：放映伴看实时卡片与快捷操作。
 class RightActivityDrawer extends StatelessWidget {
   const RightActivityDrawer({
     super.key,
@@ -250,7 +564,7 @@ class RightActivityDrawer extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Text(
-                '与住户开启专属陪伴场景与日常同频互动。',
+                '一起看片，或开启新的共处时光。',
                 style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.4),
               ),
             ),
@@ -260,189 +574,22 @@ class RightActivityDrawer extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  ValueListenableBuilder<ActivitySessionView?>(
-                    valueListenable: controller.activeActivityNotifier,
-                    builder: (context, activity, _) {
-                      final isActive = activity != null;
-                      return Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: isActive ? colors.celadonWash : colors.mineralCanvas,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: isActive ? colors.accentBorder : colors.hairline,
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
-                                const SizedBox(width: 8),
-                                const Expanded(
-                                  child: Text(
-                                    '放映伴看',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 7,
-                                    vertical: 2,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: isActive
-                                        ? colors.statusSuccessSoft
-                                        : colors.letterSurface,
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: colors.hairline),
-                                  ),
-                                  child: Text(
-                                    isActive ? '伴看进行中' : '已就绪',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w500,
-                                      color: isActive
-                                          ? colors.statusSuccess
-                                          : colors.inkQuiet,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              isActive
-                                  ? '正在一起看：${activity.title.isEmpty ? '伴看视频' : activity.title}'
-                                  : '播放视频网站时，住户会在一旁同步观看并轻声发送弹幕交流。',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: colors.inkQuiet,
-                                height: 1.45,
-                              ),
-                            ),
-                            if (isActive) ...[
-                              const SizedBox(height: 10),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: FilledButton(
-                                  key: const Key('end_activity_button'),
-                                  onPressed: () async {
-                                    await controller.endActiveCinema();
-                                    if (context.mounted) {
-                                      Navigator.of(context).pop();
-                                    }
-                                  },
-                                  style: FilledButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 6,
-                                    ),
-                                    minimumSize: Size.zero,
-                                  ),
-                                  child: const Text('结束伴看', style: TextStyle(fontSize: 12)),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      );
-                    },
+                  ActivityCardBody(
+                    controller: controller,
+                    onAfterEnd: () => Navigator.of(context).pop(),
                   ),
-                  const SizedBox(height: 14),
-                  _ActivitySlotCard(
-                    colors: colors,
-                    icon: PhosphorIconsLight.timer,
-                    title: '自习专注室',
-                    desc: '番茄钟与无声静默陪伴，适合工作、阅读或专注学习。',
-                    chip: 'Ring 2 预留',
-                  ),
-                  const SizedBox(height: 10),
-                  _ActivitySlotCard(
-                    colors: colors,
-                    icon: PhosphorIconsLight.drop,
-                    title: '雨声与白噪音',
-                    desc: '轻柔的环境雨声与自然声景，营造安宁氛围。',
-                    chip: 'Ring 2 预留',
-                  ),
-                  const SizedBox(height: 10),
-                  _ActivitySlotCard(
-                    colors: colors,
-                    icon: PhosphorIconsLight.musicNote,
-                    title: '双人音乐电台',
-                    desc: '共享同一份歌单与旋律，实时同步歌词感受。',
-                    chip: 'Ring 2 预留',
+                  const SizedBox(height: 18),
+                  Center(
+                    child: Text(
+                      '更多共处活动将陆续加入',
+                      style: TextStyle(fontSize: 12, color: colors.inkFaint),
+                    ),
                   ),
                 ],
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ActivitySlotCard extends StatelessWidget {
-  const _ActivitySlotCard({
-    required this.colors,
-    required this.icon,
-    required this.title,
-    required this.desc,
-    required this.chip,
-  });
-
-  final PsyberColors colors;
-  final IconData icon;
-  final String title;
-  final String desc;
-  final String chip;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: colors.mineralCanvas,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colors.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 17, color: colors.inkQuiet),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                decoration: BoxDecoration(
-                  color: colors.celadonWash,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  chip,
-                  style: TextStyle(fontSize: 10.5, color: colors.inkFaint),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            desc,
-            style: TextStyle(fontSize: 11.5, color: colors.inkQuiet, height: 1.4),
-          ),
-        ],
       ),
     );
   }

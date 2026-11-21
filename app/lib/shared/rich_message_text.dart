@@ -22,7 +22,7 @@ class RichMessageText extends StatelessWidget {
     final style = baseStyle ??
         TextStyle(
           fontSize: 15,
-          height: 1.58,
+          height: 1.62,
           color: colors.inkDeep,
         );
     final blocks = _parseBlocks(text);
@@ -39,7 +39,7 @@ class RichMessageText extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
-          if (i > 0) const SizedBox(height: 8),
+          if (i > 0) const SizedBox(height: 10),
           _buildBlock(context, blocks[i], style, colors),
         ],
       ],

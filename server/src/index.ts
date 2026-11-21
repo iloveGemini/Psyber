@@ -256,6 +256,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     registry,
     chatModel,
     db,
+    media,
     onRollover: () => {
       void enqueueTidy("daily_wrapup");
     },

@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
@@ -8,12 +10,11 @@ import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
-import 'drawer_modal.dart';
 
 /// 完整设置面板：
 /// - 宽屏（>= 920px）嵌入右侧滑出栏，不遮挡主空间；
 /// - 窄屏 / 移动端作为独立设置页推入，可自然返回；
-/// - 接通 GET / PATCH /api/v1/settings（模型热切换、作息、通知、设备吊销）并预留 Ring 1.5 抽屉与贴纸管理槽。
+/// - 接通 GET / PATCH /api/v1/settings（模型热切换、作息、通知、设备吊销）并保留贴纸管理。
 class SettingsPanelContent extends StatefulWidget {
   const SettingsPanelContent({
     super.key,
@@ -31,10 +32,10 @@ class SettingsPanelContent extends StatefulWidget {
 }
 
 class _SettingsPanelContentState extends State<SettingsPanelContent> {
-  final _sleepStartCtrl = TextEditingController(text: '23:30');
-  final _sleepEndCtrl = TextEditingController(text: '07:30');
   final _webhookUrlCtrl = TextEditingController();
 
+  String _sleepStart = '23:30';
+  String _sleepEnd = '07:30';
   bool _proactiveEnabled = true;
   bool _desktopNotifyEnabled = true;
   bool _webhookEnabled = false;
@@ -60,8 +61,8 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
   void _syncFromSnapshot(SettingsSnapshot? snap) {
     if (snap == null) return;
     if (!_hydrated || !_dirty) {
-      _sleepStartCtrl.text = snap.circadian.sleepStart;
-      _sleepEndCtrl.text = snap.circadian.sleepEnd;
+      _sleepStart = snap.circadian.sleepStart;
+      _sleepEnd = snap.circadian.sleepEnd;
       _webhookUrlCtrl.text = snap.webhookUrl;
       _proactiveEnabled = snap.circadian.proactiveEnabled;
       _desktopNotifyEnabled = snap.desktopNotifyEnabled;
@@ -74,10 +75,50 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
   @override
   void dispose() {
     widget.controller.settingsNotifier.removeListener(_onSettingsChanged);
-    _sleepStartCtrl.dispose();
-    _sleepEndCtrl.dispose();
     _webhookUrlCtrl.dispose();
     super.dispose();
+  }
+
+  TimeOfDay _parseTime(String raw, TimeOfDay fallback) {
+    final parts = raw.trim().split(':');
+    if (parts.length != 2) return fallback;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null || h < 0 || h > 23 || m < 0 || m > 59) {
+      return fallback;
+    }
+    return TimeOfDay(hour: h, minute: m);
+  }
+
+  String _formatTime(TimeOfDay t) {
+    final hh = t.hour.toString().padLeft(2, '0');
+    final mm = t.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
+
+  Future<void> _pickCircadianTime({required bool isStart}) async {
+    final current = isStart
+        ? _parseTime(_sleepStart, const TimeOfDay(hour: 23, minute: 30))
+        : _parseTime(_sleepEnd, const TimeOfDay(hour: 7, minute: 30));
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: current,
+      builder: (ctx, child) {
+        return MediaQuery(
+          data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      if (isStart) {
+        _sleepStart = _formatTime(picked);
+      } else {
+        _sleepEnd = _formatTime(picked);
+      }
+      _dirty = true;
+    });
   }
 
   Future<void> _saveCircadianAndNotifications() async {
@@ -90,8 +131,8 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
       final webhookUrl = _webhookUrlCtrl.text.trim();
       await widget.controller.patchSettings({
         'circadian': {
-          'sleepStart': _sleepStartCtrl.text.trim(),
-          'sleepEnd': _sleepEndCtrl.text.trim(),
+          'sleepStart': _sleepStart,
+          'sleepEnd': _sleepEnd,
           'proactiveEnabled': _proactiveEnabled,
         },
         'notifications': {
@@ -308,12 +349,12 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const Text(
-                      '上传表情贴纸（Ring 1.5）',
-                      style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w600),
+                      '上传表情贴纸',
+                      style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w500),
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      '支持 PNG / WebP / GIF（≤ 2 MB）。Ring 1 服务端可将图片放入数据目录 stickers/ 文件夹。',
+                      '支持 PNG / WebP / GIF（≤ 2 MB），也可将图片直接放入服务端 stickers/ 目录。',
                       style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet, height: 1.45),
                     ),
                     const SizedBox(height: 14),
@@ -398,7 +439,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                                     setDialogState(() {
                                       uploading = false;
                                       errText = e.isEndpointUnavailable
-                                          ? '当前后端处于 Ring 1 模式，动态上传贴纸将在 Ring 1.5 开启'
+                                          ? '当前服务端暂未开启在线上传贴纸，可将图片放入服务端 stickers/ 目录。'
                                           : e.message;
                                     });
                                   } catch (_) {
@@ -480,25 +521,28 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(18, 14, 10, 12),
-          child: Row(
-            children: [
-              Text(
-                '房间与连接设置',
-                style: PsyberTheme.editorialSerif.copyWith(
-                  fontSize: 17.5,
-                  fontWeight: FontWeight.w500,
+        SizedBox(
+          height: 50,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 10, 0),
+            child: Row(
+              children: [
+                Text(
+                  '偏好与设置',
+                  style: PsyberTheme.editorialSerif.copyWith(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
-              ),
-              const Spacer(),
-              IconButton(
-                key: const Key('close_settings_button'),
-                icon: const Icon(PhosphorIconsLight.x, size: 19),
-                tooltip: '关闭设置',
-                onPressed: widget.onClose,
-              ),
-            ],
+                const Spacer(),
+                IconButton(
+                  key: const Key('close_settings_button'),
+                  icon: const Icon(PhosphorIconsLight.x, size: 19),
+                  tooltip: '关闭设置',
+                  onPressed: widget.onClose,
+                ),
+              ],
+            ),
           ),
         ),
         const Divider(height: 1),
@@ -556,45 +600,19 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  const _SectionLabel('评测与空间扩展'),
+                  const _SectionLabel('互动与评测'),
                   _SurfaceBox(
                     child: Column(
                       children: [
                         ValueListenableBuilder<bool>(
                           valueListenable: widget.controller.recallEvalModeNotifier,
-                          builder: (context, enabled, _) => SwitchListTile(
+                          builder: (context, enabled, _) => _QuietSwitchTile(
                             key: const Key('recall_eval_switch'),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-                            title: const Text('召回评测模式', style: TextStyle(fontSize: 14)),
-                            subtitle: const Text(
-                              '开启后在助手回复下展示「想起 N 张卡」标注入口',
-                              style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
-                            ),
+                            title: '召回评测模式',
+                            subtitle: '开启后在回复下显示「想起 N 张卡」',
                             value: enabled,
                             onChanged: widget.controller.toggleRecallEvalMode,
                           ),
-                        ),
-                        const Divider(height: 1),
-                        ListTile(
-                          key: const Key('open_drawer_entry'),
-                          leading: const Icon(
-                            PhosphorIconsLight.lock,
-                            size: 19,
-                            color: PsyberTheme.thresholdAmber,
-                          ),
-                          title: const Text('上锁的抽屉', style: TextStyle(fontSize: 14)),
-                          subtitle: const Text(
-                            '私密日记（拆封必留痕告知对方 · Ring 1.5）',
-                            style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
-                          ),
-                          onTap: () {
-                            unawaited(
-                              showDialog<void>(
-                                context: context,
-                                builder: (_) => DrawerModal(controller: widget.controller),
-                              ),
-                            );
-                          },
                         ),
                         const Divider(height: 1),
                         ListTile(
@@ -605,9 +623,9 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                             color: colors.inkQuiet,
                           ),
                           title: const Text('上传互发表情贴纸', style: TextStyle(fontSize: 14)),
-                          subtitle: const Text(
-                            '支持 PNG / WebP / GIF（Ring 1.5 动态贴纸库）',
-                            style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
+                          subtitle: Text(
+                            '支持 PNG / WebP / GIF 贴纸',
+                            style: TextStyle(fontSize: 12, color: colors.inkQuiet),
                           ),
                           onTap: _openStickerUploadDialog,
                         ),
@@ -625,59 +643,47 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                           Row(
                             children: [
                               Expanded(
-                                child: TextField(
-                                  controller: _sleepStartCtrl,
-                                  onChanged: (_) => _dirty = true,
-                                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                                  decoration: const InputDecoration(
-                                    labelText: '夜间休息开始',
-                                    isDense: true,
-                                  ),
+                                child: _TimePickerBox(
+                                  key: const Key('sleep_start_picker'),
+                                  label: '夜间休息开始',
+                                  value: _sleepStart,
+                                  onTap: () => unawaited(_pickCircadianTime(isStart: true)),
                                 ),
                               ),
                               const SizedBox(width: 10),
                               Expanded(
-                                child: TextField(
-                                  controller: _sleepEndCtrl,
-                                  onChanged: (_) => _dirty = true,
-                                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                                  decoration: const InputDecoration(
-                                    labelText: '早晨醒来',
-                                    isDense: true,
-                                  ),
+                                child: _TimePickerBox(
+                                  key: const Key('sleep_end_picker'),
+                                  label: '早晨醒来',
+                                  value: _sleepEnd,
+                                  onTap: () => unawaited(_pickCircadianTime(isStart: false)),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 8),
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: const Text('允许定时主动招呼', style: TextStyle(fontSize: 13.5)),
-                            subtitle: const Text(
-                              '夜间静默窗内不会打扰，连续未回会自动退回安静',
-                              style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
-                            ),
+                          const SizedBox(height: 10),
+                          _QuietSwitchTile(
+                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                            title: '允许定时主动招呼',
+                            subtitle: '静默时段不打扰，连续未回会自动安静',
                             value: _proactiveEnabled,
                             onChanged: (v) => setState(() {
                               _proactiveEnabled = v;
                               _dirty = true;
                             }),
                           ),
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: const Text('本机桌面通知', style: TextStyle(fontSize: 13.5)),
+                          _QuietSwitchTile(
+                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                            title: '本机桌面通知',
                             value: _desktopNotifyEnabled,
                             onChanged: (v) => setState(() {
                               _desktopNotifyEnabled = v;
                               _dirty = true;
                             }),
                           ),
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: const Text('Webhook 离线推送', style: TextStyle(fontSize: 13.5)),
+                          _QuietSwitchTile(
+                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                            title: 'Webhook 离线推送',
                             value: _webhookEnabled,
                             onChanged: (v) => setState(() {
                               _webhookEnabled = v;
@@ -845,13 +851,17 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
     return Scaffold(
       backgroundColor: colors.mineralCanvas,
       body: SafeArea(
-        child: SettingsPanelContent(
-          controller: controller,
-          imagePicker: imagePicker,
-          onClose: () => Navigator.of(context).pop(),
+        child: Padding(
+          padding: EdgeInsets.only(top: isMacOs ? 28 : 0),
+          child: SettingsPanelContent(
+            controller: controller,
+            imagePicker: imagePicker,
+            onClose: () => Navigator.of(context).pop(),
+          ),
         ),
       ),
     );
@@ -894,6 +904,125 @@ class _SurfaceBox extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
+    );
+  }
+}
+
+class _QuietSwitchTile extends StatelessWidget {
+  const _QuietSwitchTile({
+    super.key,
+    required this.title,
+    this.subtitle,
+    required this.value,
+    required this.onChanged,
+    this.contentPadding = const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+  });
+
+  final String title;
+  final String? subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final EdgeInsetsGeometry contentPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return InkWell(
+      onTap: () => onChanged(!value),
+      child: Padding(
+        padding: contentPadding,
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
+                  ),
+                  if (subtitle != null && subtitle!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle!,
+                      style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Transform.scale(
+              scale: 0.76,
+              alignment: Alignment.centerRight,
+              child: CupertinoSwitch(
+                value: value,
+                activeTrackColor: colors.statusSuccess,
+                inactiveTrackColor: colors.hairline,
+                onChanged: onChanged,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TimePickerBox extends StatelessWidget {
+  const _TimePickerBox({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: colors.mineralCanvas,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: colors.hairline),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+            ),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Text(
+                  value,
+                  style: PsyberTheme.monoStyle.copyWith(
+                    fontSize: 13.5,
+                    color: colors.inkDeep,
+                  ),
+                ),
+                const Spacer(),
+                Icon(
+                  PhosphorIconsLight.clock,
+                  size: 14,
+                  color: colors.inkQuiet,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

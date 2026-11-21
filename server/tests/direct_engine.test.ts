@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import path from "node:path";
+import { createApp } from "../src/api/app.ts";
 import { saveConfig } from "../src/core/config.ts";
+import { MediaStore } from "../src/core/media.ts";
 import { DirectEngine } from "../src/engine/direct.ts";
+import { SseHub } from "../src/engine/sse.ts";
 import { ToolRegistry, registerCoreTier1Tools } from "../src/tools/registry.ts";
 import { createTestContext, type TestContext } from "./helpers.ts";
 import { MockChatModel } from "./mocks/chat_model.ts";
@@ -19,8 +22,10 @@ function buildEngine(c: TestContext, mockChat: MockChatModel, onRollover?: (oldI
     getConfig: () => c.config,
     saveConfig: (cfg) => saveConfig(c.dataDir, cfg),
   });
+  const media = new MediaStore(c.db, c.dataDir);
   return {
     registry,
+    media,
     engine: new DirectEngine({
       dataDir: c.dataDir,
       promptsDir: PROMPTS_DIR,
@@ -31,6 +36,7 @@ function buildEngine(c: TestContext, mockChat: MockChatModel, onRollover?: (oldI
       registry,
       chatModel: mockChat,
       db: c.db,
+      media,
       retryDelaysMs: [0, 0],
       onRollover,
     }),
@@ -90,7 +96,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     expect(req1.systemPrompt).toContain("named: false");
     const firstUserMsg = req1.messages[req1.messages.length - 1];
     expect(firstUserMsg.role).toBe("user");
-    expect(firstUserMsg.content.startsWith("以后叫你阿白好不好？")).toBe(true);
+    expect(typeof firstUserMsg.content === "string" && firstUserMsg.content.startsWith("以后叫你阿白好不好？")).toBe(true);
     expect(firstUserMsg.content).toContain("<runtime_context>");
     expect(firstUserMsg.content).toContain('circadian="清醒"');
     expect(firstUserMsg.content).toContain("weekday=");
@@ -267,5 +273,94 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     const assistantMsgs = postRolloverReq.messages.filter((m) => m.role === "assistant");
     expect(assistantMsgs.some((m) => m.content.includes("<gist>") && m.content.includes("手冲咖啡"))).toBe(true);
     expect(assistantMsgs.some((m) => m.content.includes("记得那杯埃塞手冲！"))).toBe(true);
+  });
+
+  test("多模态图片附件透传、用户贴纸渲染、<stickers> 预算注入与动态 circadian 联动", async () => {
+    ctx = await createTestContext();
+    // 预置 35 张贴纸以验证 <= 30 条 / <= 500 字符上限
+    for (let i = 0; i < 35; i++) {
+      ctx.db
+        .query(
+          "INSERT INTO stickers (id, label, pack, media_hash, use_count, last_used_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(`stk-${String(i).padStart(2, "0")}`, `贴纸表情名字很长编号${i}`, "default", "b".repeat(64), i, 1000 + i, 1000);
+    }
+
+    const mockChat = new MockChatModel();
+    const { engine, media } = buildEngine(ctx, mockChat);
+    const saved = await media.save({
+      bytes: new Uint8Array([137, 80, 78, 71]),
+      mimeType: "image/png",
+      origin: "user_upload",
+      nowMs: ctx.clock.now(),
+    });
+
+    // 23:00 -> 临近睡前（默认 sleepStart=23:30）
+    ctx.clock.jumpToWallClock(2026, 11, 20, 23, 0, 0);
+
+    const sse = new SseHub();
+    const app = createApp({
+      version: "0.1.0",
+      clock: ctx.clock,
+      getConfig: () => ctx!.config,
+      events: ctx.events,
+      getActiveSessionId: () => engine.getActiveSessionId(),
+      db: ctx.db,
+      sse,
+      engine,
+      media,
+    });
+
+    mockChat.queueStream(() => [{ type: "text_delta", delta: "看到小猫照片啦！" }]);
+    const postRes = await app.request("/api/v1/chat/messages", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ctx.authToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        clientMessageId: "cmsg-mm-1",
+        content: "你看这张照片",
+        stickerId: "stk-34",
+        attachments: [saved.hash],
+      }),
+    });
+    expect(postRes.status).toBe(202);
+    await new Promise((r) => setTimeout(r, 60));
+
+    const req1 = mockChat.requests[0];
+    const u1 = req1.messages[req1.messages.length - 1];
+    expect(u1.role).toBe("user");
+    expect(Array.isArray(u1.content)).toBe(true);
+    if (u1.role === "user" && Array.isArray(u1.content)) {
+      const textPart = u1.content[0];
+      const imgPart = u1.content[1];
+      expect(textPart.type).toBe("text");
+      if (textPart.type === "text") {
+        expect(textPart.text).toContain("[贴纸: 贴纸表情名字很长编号34]");
+        expect(textPart.text).toContain("你看这张照片");
+        expect(textPart.text).toContain('circadian="临近睡前"');
+        const stickersMatch = /<stickers>[\s\S]*<\/stickers>/.exec(textPart.text);
+        expect(stickersMatch).not.toBeNull();
+        expect(stickersMatch![0].length).toBeLessThanOrEqual(500);
+        expect(stickersMatch![0]).toContain("stk-34");
+      }
+      expect(imgPart).toEqual({
+        type: "image",
+        data: Buffer.from([137, 80, 78, 71]).toString("base64"),
+        mimeType: "image/png",
+      });
+    }
+
+    // 23:45 -> 夜间静默窗；且第二轮回放历史应保留 [贴纸: ...] 与 [附带了 1 张图片]
+    ctx.clock.jumpToWallClock(2026, 11, 20, 23, 45, 0);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: "晚安。" }]);
+    await engine.runTurn({ mode: "chat", userText: "准备睡了" });
+    const req2 = mockChat.requests[1];
+    const prevUser = req2.messages.find((m) => m.role === "user");
+    expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain("[贴纸: 贴纸表情名字很长编号34]");
+    expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain("[附带了 1 张图片]");
+    const curUser = req2.messages[req2.messages.length - 1];
+    expect(curUser.role === "user" && typeof curUser.content === "string" && curUser.content).toContain('circadian="夜间静默窗"');
   });
 });

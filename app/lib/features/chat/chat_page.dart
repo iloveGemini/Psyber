@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/media/image_picker.dart';
@@ -38,13 +40,16 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _rightActivityAnchorKey = GlobalKey();
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
   final List<PendingAttachment> _pendingAttachments = <PendingAttachment>[];
+  StickerView? _pendingSticker;
 
   bool _sending = false;
   bool _uploadingImage = false;
   bool _loadingOlder = false;
+  bool _showDesktopSidebar = true;
   bool _showDesktopSettings = false;
   bool _showScrollToBottom = false;
 
@@ -95,7 +100,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   Future<void> _send() async {
     final text = _inputController.text.trim();
-    if ((text.isEmpty && _pendingAttachments.isEmpty) || _sending) return;
+    if ((text.isEmpty && _pendingAttachments.isEmpty && _pendingSticker == null) ||
+        _sending) {
+      return;
+    }
     setState(() => _sending = true);
     try {
       final attachmentHashes =
@@ -103,10 +111,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       await widget.controller.sendMessage(
         text,
         attachments: attachmentHashes.isEmpty ? null : attachmentHashes,
+        stickerId: _pendingSticker?.id,
       );
       _inputController.clear();
       if (mounted) {
-        setState(() => _pendingAttachments.clear());
+        setState(() {
+          _pendingAttachments.clear();
+          _pendingSticker = null;
+        });
       }
       _scrollToBottom();
     } on ApiException catch (e) {
@@ -149,21 +161,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sendSticker(StickerView sticker) async {
-    if (_sending) return;
-    setState(() => _sending = true);
-    try {
-      await widget.controller.sendMessage('', stickerId: sticker.id);
-      _scrollToBottom();
-    } on ApiException catch (e) {
-      widget.controller.turnErrorNotifier.value = e.message;
-    } catch (_) {
-      widget.controller.turnErrorNotifier.value = '发送贴纸失败，请稍后重试';
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
   void _openStickerSheet() {
     final stickersFuture = widget.controller.loadStickers();
     unawaited(
@@ -172,7 +169,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         builder: (ctx) => StickerPickerDialog(
           stickersFuture: stickersFuture,
           profile: widget.controller.profileNotifier.value,
-          onSelect: (sticker) => unawaited(_sendSticker(sticker)),
+          onSelect: (sticker) {
+            if (!mounted) return;
+            setState(() => _pendingSticker = sticker);
+          },
         ),
       ),
     );
@@ -245,45 +245,104 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final isWide = MediaQuery.sizeOf(context).width >= PsyberTheme.desktopBreakpoint;
+    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
-    return Scaffold(
-      key: _scaffoldKey,
-      drawer: LeftArchiveDrawer(
-        controller: widget.controller,
-        onOpenSettings: _toggleSettings,
-        imagePicker: widget.imagePicker,
-      ),
-      endDrawer: RightActivityDrawer(
-        controller: widget.controller,
-      ),
-      body: Row(
-        children: [
-          Expanded(
-            child: Column(
-              children: [
-                ValueListenableBuilder<DoorStatus>(
-                  valueListenable: widget.controller.doorNotifier,
-                  builder: (context, door, _) => ValueListenableBuilder<bool>(
-                    valueListenable: widget.controller.showReconnectingHintNotifier,
-                    builder: (context, showHint, _) =>
-                        ValueListenableBuilder<SettingsSnapshot?>(
-                      valueListenable: widget.controller.settingsNotifier,
-                      builder: (context, settings, _) =>
-                          ValueListenableBuilder<ActivitySessionView?>(
-                        valueListenable: widget.controller.activeActivityNotifier,
-                        builder: (context, activity, _) => DoorThresholdBar(
-                          door: door,
-                          showReconnectingHint: showHint,
-                          settings: settings,
-                          activeActivity: activity,
-                          onOpenLeftDrawer: () => _scaffoldKey.currentState?.openDrawer(),
-                          onOpenRightDrawer: () => _scaffoldKey.currentState?.openEndDrawer(),
-                          onOpenSettings: _toggleSettings,
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        SingleActivator(
+          LogicalKeyboardKey.comma,
+          meta: isMacOs,
+          control: !isMacOs,
+        ): _toggleSettings,
+        SingleActivator(
+          LogicalKeyboardKey.backslash,
+          meta: isMacOs,
+          control: !isMacOs,
+        ): () {
+          if (isWide) {
+            setState(() => _showDesktopSidebar = !_showDesktopSidebar);
+          }
+        },
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (isWide && _showDesktopSettings) {
+            setState(() => _showDesktopSettings = false);
+          }
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          key: _scaffoldKey,
+          drawer: isWide
+              ? null
+              : LeftArchiveDrawer(
+                  controller: widget.controller,
+                  onOpenSettings: _toggleSettings,
+                  imagePicker: widget.imagePicker,
+                ),
+          endDrawer: isWide
+              ? null
+              : RightActivityDrawer(
+                  controller: widget.controller,
+                ),
+          body: Row(
+            children: [
+              if (isWide && _showDesktopSidebar)
+                LeftArchiveSidebar(
+                  controller: widget.controller,
+                  onOpenSettings: _toggleSettings,
+                  onCollapse: () => setState(() => _showDesktopSidebar = false),
+                  imagePicker: widget.imagePicker,
+                ),
+              Expanded(
+                child: Column(
+                  children: [
+                    ValueListenableBuilder<DoorStatus>(
+                      valueListenable: widget.controller.doorNotifier,
+                      builder: (context, door, _) => ValueListenableBuilder<bool>(
+                        valueListenable: widget.controller.showReconnectingHintNotifier,
+                        builder: (context, showHint, _) =>
+                            ValueListenableBuilder<SettingsSnapshot?>(
+                          valueListenable: widget.controller.settingsNotifier,
+                          builder: (context, settings, _) =>
+                              ValueListenableBuilder<ActivitySessionView?>(
+                            valueListenable: widget.controller.activeActivityNotifier,
+                            builder: (context, activity, _) => DoorThresholdBar(
+                              door: door,
+                              showReconnectingHint: showHint,
+                              settings: settings,
+                              activeActivity: activity,
+                              isWide: isWide,
+                              sidebarOpen: isWide && _showDesktopSidebar,
+                              rightButtonKey: _rightActivityAnchorKey,
+                              onOpenLeftDrawer: () {
+                                if (isWide) {
+                                  setState(
+                                    () => _showDesktopSidebar = !_showDesktopSidebar,
+                                  );
+                                } else {
+                                  _scaffoldKey.currentState?.openDrawer();
+                                }
+                              },
+                              onOpenRightDrawer: () {
+                                if (isWide) {
+                                  unawaited(
+                                    showActivityPopover(
+                                      context,
+                                      anchorKey: _rightActivityAnchorKey,
+                                      controller: widget.controller,
+                                    ),
+                                  );
+                                } else {
+                                  _scaffoldKey.currentState?.openEndDrawer();
+                                }
+                              },
+                              onOpenSettings: _toggleSettings,
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
                 ValueListenableBuilder<ActivitySessionView?>(
                   valueListenable: widget.controller.activeActivityNotifier,
                   builder: (context, activity, _) {
@@ -497,12 +556,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                             door: door,
                             controller: _inputController,
                             pendingAttachments: _pendingAttachments,
+                            pendingSticker: _pendingSticker,
+                            profile: widget.controller.profileNotifier.value,
                             uploadingImage: _uploadingImage,
                             sending: _sending,
                             onPickImage: _pickAndUploadImage,
                             onOpenStickers: _openStickerSheet,
                             onRemoveAttachment: (idx) {
                               setState(() => _pendingAttachments.removeAt(idx));
+                            },
+                            onClearSticker: () {
+                              setState(() => _pendingSticker = null);
                             },
                             onSend: _send,
                           ),
@@ -514,20 +578,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
               ],
             ),
           ),
-          if (isWide && _showDesktopSettings)
-            Container(
-              width: 372,
-              decoration: BoxDecoration(
-                color: colors.mineralCanvas,
-                border: Border(left: BorderSide(color: colors.hairline)),
-              ),
-              child: SettingsPanelContent(
-                controller: widget.controller,
-                imagePicker: widget.imagePicker,
-                onClose: () => setState(() => _showDesktopSettings = false),
-              ),
-            ),
-        ],
+              if (isWide && _showDesktopSettings)
+                Container(
+                  width: 372,
+                  decoration: BoxDecoration(
+                    color: colors.mineralCanvas,
+                    border: Border(left: BorderSide(color: colors.hairline)),
+                  ),
+                  child: SettingsPanelContent(
+                    controller: widget.controller,
+                    imagePicker: widget.imagePicker,
+                    onClose: () => setState(() => _showDesktopSettings = false),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

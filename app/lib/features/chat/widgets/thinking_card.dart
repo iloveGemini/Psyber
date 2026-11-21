@@ -37,29 +37,24 @@ class _ThinkingCardState extends State<ThinkingCard> {
     }
     final colors = context.colors;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: colors.mineralCanvas,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: colors.hairline),
-      ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
             key: const Key('thinking_toggle'),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(6),
             onTap: () => setState(() => _expanded = !_expanded),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
                     _expanded ? PhosphorIconsLight.caretUp : PhosphorIconsLight.caretDown,
-                    size: 15,
-                    color: colors.inkQuiet,
+                    size: 13,
+                    color: colors.inkFaint,
                   ),
                   const SizedBox(width: 4),
                   Text(
@@ -74,15 +69,21 @@ class _ThinkingCardState extends State<ThinkingCard> {
             ),
           ),
           if (_expanded)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+            Container(
+              margin: const EdgeInsets.only(top: 4, left: 4),
+              padding: const EdgeInsets.only(left: 10, top: 2, bottom: 2),
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: colors.hairline, width: 2),
+                ),
+              ),
               child: SelectableText(
                 widget.thinking,
                 key: const Key('thinking_body'),
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 12.5,
-                  height: 1.5,
-                  color: PsyberTheme.inkQuiet,
+                  height: 1.55,
+                  color: colors.inkQuiet,
                 ),
               ),
             ),

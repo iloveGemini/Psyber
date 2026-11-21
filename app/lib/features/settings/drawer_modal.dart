@@ -177,7 +177,7 @@ class _DrawerModalState extends State<DrawerModal> {
                               border: Border.all(color: PsyberTheme.hairline),
                             ),
                             child: const Text(
-                              '当前后端运行在 Ring 1 基础模式，独立上锁抽屉接口（/api/v1/drawer）将在 Ring 1.5 启用。',
+                              '当前服务端暂未开启上锁抽屉功能。',
                               style: TextStyle(
                                 fontSize: 13,
                                 color: PsyberTheme.inkQuiet,

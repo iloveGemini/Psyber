@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:psyber_app/core/media/image_picker.dart';
 import 'package:psyber_app/core/models/models.dart';
 import 'package:psyber_app/core/network/api_client.dart';
 import 'package:psyber_app/core/state/app_controller.dart';
 import 'package:psyber_app/core/storage/session_storage.dart';
+import 'package:psyber_app/features/settings/settings_panel.dart';
 import 'package:psyber_app/main.dart';
 
 class FakePsyberApiClient implements PsyberApiClient {
@@ -687,13 +689,27 @@ void main() {
 
     await tester.tap(find.byKey(const Key('sticker_option_hug')));
     await tester.pumpAndSettle();
+    // 选中贴纸后先暂存到输入台，不立即发出，保留继续打字的机会
+    expect(api.sentPayloads.length, 1);
+    expect(find.byKey(const Key('pending_sticker_chip')), findsOneWidget);
+    expect(find.text('贴纸：抱抱'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('chat_input_field')), '辛苦啦');
+    await tester.tap(find.byKey(const Key('chat_send_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pending_sticker_chip')), findsNothing);
     expect(api.sentPayloads.length, 2);
     expect(api.sentPayloads[1]['stickerId'], 'hug');
+    expect(api.sentPayloads[1]['content'], '辛苦啦');
     expect(find.text('[贴纸：抱抱]'), findsOneWidget);
+    expect(find.text('辛苦啦'), findsOneWidget);
   });
 
-  testWidgets('宽屏设置侧栏回显与保存、观影伴看槽位及 Ring 1.5 版本切换与上锁抽屉确认', (tester) async {
-    tester.view.physicalSize = const Size(1280, 800);
+  testWidgets(
+    '宽屏设置侧栏回显与保存、观影伴看槽位及 Ring 1.5 版本切换与上锁抽屉确认',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
@@ -796,15 +812,33 @@ void main() {
     expect(api.endedCinemaIds, ['act_1']);
     expect(find.byKey(const Key('activity_banner_slot')), findsNothing);
 
-    // 宽屏点击设置应展开右侧栏而非覆盖页面，并回显 GET /settings 内容
+    // 宽屏默认展开无遮罩左侧边栏，且支持收起/再展开
+    expect(find.byKey(const Key('desktop_left_sidebar')), findsOneWidget);
+    expect(find.byKey(const Key('settings_button')), findsOneWidget);
+    expect(find.byKey(const Key('open_drawer_entry')), findsOneWidget);
     await tester.tap(find.byKey(const Key('left_drawer_button')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('desktop_left_sidebar')), findsNothing);
+    await tester.tap(find.byKey(const Key('left_drawer_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('desktop_left_sidebar')), findsOneWidget);
+
+    // 宽屏点击右上角常用活动应弹出轻量 Popover，而非全屏 Drawer 遮罩
+    await tester.tap(find.byKey(const Key('right_drawer_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('activity_popover_card')), findsOneWidget);
+    expect(find.text('放映伴看'), findsOneWidget);
+    expect(find.byType(Drawer), findsNothing);
+    Navigator.of(tester.element(find.byKey(const Key('activity_popover_card')))).pop();
+    await tester.pumpAndSettle();
+
+    // 宽屏点击设置应展开右侧栏而非覆盖页面，并回显 GET /settings 内容
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('close_settings_button')), findsOneWidget);
     expect(find.text('openai · gpt-4o'), findsOneWidget);
 
-    // 确保作息保存、抽屉入口与已配对设备（本机）可滚入视口并正常交互
+    // 确保作息保存与已配对设备（本机）可滚入视口并正常交互
     await tester.scrollUntilVisible(
       find.text('保存作息与通知'),
       200,
@@ -820,9 +854,34 @@ void main() {
       scrollable: find.byType(Scrollable).last,
     );
     expect(find.text('本机'), findsOneWidget);
+    // 设置页中不再保留重复的「上锁的抽屉」入口
+    expect(
+      find.descendant(
+        of: find.byType(SettingsPanelContent),
+        matching: find.byKey(const Key('open_drawer_entry')),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('desktop_left_sidebar')),
+        matching: find.byKey(const Key('open_drawer_entry')),
+      ),
+      findsOneWidget,
+    );
 
-    await tester.ensureVisible(find.byKey(const Key('open_drawer_entry')));
+    // 验证桌面端快捷键：Esc 关闭设置侧栏；Enter 直接发送消息（Shift+Enter 换行）
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('close_settings_button')), findsNothing);
+
+    await tester.enterText(find.byKey(const Key('chat_input_field')), '桌面回车直发');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(api.sentPayloads.length, 1);
+    expect(api.sentPayloads.first['content'], '桌面回车直发');
+
+    // 从左侧边栏唯一入口打开「上锁的抽屉」并完成二次确认拆封
     await tester.tap(find.byKey(const Key('open_drawer_entry')));
     await tester.pumpAndSettle();
     expect(find.text('半夜记下的心情'), findsOneWidget);
@@ -832,7 +891,8 @@ void main() {
     await tester.tap(find.text('确认拆封'));
     await tester.pumpAndSettle();
     expect(find.text('其实今天有点想听雨声。'), findsOneWidget);
-  });
+    },
+  );
 
   testWidgets('Genesis 初生向导支持选择 OpenAI 兼容并动态展开 Base URL 提交', (tester) async {
     final api = FakePsyberApiClient()
@@ -969,6 +1029,47 @@ void main() {
     api.emitSse('door.updated', {'state': 'open', 'note': null});
     expect(controller.doorNotifier.value.unreadDoorNotes, 0);
   });
+
+  testWidgets(
+    'macOS 最小窄窗 420x560 下门楣顶栏不产生 RenderFlex 溢出',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(420, 560);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final api = FakePsyberApiClient()
+        ..door = const DoorStatus(
+          state: DoorState.open,
+          note: '正在看书',
+          updatedAt: 1795046400000,
+          unreadDoorNotes: 3,
+        );
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('door_threshold_toggle')), findsOneWidget);
+      expect(find.text('Psyber'), findsOneWidget);
+      expect(find.text('门开着'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
 
 class _PaginatedFakeApiClient extends FakePsyberApiClient {

@@ -217,6 +217,8 @@ export function createApp(deps: AppDeps): Hono {
             mode: "chat",
             userText: event.content,
             userEventId: event.id,
+            stickerId: hasSticker ? stickerId : undefined,
+            attachments: hasAttachments ? attachments : undefined,
             activityHint: typeof body.activityHint === "string" ? body.activityHint : undefined,
             turnId: activeTurnId,
             signal: ac.signal,

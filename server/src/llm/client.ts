@@ -26,8 +26,21 @@ export interface ChatToolCall {
   arguments: Record<string, unknown>;
 }
 
+export interface ChatTextContent {
+  type: "text";
+  text: string;
+}
+
+export interface ChatImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export type ChatUserContent = string | Array<ChatTextContent | ChatImageContent>;
+
 export type ChatMessage =
-  | { role: "user"; content: string; timestamp: number }
+  | { role: "user"; content: ChatUserContent; timestamp: number }
   | {
       role: "assistant";
       content: string;

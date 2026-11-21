@@ -150,7 +150,7 @@ function buildFallbackModel(resolved: ResolvedByokSlot): Model<Api> {
     provider: resolved.providerId,
     baseUrl: resolved.baseUrl ?? "",
     reasoning: false,
-    input: ["text"],
+    input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 128_000,
     maxTokens: resolved.maxTokens ?? 4096,

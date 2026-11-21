@@ -5,19 +5,23 @@ import type { Clock } from "../core/clock.ts";
 import { localWeekday, vagueTimeOfDay, vagueWhen } from "../core/clock.ts";
 import type { DoorState, PsyberConfig } from "../core/config.ts";
 import { commitMemoryPaths } from "../core/git.ts";
+import type { MediaStore } from "../core/media.ts";
 import { AsyncMutex } from "../core/mutex.ts";
 import { readPrompt } from "../core/prompts.ts";
 import { ulid } from "../core/ulid.ts";
 import type {
+  ChatImageContent,
   ChatMessage,
   ChatModelClient,
   ChatToolCall,
+  ChatUserContent,
   LlmErrorCode,
 } from "../llm/client.ts";
 import { parseCardMarkdown } from "../memory/frontmatter.ts";
 import { buildGistBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { recallMemories, type EmbeddingClient } from "../memory/recall.ts";
+import { renderCircadianState } from "../mood/circadian.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
 import type {
   ExpressionPayload,
@@ -37,6 +41,8 @@ const MAX_TOOL_STEPS = 12;
 const WAKE_SILENT_PREFIX_BUFFER_LEN = 16;
 const ROLLOVER_RATIO = 0.75;
 const DEFAULT_RETRY_DELAYS_MS = [1000, 3000];
+const STICKER_INJECT_LIMIT = 30;
+const STICKER_INJECT_MAX_CHARS = 500;
 
 export interface TurnStreamCallbacks {
   onTurnStart?: (info: { turnId: string; mode: "chat" | "wake" }) => void;
@@ -81,6 +87,8 @@ export interface DirectEngineDeps {
   chatModel: ChatModelClient;
   /** SQLite 连接（用于接入 recallMemories 3 步召回与 recall_traces 留痕） */
   db?: Database;
+  /** 内容寻址媒体仓（用于将用户上传的图片附件编码为多模态块送入模型） */
+  media?: MediaStore;
   /** 可选 Embedding 客户端（缺省或超时自动降级 FTS5 2-gram） */
   embedding?: EmbeddingClient;
   /** 429/5xx 指数退避延迟（默认 [1000, 3000] ms，离线测试可传 [0, 0]） */
@@ -175,6 +183,48 @@ export class DirectEngine {
     return parsed.rawFrontmatter.named === false;
   }
 
+  /** 将用户消息与贴纸元数据渲染为自然文本（Spec 03 §2.2：[贴纸: <label>]） */
+  private formatUserTextWithSticker(text: string, stickerId?: string | null): string {
+    const trimmed = text.trim();
+    const sid = typeof stickerId === "string" ? stickerId.trim() : "";
+    if (!sid) return text;
+    const sticker = this.deps.events.getSticker(sid);
+    const marker = `[贴纸: ${sticker?.label ?? sid}]`;
+    return trimmed ? `${marker}\n${text}` : marker;
+  }
+
+  /** 渲染历史事件中的用户消息（含贴纸与既往图片数量标记，避免重复塞入历史 base64） */
+  private formatHistoryUserContent(ev: StoredEvent): string {
+    const stickerId =
+      ev.metadata && typeof ev.metadata.stickerId === "string" ? ev.metadata.stickerId : null;
+    const base = this.formatUserTextWithSticker(ev.content, stickerId);
+    const attachments =
+      ev.metadata && Array.isArray(ev.metadata.attachments) ? ev.metadata.attachments : [];
+    if (attachments.length === 0) return base;
+    const note = `[附带了 ${attachments.length} 张图片]`;
+    return base.trim() ? `${base}\n${note}` : note;
+  }
+
+  /** 按近期使用排序拼装 <stickers> 清单（严格 ≤ 30 条 / ≤ 500 字符） */
+  private buildStickersBlock(): string | null {
+    const stickers = this.deps.events.listStickers(STICKER_INJECT_LIMIT);
+    if (stickers.length === 0) return null;
+    const prefix = "<stickers>\n";
+    const suffix = "\n</stickers>";
+    const maxBodyChars = STICKER_INJECT_MAX_CHARS - prefix.length - suffix.length;
+    const lines: string[] = [];
+    let bodyLen = 0;
+    for (const s of stickers) {
+      const line = `- ${s.id}: ${s.label}`;
+      const nextLen = lines.length === 0 ? line.length : bodyLen + 1 + line.length;
+      if (nextLen > maxBodyChars) break;
+      lines.push(line);
+      bodyLen = nextLen;
+    }
+    if (lines.length === 0) return null;
+    return `${prefix}${lines.join("\n")}${suffix}`;
+  }
+
   /** 构造 Segment 2：跨轮历史回放（换段首条注入 <gist> + 近 6 轮过渡，剥除历史 thinking） */
   private buildHistoryMessages(excludeEventId?: string): ChatMessage[] {
     const history: ChatMessage[] = [];
@@ -194,7 +244,11 @@ export class DirectEngine {
       if (ev.sessionId !== this.sessionId) continue;
       if (excludeEventId && ev.id === excludeEventId) continue;
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
-        history.push({ role: "user", content: ev.content, timestamp: ev.createdAt });
+        history.push({
+          role: "user",
+          content: this.formatHistoryUserContent(ev),
+          timestamp: ev.createdAt,
+        });
       } else if (ev.role === "assistant" && (ev.kind === "chat" || ev.kind === "wake")) {
         // 跨轮历史严格剥除 thinking，防止陈旧思考污染后续轮次与缓存
         history.push({ role: "assistant", content: ev.content, timestamp: ev.createdAt });
@@ -203,22 +257,30 @@ export class DirectEngine {
     return history;
   }
 
-  /** 构造 Segment 3 Dynamic Tail（原话置顶，客观 <runtime_context> 置底） */
+  /** 构造 Segment 3 Dynamic Tail（原话置顶，客观 <runtime_context> 置底，图片作为多模态块附后） */
   private async buildDynamicUserMessage(opts: {
     mode: "chat" | "wake";
     turnId: string;
     userText: string;
+    stickerId?: string;
+    attachments?: string[];
     wakeReason?: string;
     activityHint?: string;
-  }): Promise<{ content: string; injectedDoorNoteMaxId: string | null; recallCount: number }> {
+  }): Promise<{ content: ChatUserContent; injectedDoorNoteMaxId: string | null; recallCount: number }> {
     const cfg = this.deps.getConfig();
     const nowMs = this.deps.clock.now();
     const tz = this.deps.clock.timeZone;
     const unreadNotesCount = this.deps.events.countUnreadDoorNotes();
+    const circadianLabel = renderCircadianState(nowMs, tz, cfg.circadian);
 
     const ctxBlocks: string[] = [
-      `<runtime time="${vagueTimeOfDay(nowMs, tz)}" weekday="${localWeekday(nowMs, tz)}" circadian="清醒" door="${cfg.door.state}" notes="${unreadNotesCount}" />`,
+      `<runtime time="${vagueTimeOfDay(nowMs, tz)}" weekday="${localWeekday(nowMs, tz)}" circadian="${circadianLabel}" door="${cfg.door.state}" notes="${unreadNotesCount}" />`,
     ];
+
+    const stickersBlock = this.buildStickersBlock();
+    if (stickersBlock) {
+      ctxBlocks.push(stickersBlock);
+    }
 
     // 注入未读门缝纸条（按 seq ASC，单轮最多 10 条 / 2000 字符）
     let injectedDoorNoteMaxId: string | null = null;
@@ -247,9 +309,10 @@ export class DirectEngine {
       ctxBlocks.push(`<prefix_delta>\n${deltas.join("\n\n")}\n</prefix_delta>`);
     }
 
-    // Ring 1 极简 3 步召回注入（chat 模式且非空输入）
+    // Ring 1 极简 3 步召回注入（chat 模式且非空文本输入）
+    const recallQuery = opts.userText.trim();
     let recallCount = 0;
-    if (opts.mode === "chat" && opts.userText.trim().length > 0) {
+    if (opts.mode === "chat" && recallQuery.length > 0) {
       if (this.deps.db) {
         const recalled = await recallMemories({
           db: this.deps.db,
@@ -258,7 +321,7 @@ export class DirectEngine {
           clock: this.deps.clock,
           sessionId: this.sessionId,
           turnId: opts.turnId,
-          query: opts.userText,
+          query: recallQuery,
           activityHint: opts.activityHint,
           embedding: this.deps.embedding,
           recallConfig: cfg.recall,
@@ -268,7 +331,7 @@ export class DirectEngine {
           ctxBlocks.push(recalled.renderedBlock);
         }
       } else {
-        const hits = this.deps.memoryIndex.searchFts(opts.userText, 5);
+        const hits = this.deps.memoryIndex.searchFts(recallQuery, 5);
         recallCount = hits.length;
         if (hits.length > 0) {
           const lines = hits.map(
@@ -293,8 +356,36 @@ export class DirectEngine {
       ctxBlocks.push(`<wake_mode>\n${wake.body}\n</wake_mode>`);
     }
 
+    const imageBlocks: ChatImageContent[] = [];
+    let unavailableAttachmentCount = 0;
+    if (opts.attachments && opts.attachments.length > 0) {
+      for (const hash of opts.attachments) {
+        if (!this.deps.media) {
+          unavailableAttachmentCount += 1;
+          continue;
+        }
+        const asset = await this.deps.media.read(hash);
+        if (!asset || asset.expired || !asset.mimeType.startsWith("image/")) {
+          unavailableAttachmentCount += 1;
+          continue;
+        }
+        imageBlocks.push({
+          type: "image",
+          data: Buffer.from(asset.bytes).toString("base64"),
+          mimeType: asset.mimeType,
+        });
+      }
+    }
+
+    const displayUserText = this.formatUserTextWithSticker(opts.userText, opts.stickerId);
+    const unavailableNote =
+      unavailableAttachmentCount > 0 ? `[附带了 ${unavailableAttachmentCount} 张图片，暂无法读取]` : "";
+    const topText = [displayUserText, unavailableNote].filter((s) => s.trim().length > 0).join("\n");
+
     const runtimeBlock = `<runtime_context>\n${ctxBlocks.join("\n")}\n</runtime_context>`;
-    const content = opts.userText ? `${opts.userText}\n\n${runtimeBlock}` : runtimeBlock;
+    const fullText = topText ? `${topText}\n\n${runtimeBlock}` : runtimeBlock;
+    const content: ChatUserContent =
+      imageBlocks.length > 0 ? [{ type: "text", text: fullText }, ...imageBlocks] : fullText;
     return { content, injectedDoorNoteMaxId, recallCount };
   }
 
@@ -303,7 +394,7 @@ export class DirectEngine {
     const recentEvents = this.deps.events.listRecentSessionMessages(oldSessionId, 12);
     this.rolloverCarryOver = recentEvents.map((ev) => ({
       role: ev.role === "assistant" ? "assistant" : "user",
-      content: ev.content,
+      content: ev.role === "user" ? this.formatHistoryUserContent(ev) : ev.content,
       timestamp: ev.createdAt,
     }));
     this.rolloverGistAnchor = await buildGistBlock(this.deps.dataDir, this.deps.memoryIndex);
@@ -321,6 +412,8 @@ export class DirectEngine {
     mode: "chat" | "wake";
     userText?: string;
     userEventId?: string;
+    stickerId?: string;
+    attachments?: string[];
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -334,6 +427,8 @@ export class DirectEngine {
     mode: "chat" | "wake";
     userText?: string;
     userEventId?: string;
+    stickerId?: string;
+    attachments?: string[];
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -352,6 +447,8 @@ export class DirectEngine {
       mode: opts.mode,
       turnId,
       userText: opts.userText ?? "",
+      stickerId: opts.stickerId,
+      attachments: opts.attachments,
       wakeReason: opts.wakeReason,
       activityHint: opts.activityHint,
     });

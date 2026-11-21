@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
@@ -25,29 +26,83 @@ class PendingAttachment {
 /// - open / quiet：居中阅读栏内嵌输入胶囊，支持本地图片缩略图预览与贴纸；
 /// - closed / cooling_off：切换为折痕纸感「门缝纸条」，不展示对方正在输入；
 /// - departed：转为纪念只读底栏并允许查阅告别信。
-class AdaptiveComposer extends StatelessWidget {
+/// - 桌面端支持 Enter 发送、Shift+Enter 换行（IME 输入法候选词组合态安全放行）。
+class AdaptiveComposer extends StatefulWidget {
   const AdaptiveComposer({
     super.key,
     required this.door,
     required this.controller,
     required this.pendingAttachments,
+    this.pendingSticker,
+    this.profile,
     required this.uploadingImage,
     required this.sending,
     required this.onPickImage,
     required this.onOpenStickers,
     required this.onRemoveAttachment,
+    this.onClearSticker,
     required this.onSend,
   });
 
   final DoorStatus door;
   final TextEditingController controller;
   final List<PendingAttachment> pendingAttachments;
+  final StickerView? pendingSticker;
+  final ConnectionProfile? profile;
   final bool uploadingImage;
   final bool sending;
   final VoidCallback onPickImage;
   final VoidCallback onOpenStickers;
   final void Function(int index) onRemoveAttachment;
+  final VoidCallback? onClearSticker;
   final VoidCallback onSend;
+
+  @override
+  State<AdaptiveComposer> createState() => _AdaptiveComposerState();
+}
+
+class _AdaptiveComposerState extends State<AdaptiveComposer> {
+  late final FocusNode _inputFocusNode;
+
+  bool get _isDesktopOrWeb {
+    if (kIsWeb) return true;
+    return defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _inputFocusNode = FocusNode(
+      onKeyEvent: (node, event) {
+        if (!_isDesktopOrWeb) return KeyEventResult.ignored;
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter;
+        if (!isEnter) return KeyEventResult.ignored;
+
+        // 拼音/日文等输入法处于候选词组合态时不误发
+        final composing = widget.controller.value.composing;
+        if (composing.isValid && !composing.isCollapsed) {
+          return KeyEventResult.ignored;
+        }
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          return KeyEventResult.ignored;
+        }
+        if (!widget.sending) {
+          widget.onSend();
+        }
+        return KeyEventResult.handled;
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _inputFocusNode.dispose();
+    super.dispose();
+  }
 
   void _openFarewellDialog(BuildContext context, String farewell) {
     unawaited(
@@ -102,6 +157,7 @@ class AdaptiveComposer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final door = widget.door;
     if (door.state.isReadOnly) {
       final hasFarewell = door.farewell != null && door.farewell!.trim().isNotEmpty;
       return Container(
@@ -166,7 +222,7 @@ class AdaptiveComposer extends StatelessWidget {
                 Container(
                   decoration: BoxDecoration(
                     color: isDoorNote ? colors.slipPaper : colors.letterSurface,
-                    borderRadius: BorderRadius.circular(isDoorNote ? 12 : 16),
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: isDoorNote ? colors.hairlineWarm : colors.hairline,
                     ),
@@ -201,18 +257,26 @@ class AdaptiveComposer extends StatelessWidget {
                           painter: _DashedHairlinePainter(colors.hairlineWarm),
                         ),
                       ],
-                      if (pendingAttachments.isNotEmpty)
+                      if (widget.pendingAttachments.isNotEmpty ||
+                          widget.pendingSticker != null)
                         Padding(
                           padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
                           child: Wrap(
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              for (var i = 0; i < pendingAttachments.length; i++)
+                              if (widget.pendingSticker != null)
+                                _PendingStickerChip(
+                                  key: const Key('pending_sticker_chip'),
+                                  sticker: widget.pendingSticker!,
+                                  profile: widget.profile,
+                                  onRemove: widget.onClearSticker ?? () {},
+                                ),
+                              for (var i = 0; i < widget.pendingAttachments.length; i++)
                                 _PendingThumbChip(
                                   key: Key('pending_attachment_$i'),
-                                  attachment: pendingAttachments[i],
-                                  onRemove: () => onRemoveAttachment(i),
+                                  attachment: widget.pendingAttachments[i],
+                                  onRemove: () => widget.onRemoveAttachment(i),
                                 ),
                             ],
                           ),
@@ -225,8 +289,10 @@ class AdaptiveComposer extends StatelessWidget {
                             IconButton(
                               key: const Key('pick_image_button'),
                               tooltip: '选择图片',
-                              onPressed: (sending || uploadingImage) ? null : onPickImage,
-                              icon: uploadingImage
+                              onPressed: (widget.sending || widget.uploadingImage)
+                                  ? null
+                                  : widget.onPickImage,
+                              icon: widget.uploadingImage
                                   ? const SizedBox(
                                       width: 18,
                                       height: 18,
@@ -241,7 +307,7 @@ class AdaptiveComposer extends StatelessWidget {
                             IconButton(
                               key: const Key('open_stickers_button'),
                               tooltip: '发送贴纸',
-                              onPressed: sending ? null : onOpenStickers,
+                              onPressed: widget.sending ? null : widget.onOpenStickers,
                               icon: Icon(
                                 PhosphorIconsLight.smiley,
                                 size: 20,
@@ -251,11 +317,15 @@ class AdaptiveComposer extends StatelessWidget {
                             Expanded(
                               child: TextField(
                                 key: const Key('chat_input_field'),
-                                controller: controller,
+                                focusNode: _inputFocusNode,
+                                controller: widget.controller,
                                 minLines: 1,
                                 maxLines: 5,
-                                textInputAction: TextInputAction.send,
-                                onSubmitted: (_) => onSend(),
+                                textInputAction: _isDesktopOrWeb
+                                    ? TextInputAction.newline
+                                    : TextInputAction.send,
+                                onSubmitted:
+                                    _isDesktopOrWeb ? null : (_) => widget.onSend(),
                                 decoration: InputDecoration(
                                   filled: false,
                                   hintText: isDoorNote
@@ -275,36 +345,61 @@ class AdaptiveComposer extends StatelessWidget {
                             const SizedBox(width: 6),
                             Padding(
                               padding: const EdgeInsets.only(bottom: 2),
-                              child: FilledButton(
-                                key: const Key('chat_send_button'),
-                                onPressed: sending ? null : onSend,
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: isDoorNote
-                                      ? colors.thresholdAmber
-                                      : colors.accent,
-                                  foregroundColor: isDoorNote
-                                      ? Colors.white
-                                      : colors.onAccent,
-                                  elevation: 0,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 9,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(9),
-                                  ),
-                                  minimumSize: const Size(60, 34),
-                                ),
-                                child: Text(
-                                  isDoorNote ? '塞纸条' : '发送',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: isDoorNote
-                                        ? Colors.white
-                                        : colors.onAccent,
-                                  ),
-                                ),
+                              child: ValueListenableBuilder<TextEditingValue>(
+                                valueListenable: widget.controller,
+                                builder: (context, textValue, _) {
+                                  final hasDraft = textValue.text.trim().isNotEmpty ||
+                                      widget.pendingAttachments.isNotEmpty ||
+                                      widget.pendingSticker != null;
+                                  final Color btnBg;
+                                  final Color btnBorder;
+                                  final Color btnText;
+                                  if (isDoorNote) {
+                                    btnBg = hasDraft
+                                        ? colors.thresholdAmberSoft
+                                        : Colors.transparent;
+                                    btnBorder = hasDraft
+                                        ? colors.thresholdAmber
+                                        : colors.hairlineWarm;
+                                    btnText = colors.thresholdAmber;
+                                  } else {
+                                    btnBg = hasDraft
+                                        ? colors.accentSoft
+                                        : Colors.transparent;
+                                    btnBorder = hasDraft
+                                        ? colors.accentBorder
+                                        : colors.hairline;
+                                    btnText = hasDraft ? colors.inkDeep : colors.inkQuiet;
+                                  }
+
+                                  return FilledButton(
+                                    key: const Key('chat_send_button'),
+                                    onPressed: widget.sending ? null : widget.onSend,
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: btnBg,
+                                      foregroundColor: btnText,
+                                      elevation: 0,
+                                      side: BorderSide(color: btnBorder),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 14,
+                                        vertical: 8,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(9),
+                                      ),
+                                      minimumSize: const Size(58, 34),
+                                    ),
+                                    child: Text(
+                                      isDoorNote ? '塞纸条' : '发送',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight:
+                                            hasDraft ? FontWeight.w500 : FontWeight.w400,
+                                        color: btnText,
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                           ],
@@ -317,6 +412,86 @@ class AdaptiveComposer extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _PendingStickerChip extends StatelessWidget {
+  const _PendingStickerChip({
+    super.key,
+    required this.sticker,
+    required this.profile,
+    required this.onRemove,
+  });
+
+  final StickerView sticker;
+  final ConnectionProfile? profile;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final hasImage = profile != null && sticker.url.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+      decoration: BoxDecoration(
+        color: colors.mineralCanvas,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: hasImage
+                ? Image.network(
+                    profile!.resolveMediaUrl(sticker.url),
+                    headers: {'Authorization': 'Bearer ${profile!.token}'},
+                    width: 28,
+                    height: 28,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: Icon(
+                        PhosphorIconsLight.smiley,
+                        size: 16,
+                        color: colors.inkQuiet,
+                      ),
+                    ),
+                  )
+                : SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: Icon(
+                      PhosphorIconsLight.smiley,
+                      size: 16,
+                      color: colors.inkQuiet,
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 130),
+            child: Text(
+              '贴纸：${sticker.label}',
+              style: TextStyle(fontSize: 12, color: colors.inkDeep),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 4),
+          InkWell(
+            key: const Key('clear_pending_sticker'),
+            onTap: onRemove,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(PhosphorIconsLight.x, size: 14, color: colors.inkQuiet),
+            ),
+          ),
+        ],
       ),
     );
   }

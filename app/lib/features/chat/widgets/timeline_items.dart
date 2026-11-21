@@ -237,7 +237,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: PsyberTheme.letterSurface,
-        title: const Text('编辑消息（Ring 1.5）', style: TextStyle(fontSize: 16.5)),
+        title: const Text('编辑消息', style: TextStyle(fontSize: 16.5)),
         content: TextField(
           controller: ctrl,
           minLines: 2,
@@ -261,7 +261,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
       await widget.controller.editMessage(widget.item.id, updated);
     } on ApiException catch (e) {
       widget.controller.turnErrorNotifier.value =
-          e.isEndpointUnavailable ? '消息编辑将在 Ring 1.5 启用' : e.message;
+          e.isEndpointUnavailable ? '当前服务端暂不支持编辑消息' : e.message;
     }
   }
 
@@ -270,7 +270,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
       await widget.controller.rerollMessage(widget.item.id);
     } on ApiException catch (e) {
       widget.controller.turnErrorNotifier.value =
-          e.isEndpointUnavailable ? '重新生成版本组将在 Ring 1.5 启用' : e.message;
+          e.isEndpointUnavailable ? '当前服务端暂不支持重新生成' : e.message;
     }
   }
 
@@ -279,7 +279,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
       await widget.controller.switchMessageVersion(widget.item.id, nextVersion);
     } on ApiException catch (e) {
       widget.controller.turnErrorNotifier.value =
-          e.isEndpointUnavailable ? '版本切换将在 Ring 1.5 启用' : e.message;
+          e.isEndpointUnavailable ? '当前服务端暂不支持切换版本' : e.message;
     }
   }
 
@@ -372,26 +372,28 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     final isUser = item.isUser;
     final colors = context.colors;
     final profile = widget.controller.profileNotifier.value;
-    final bgColor = item.isDoorNote
-        ? colors.slipPaper
-        : isUser
-            ? colors.userBubble
-            : colors.letterSurface;
-    final borderColor = item.isDoorNote ? colors.hairlineWarm : colors.hairline;
+    final isPureMedia = !item.isDoorNote &&
+        item.content.trim().isEmpty &&
+        (item.thinking?.isEmpty ?? true) &&
+        item.toolSummary.isEmpty &&
+        (item.sticker != null || item.attachments.isNotEmpty);
+    final showBubbleBox = item.isDoorNote || (isUser && !isPureMedia);
 
-    final radius = isUser
-        ? const BorderRadius.only(
-            topLeft: Radius.circular(14),
-            topRight: Radius.circular(4),
-            bottomLeft: Radius.circular(14),
-            bottomRight: Radius.circular(14),
+    final BoxDecoration? bubbleDecoration = showBubbleBox
+        ? BoxDecoration(
+            color: item.isDoorNote ? colors.slipPaper : colors.userBubble,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: item.isDoorNote ? colors.hairlineWarm : colors.hairline,
+            ),
           )
-        : const BorderRadius.only(
-            topLeft: Radius.circular(4),
-            topRight: Radius.circular(14),
-            bottomLeft: Radius.circular(14),
-            bottomRight: Radius.circular(14),
-          );
+        : null;
+    final EdgeInsetsGeometry bubblePadding = showBubbleBox
+        ? const EdgeInsets.symmetric(horizontal: 14, vertical: 10)
+        : isPureMedia
+            ? const EdgeInsets.symmetric(vertical: 2)
+            : const EdgeInsets.symmetric(horizontal: 2, vertical: 6);
+    final double stickerExtent = isPureMedia ? 112 : 96;
 
     return Center(
       child: ConstrainedBox(
@@ -401,8 +403,9 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
           onExit: (_) => setState(() => _hovered = false),
           child: GestureDetector(
             onSecondaryTapUp: (_) => _openContextActions(),
+            onLongPress: _openContextActions,
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 5),
+              padding: const EdgeInsets.symmetric(vertical: 6),
               child: Row(
                 mainAxisAlignment:
                     isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
@@ -411,14 +414,12 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                   if (isUser) _buildHoverActionPill(isLeft: true),
                   Flexible(
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 540),
+                      constraints: BoxConstraints(
+                        maxWidth: isUser ? 540 : 580,
+                      ),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                        decoration: BoxDecoration(
-                          color: bgColor,
-                          borderRadius: radius,
-                          border: Border.all(color: borderColor),
-                        ),
+                        padding: bubblePadding,
+                        decoration: bubbleDecoration,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -429,7 +430,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                   '门缝纸条',
                                   style: PsyberTheme.editorialSerif.copyWith(
                                     fontSize: 11.5,
-                                    color: PsyberTheme.thresholdAmber,
+                                    color: colors.thresholdAmber,
                                   ),
                                 ),
                               ),
@@ -449,15 +450,15 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                           vertical: 2,
                                         ),
                                         decoration: BoxDecoration(
-                                          color: PsyberTheme.mineralCanvas,
+                                          color: colors.mineralCanvas,
                                           borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: PsyberTheme.hairline),
+                                          border: Border.all(color: colors.hairline),
                                         ),
                                         child: Text(
                                           tool.label.isNotEmpty ? tool.label : tool.name,
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                             fontSize: 11,
-                                            color: PsyberTheme.inkQuiet,
+                                            color: colors.inkQuiet,
                                           ),
                                         ),
                                       ),
@@ -466,15 +467,17 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               ),
                             if (item.sticker != null)
                               Padding(
-                                padding: const EdgeInsets.only(bottom: 6),
+                                padding: EdgeInsets.only(
+                                  bottom: item.content.isNotEmpty ? 6 : 0,
+                                ),
                                 child: profile != null && item.sticker!.url.isNotEmpty
                                     ? ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
+                                        borderRadius: BorderRadius.circular(10),
                                         child: Image.network(
                                           profile.resolveMediaUrl(item.sticker!.url),
                                           headers: {'Authorization': 'Bearer ${profile.token}'},
-                                          width: 96,
-                                          height: 96,
+                                          width: stickerExtent,
+                                          height: stickerExtent,
                                           fit: BoxFit.contain,
                                           errorBuilder: (_, __, ___) => Text(
                                             '[贴纸：${item.sticker!.label}]',
@@ -495,7 +498,9 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               ),
                             if (item.attachments.isNotEmpty && profile != null)
                               Padding(
-                                padding: const EdgeInsets.only(bottom: 6),
+                                padding: EdgeInsets.only(
+                                  bottom: item.content.isNotEmpty ? 6 : 0,
+                                ),
                                 child: Wrap(
                                   spacing: 8,
                                   runSpacing: 8,
@@ -507,8 +512,15 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                           profile,
                                           '/api/v1/media/$hash',
                                         ),
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(10),
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            borderRadius: BorderRadius.circular(10),
+                                            border: Border.all(
+                                              color: colors.hairline,
+                                              width: 0.5,
+                                            ),
+                                          ),
+                                          clipBehavior: Clip.antiAlias,
                                           child: Image.network(
                                             profile.resolveMediaUrl('/api/v1/media/$hash'),
                                             headers: {
@@ -520,13 +532,13 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                             errorBuilder: (_, __, ___) => Container(
                                               width: 110,
                                               height: 64,
-                                              color: PsyberTheme.mineralCanvas,
+                                              color: colors.mineralCanvas,
                                               alignment: Alignment.center,
-                                              child: const Text(
+                                              child: Text(
                                                 '图片已过期',
                                                 style: TextStyle(
                                                   fontSize: 11.5,
-                                                  color: PsyberTheme.inkQuiet,
+                                                  color: colors.inkQuiet,
                                                 ),
                                               ),
                                             ),
@@ -619,7 +631,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
   Widget _buildHoverActionPill({required bool isLeft}) {
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 120),
-      opacity: _hovered ? 1.0 : 0.35,
+      opacity: _hovered ? 1.0 : 0.0,
       child: Padding(
         padding: EdgeInsets.only(
           left: isLeft ? 0 : 4,
@@ -659,23 +671,13 @@ class StreamingAssistantBubble extends StatelessWidget {
         child: Align(
           alignment: Alignment.centerLeft,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 540),
+            constraints: const BoxConstraints(maxWidth: 580),
             child: MotionBubbleWrapper(
               motion: active.latestExpression?.motion,
               child: Container(
                 key: const Key('streaming_bubble'),
-                margin: const EdgeInsets.symmetric(vertical: 5),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                decoration: BoxDecoration(
-                  color: colors.letterSurface,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(4),
-                    topRight: Radius.circular(14),
-                    bottomLeft: Radius.circular(14),
-                    bottomRight: Radius.circular(14),
-                  ),
-                  border: Border.all(color: colors.hairline),
-                ),
+                margin: const EdgeInsets.symmetric(vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
