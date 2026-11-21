@@ -81,31 +81,10 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
   }
 
   Future<void> _promptMissedNote() async {
-    final textController = TextEditingController();
     final note = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: PsyberTheme.letterSurface,
-        title: const Text('补充漏召备注', style: TextStyle(fontSize: 16.5)),
-        content: TextField(
-          controller: textController,
-          decoration: const InputDecoration(
-            hintText: '简述本轮本该想起但没想起的内容',
-          ),
-          autofocus: true,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(textController.text.trim()),
-            child: const Text('提交'),
-          ),
-        ],
-      ),
-    ).whenComplete(textController.dispose);
+      builder: (_) => const _MissedNoteDialog(),
+    );
     if (note == null || note.isEmpty) return;
     try {
       await widget.controller.submitRecallFeedback(
@@ -246,7 +225,7 @@ class _VerdictChip extends StatelessWidget {
             color: selected ? colors.accentBorder : colors.hairline,
           ),
         ),
-        child: Text(
+          child: Text(
           label,
           style: TextStyle(
             fontSize: 11.5,
@@ -255,6 +234,55 @@ class _VerdictChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _MissedNoteDialog extends StatefulWidget {
+  const _MissedNoteDialog();
+
+  @override
+  State<_MissedNoteDialog> createState() => _MissedNoteDialogState();
+}
+
+class _MissedNoteDialogState extends State<_MissedNoteDialog> {
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return AlertDialog(
+      backgroundColor: colors.letterSurface,
+      title: const Text('补充漏召备注', style: TextStyle(fontSize: 16.5)),
+      content: TextField(
+        controller: _ctrl,
+        decoration: const InputDecoration(
+          hintText: '简述本轮本该想起但没想起的内容',
+        ),
+        autofocus: true,
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_ctrl.text.trim()),
+          child: const Text('提交'),
+        ),
+      ],
     );
   }
 }

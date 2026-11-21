@@ -282,35 +282,18 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
   }
 
   Future<void> _handleEdit() async {
-    final ctrl = TextEditingController(text: widget.item.content);
+    final controller = widget.controller;
+    final itemId = widget.item.id;
+    final originalContent = widget.item.content;
     final updated = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: PsyberTheme.letterSurface,
-        title: const Text('编辑消息', style: TextStyle(fontSize: 16.5)),
-        content: TextField(
-          controller: ctrl,
-          minLines: 2,
-          maxLines: 6,
-          autofocus: true,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-            child: const Text('保存并重发'),
-          ),
-        ],
-      ),
-    ).whenComplete(ctrl.dispose);
-    if (updated == null || updated.isEmpty || updated == widget.item.content) return;
+      builder: (_) => _EditMessageDialog(initialText: originalContent),
+    );
+    if (updated == null || updated.isEmpty || updated == originalContent) return;
     try {
-      await widget.controller.editMessage(widget.item.id, updated);
+      await controller.editMessage(itemId, updated);
     } on ApiException catch (e) {
-      widget.controller.turnErrorNotifier.value =
+      controller.turnErrorNotifier.value =
           e.isEndpointUnavailable ? '当前服务端暂不支持编辑消息' : e.message;
     }
   }
@@ -937,6 +920,57 @@ class StreamingAssistantBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 独立持有 TextEditingController 的编辑消息弹窗，确保关闭动画彻底退场后再销毁控制器。
+class _EditMessageDialog extends StatefulWidget {
+  const _EditMessageDialog({required this.initialText});
+
+  final String initialText;
+
+  @override
+  State<_EditMessageDialog> createState() => _EditMessageDialogState();
+}
+
+class _EditMessageDialogState extends State<_EditMessageDialog> {
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.initialText);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return AlertDialog(
+      backgroundColor: colors.letterSurface,
+      title: const Text('编辑消息', style: TextStyle(fontSize: 16.5)),
+      content: TextField(
+        controller: _ctrl,
+        minLines: 2,
+        maxLines: 6,
+        autofocus: true,
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_ctrl.text.trim()),
+          child: const Text('保存并重发'),
+        ),
+      ],
     );
   }
 }

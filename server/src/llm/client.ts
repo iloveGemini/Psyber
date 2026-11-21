@@ -213,53 +213,68 @@ export class PiAiChatClient implements ChatModelClient {
         ? request.thinkingLevel
         : undefined;
 
-    const eventStream = this.models.streamSimple(this.model, context, {
-      apiKey: this.apiKey,
-      sessionId: request.sessionId,
-      temperature: request.temperature,
-      maxTokens: request.maxTokens,
-      ...(reasoning ? { reasoning } : {}),
-      cacheRetention: "short",
-      signal: request.signal,
-    });
-
     let lastThinkingSignature: string | undefined;
 
-    for await (const ev of eventStream) {
-      if (request.signal?.aborted) return;
+    try {
+      const eventStream = this.models.streamSimple(this.model, context, {
+        apiKey: this.apiKey,
+        sessionId: request.sessionId,
+        temperature: request.temperature,
+        maxTokens: request.maxTokens,
+        ...(reasoning ? { reasoning } : {}),
+        cacheRetention: "short",
+        signal: request.signal,
+      });
 
-      if (ev.type === "thinking_delta") {
-        const block = ev.partial.content[ev.contentIndex];
-        const sig = block && block.type === "thinking" ? block.thinkingSignature : undefined;
-        if (sig) lastThinkingSignature = sig;
-        yield { type: "thinking_delta", delta: ev.delta, signature: sig ?? lastThinkingSignature };
-      } else if (ev.type === "text_delta") {
-        yield { type: "text_delta", delta: ev.delta };
-      } else if (ev.type === "toolcall_end") {
-        const tc: ToolCall = ev.toolCall;
-        yield {
-          type: "tool_call",
-          id: tc.id,
-          name: tc.name,
-          args: (tc.arguments ?? {}) as Record<string, unknown>,
-        };
-      } else if (ev.type === "done") {
-        const u = ev.message.usage;
-        yield {
-          type: "usage",
-          inputTokens: u.input,
-          outputTokens: u.output,
-          totalTokens: u.totalTokens,
-          cacheReadTokens: u.cacheRead,
-          cacheWriteTokens: u.cacheWrite,
-          estimatedCostUsd: u.cost?.total,
-        };
-      } else if (ev.type === "error") {
-        if (ev.reason === "aborted") return;
-        const errMsg = ev.error.errorMessage ?? "模型调用失败";
-        const { code, retryable } = classifyLlmError(errMsg);
-        yield { type: "error", code, message: errMsg, retryable };
+      for await (const ev of eventStream) {
+        if (request.signal?.aborted) return;
+
+        if (ev.type === "thinking_delta") {
+          const block = ev.partial.content[ev.contentIndex];
+          const sig = block && block.type === "thinking" ? block.thinkingSignature : undefined;
+          if (sig) lastThinkingSignature = sig;
+          yield { type: "thinking_delta", delta: ev.delta, signature: sig ?? lastThinkingSignature };
+        } else if (ev.type === "thinking_end") {
+          // Anthropic signature_delta 与 OpenAI reasoning_details 仅在 thinking_end 时定稿，补发纯签名供多步工具回传
+          const block = ev.partial.content[ev.contentIndex];
+          const sig = block && block.type === "thinking" ? block.thinkingSignature : undefined;
+          if (sig && sig !== lastThinkingSignature) {
+            lastThinkingSignature = sig;
+            yield { type: "thinking_delta", delta: "", signature: sig };
+          }
+        } else if (ev.type === "text_delta") {
+          yield { type: "text_delta", delta: ev.delta };
+        } else if (ev.type === "toolcall_end") {
+          const tc: ToolCall = ev.toolCall;
+          yield {
+            type: "tool_call",
+            id: tc.id,
+            name: tc.name,
+            args: (tc.arguments ?? {}) as Record<string, unknown>,
+          };
+        } else if (ev.type === "done") {
+          const u = ev.message.usage;
+          yield {
+            type: "usage",
+            inputTokens: u.input,
+            outputTokens: u.output,
+            totalTokens: u.totalTokens,
+            cacheReadTokens: u.cacheRead,
+            cacheWriteTokens: u.cacheWrite,
+            estimatedCostUsd: u.cost?.total,
+          };
+        } else if (ev.type === "error") {
+          if (ev.reason === "aborted") return;
+          const errMsg = ev.error?.errorMessage || "模型调用失败";
+          const { code, retryable } = classifyLlmError(errMsg);
+          yield { type: "error", code, message: errMsg, retryable };
+        }
       }
+    } catch (err) {
+      if (request.signal?.aborted) return;
+      const errMsg = err instanceof Error ? err.message || "模型调用失败" : "模型调用失败";
+      const { code, retryable } = classifyLlmError(errMsg);
+      yield { type: "error", code, message: errMsg, retryable };
     }
   }
 }

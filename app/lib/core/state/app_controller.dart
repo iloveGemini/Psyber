@@ -332,7 +332,6 @@ class AppController {
       await refreshSnapshot();
       if (_disposed || _isPaused) return;
 
-      activeTurnNotifier.value = null;
       unawaited(loadSettings());
       unawaited(_refreshActivitySlot(profile));
 
@@ -383,11 +382,22 @@ class AppController {
       final merged = <TimelineItem>[...preservedOlder, ...page.items]
         ..sort((a, b) => a.seq.compareTo(b.seq));
       timelineNotifier.value = List<TimelineItem>.unmodifiable(merged);
-      return;
+    } else {
+      _hasMoreHistory = page.hasMore;
+      _nextBeforeId = page.nextBefore;
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(page.items);
     }
-    _hasMoreHistory = page.hasMore;
-    _nextBeforeId = page.nextBefore;
-    timelineNotifier.value = List<TimelineItem>.unmodifiable(page.items);
+    final active = activeTurnNotifier.value;
+    if (active != null) {
+      final completedInHistory = page.items.any(
+        (e) => e.isAssistant && e.turnId == active.turnId,
+      );
+      final stillRunningOnServer =
+          page.activeTurnId != null && page.activeTurnId == active.turnId;
+      if (completedInHistory || !stillRunningOnServer) {
+        activeTurnNotifier.value = null;
+      }
+    }
   }
 
   Future<void> loadOlderHistory() async {
@@ -800,6 +810,19 @@ class AppController {
     );
   }
 
+  ActiveTurnState? _ensureActiveTurn(String? turnId) {
+    final current = activeTurnNotifier.value;
+    if (current != null) return current;
+    if (turnId == null || turnId.isEmpty) return null;
+    final alreadyPersisted = timelineNotifier.value.any(
+      (e) => e.isAssistant && e.turnId == turnId,
+    );
+    if (alreadyPersisted) return null;
+    final recovered = ActiveTurnState(turnId: turnId, mode: 'chat');
+    activeTurnNotifier.value = recovered;
+    return recovered;
+  }
+
   void _handleSseFrame(SseEventFrame frame) {
     if (_disposed) return;
     if (frame.id != null && frame.id!.isNotEmpty) {
@@ -811,7 +834,13 @@ class AppController {
       case 'message.created':
         final rawMsg = frame.data['message'];
         if (rawMsg is Map<String, dynamic>) {
-          _upsertTimelineItem(TimelineItem.fromJson(rawMsg));
+          final item = TimelineItem.fromJson(rawMsg);
+          _upsertTimelineItem(item);
+          if (item.isAssistant &&
+              item.turnId != null &&
+              activeTurnNotifier.value?.turnId == item.turnId) {
+            activeTurnNotifier.value = null;
+          }
         }
         return;
       case 'message.updated':
@@ -870,16 +899,18 @@ class AppController {
         activeTurnNotifier.value = ActiveTurnState(turnId: turnId, mode: mode);
         return;
       case 'turn.thinking':
-        final current = activeTurnNotifier.value;
         final delta = frame.data['delta'] as String? ?? '';
-        if (current != null && delta.isNotEmpty) {
-          activeTurnNotifier.value = current.copyWith(
-            thinking: current.thinking + delta,
-          );
+        if (delta.isNotEmpty) {
+          final current = _ensureActiveTurn(frame.data['turnId'] as String?);
+          if (current != null) {
+            activeTurnNotifier.value = current.copyWith(
+              thinking: current.thinking + delta,
+            );
+          }
         }
         return;
       case 'turn.tool':
-        final current = activeTurnNotifier.value;
+        final current = _ensureActiveTurn(frame.data['turnId'] as String?);
         if (current != null) {
           final tool = ToolProgressItem.fromJson(frame.data);
           final nextTools = List<ToolProgressItem>.from(current.tools);
@@ -895,18 +926,20 @@ class AppController {
         }
         return;
       case 'turn.text':
-        final current = activeTurnNotifier.value;
         final delta = frame.data['delta'] as String? ?? '';
-        if (current != null && delta.isNotEmpty) {
-          activeTurnNotifier.value = current.copyWith(
-            text: current.text + delta,
-          );
+        if (delta.isNotEmpty) {
+          final current = _ensureActiveTurn(frame.data['turnId'] as String?);
+          if (current != null) {
+            activeTurnNotifier.value = current.copyWith(
+              text: current.text + delta,
+            );
+          }
         }
         return;
       case 'turn.expression':
         final payload = ExpressionPayload.fromJson(frame.data);
         expressionNotifier.value = payload;
-        final current = activeTurnNotifier.value;
+        final current = _ensureActiveTurn(frame.data['turnId'] as String?);
         if (current != null) {
           activeTurnNotifier.value = current.copyWith(latestExpression: payload);
         }

@@ -5,7 +5,7 @@ import type { Clock } from "../core/clock.ts";
 import type { PsyberConfig } from "../core/config.ts";
 import type { MediaStore } from "../core/media.ts";
 import { ulid } from "../core/ulid.ts";
-import type { DirectEngine } from "../engine/direct.ts";
+import type { DirectEngine, TurnCheckpoint } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
 import type { McpManager } from "../extensions/mcp.ts";
 import type { ChatModelClient } from "../llm/client.ts";
@@ -119,7 +119,10 @@ export interface AppDeps {
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const activeAborts = new Map<string, AbortController>();
-  const retryOrigins = new Map<string, { userEventId: string; activityHint?: string }>();
+  const retryOrigins = new Map<
+    string,
+    { userEventId: string; activityHint?: string; checkpoint?: TurnCheckpoint }
+  >();
   const sessionApprovedTools = new Set<string>();
   const pendingApprovals = new Map<
     string,
@@ -143,6 +146,7 @@ export function createApp(deps: AppDeps): Hono {
     version?: number;
     historyBeforeSeq?: number;
     restoreCandidateIdOnFailure?: string;
+    resumeCheckpoint?: TurnCheckpoint;
   }) => {
     if (!deps.engine) return;
     const ac = new AbortController();
@@ -163,6 +167,7 @@ export function createApp(deps: AppDeps): Hono {
         groupId: opts.groupId,
         version: opts.version,
         historyBeforeSeq: opts.historyBeforeSeq,
+        resumeCheckpoint: opts.resumeCheckpoint,
         signal: ac.signal,
         callbacks: {
           onTurnStart: (info) => deps.sse?.emit("turn.start", info),
@@ -182,12 +187,15 @@ export function createApp(deps: AppDeps): Hono {
             }),
           onAssistantPersisted: (ev) => {
             persistedInTurn = true;
+            const item = toTimelineItem(ev, deps.events);
             if (opts.groupId) {
               deps.sse?.emit("message.updated", {
                 action: "version",
                 groupId: opts.groupId,
-                message: toTimelineItem(ev, deps.events),
+                message: item,
               });
+            } else {
+              deps.sse?.emit("message.created", { message: item });
             }
           },
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
@@ -249,6 +257,23 @@ export function createApp(deps: AppDeps): Hono {
           },
           onTurnError: (err) => deps.sse?.emit("turn.error", err),
         },
+      })
+      .then((result) => {
+        if (result.error && result.checkpoint) {
+          const origin = retryOrigins.get(activeTurnId);
+          if (origin) {
+            origin.checkpoint = result.checkpoint;
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("[psyber] Chat turn failed unexpectedly:", err);
+        deps.sse?.emit("turn.error", {
+          turnId: activeTurnId,
+          code: "PROVIDER_ERROR",
+          message: err instanceof Error ? err.message || "生成回复时发生意外异常" : "生成回复时发生意外异常",
+          retryable: true,
+        });
       })
       .finally(() => {
         activeAborts.delete(activeTurnId);
@@ -315,9 +340,11 @@ export function createApp(deps: AppDeps): Hono {
       limit: Number.isFinite(limit) ? limit : 50,
     });
     const contextUsage = deps.engine?.getContextUsage();
+    const activeTurnId = activeAborts.keys().next().value ?? null;
     return c.json({
       ...page,
       items: page.items.map((ev) => toTimelineItem(ev, deps.events)),
+      activeTurnId,
       ...(contextUsage ? { contextUsage } : {}),
     });
   });
@@ -430,6 +457,9 @@ export function createApp(deps: AppDeps): Hono {
       deps.onUserMessagePersisted?.();
       deps.sse?.emit("message.created", { message: timelineItem });
       if (!deliverAsDoorNote && deps.engine && event.turnId) {
+        for (const entry of retryOrigins.values()) {
+          entry.checkpoint = undefined;
+        }
         const activityHint = typeof body.activityHint === "string" ? body.activityHint : undefined;
         retryOrigins.set(event.turnId, { userEventId: event.id, activityHint });
         dispatchChatTurn({
@@ -532,6 +562,11 @@ export function createApp(deps: AppDeps): Hono {
           }
         : undefined;
 
+    const latestItems = deps.events.listHistory({ limit: 1 }).items;
+    const isLatestTimelineEvent =
+      latestItems.length > 0 && latestItems[latestItems.length - 1]!.id === origUser.id;
+    const resumeCheckpoint = isLatestTimelineEvent ? mapped?.checkpoint : undefined;
+
     retryOrigins.set(newTurnId, {
       userEventId: origUser.id,
       activityHint: mapped?.activityHint ?? origUser.activity ?? undefined,
@@ -545,6 +580,7 @@ export function createApp(deps: AppDeps): Hono {
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       videoClip,
       activityHint: mapped?.activityHint ?? origUser.activity ?? undefined,
+      resumeCheckpoint,
     });
 
     return c.json({ turnId: newTurnId, retriedFromTurnId: turnId }, 202);
@@ -941,6 +977,8 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/v1/stream", (c) => {
+    const rawLastEventId = c.req.query("lastEventId") ?? c.req.header("last-event-id") ?? "";
+    const parsedLastId = /^\d+$/.test(rawLastEventId.trim()) ? Number(rawLastEventId.trim()) : null;
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -953,13 +991,39 @@ export function createApp(deps: AppDeps): Hono {
         };
 
         const foreground = c.req.query("foreground") !== "false";
-        send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
+        let replayedMaxId = parsedLastId ?? 0;
+        const replay = deps.sse && parsedLastId !== null ? deps.sse.replaySince(parsedLastId) : null;
+        if (replay) {
+          replayedMaxId = replay.latestStreamSeq;
+        }
+        // 先建立订阅再同步回放，避免订阅间隙漏帧（超过 replayedMaxId 的新帧才放行）
         const unsubscribe = deps.sse?.subscribe(
           (frame) => {
+            if (frame.id !== undefined && frame.id <= replayedMaxId) {
+              return;
+            }
             send(formatSseFrame(frame));
           },
           { foreground },
         );
+
+        send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
+        if (replay?.resetReason) {
+          send(
+            formatSseFrame({
+              event: "sync.reset",
+              data: {
+                reason: replay.resetReason,
+                latestStreamSeq: replay.latestStreamSeq,
+              },
+            }),
+          );
+        } else if (replay) {
+          for (const frame of replay.frames) {
+            send(formatSseFrame(frame));
+          }
+        }
+
         const timer = setInterval(() => {
           send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
         }, 25_000);
@@ -979,8 +1043,9 @@ export function createApp(deps: AppDeps): Hono {
     return new Response(stream, {
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
-        "cache-control": "no-cache",
+        "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
+        "x-accel-buffering": "no",
       },
     });
   });

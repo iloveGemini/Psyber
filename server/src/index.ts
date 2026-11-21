@@ -460,6 +460,8 @@ async function main(): Promise<void> {
   const server = Bun.serve({
     hostname: host,
     port,
+    // SSE 长连接心跳间隔 25s，必须禁用 Bun 默认 10s idleTimeout，避免流式生成中途被服务端强行断流
+    idleTimeout: 0,
     fetch: runtime.app.fetch,
   });
 

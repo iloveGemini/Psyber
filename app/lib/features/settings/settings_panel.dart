@@ -175,303 +175,26 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
 
   void _openModelConfigDialog() {
     final snap = widget.controller.settingsNotifier.value;
-    final slot = snap?.chatSlot;
-    final currentProvider = slot != null ? snap?.providers[slot.provider] : null;
-
-    var providerKind = currentProvider?.kind ?? 'openai-compat';
-    final baseUrlCtrl = TextEditingController(text: currentProvider?.baseUrl ?? '');
-    final modelCtrl = TextEditingController(text: slot?.model ?? '');
-    final apiKeyCtrl = TextEditingController();
-    String? errText;
-    var saving = false;
-
     unawaited(
       showDialog<void>(
         context: context,
-        builder: (ctx) => StatefulBuilder(
-          builder: (ctx, setDialogState) => Dialog(
-            backgroundColor: PsyberTheme.letterSurface,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: PsyberTheme.hairline),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      '配置模型与 API Key',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '保存后立即热生效，密钥仅写入服务端 0600 凭证文件。',
-                      style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
-                    ),
-                    const SizedBox(height: 14),
-                    DropdownButtonFormField<String>(
-                      initialValue: providerKind,
-                      decoration: const InputDecoration(labelText: '模型服务商'),
-                      items: const [
-                        DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                        DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
-                        DropdownMenuItem(value: 'google', child: Text('Google')),
-                        DropdownMenuItem(
-                          value: 'openai-compat',
-                          child: Text('OpenAI 兼容接口（自定义地址）'),
-                        ),
-                      ],
-                      onChanged: (v) {
-                        if (v != null) setDialogState(() => providerKind = v);
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: baseUrlCtrl,
-                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                      decoration: const InputDecoration(
-                        labelText: '接口地址 Base URL（兼容接口必填）',
-                        hintText: 'https://api.example.com/v1',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: modelCtrl,
-                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                      decoration: const InputDecoration(
-                        labelText: '主对话模型 ID',
-                        hintText: 'gpt-4o / deepseek-chat',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: apiKeyCtrl,
-                      obscureText: true,
-                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                      decoration: InputDecoration(
-                        labelText: currentProvider?.authStatus == 'configured'
-                            ? 'API Key（留空保持现有密钥不变）'
-                            : 'API Key（必填）',
-                      ),
-                    ),
-                    if (errText != null) ...[
-                      const SizedBox(height: 10),
-                      Text(
-                        errText!,
-                        style: const TextStyle(color: PsyberTheme.dangerInk, fontSize: 12.5),
-                      ),
-                    ],
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: saving ? null : () => Navigator.of(ctx).pop(),
-                          child: const Text('取消'),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton(
-                          onPressed: saving
-                              ? null
-                              : () async {
-                                  final model = modelCtrl.text.trim();
-                                  final baseUrl = baseUrlCtrl.text.trim();
-                                  if (model.isEmpty) {
-                                    setDialogState(() => errText = '请填写模型 ID');
-                                    return;
-                                  }
-                                  if (providerKind == 'openai-compat' && baseUrl.isEmpty) {
-                                    setDialogState(() => errText = '兼容接口请填写自定义 Base URL');
-                                    return;
-                                  }
-                                  setDialogState(() {
-                                    saving = true;
-                                    errText = null;
-                                  });
-                                  try {
-                                    await widget.controller.updateLlmSettings(
-                                      providerKind: providerKind,
-                                      modelName: model,
-                                      baseUrl: baseUrl.isEmpty ? null : baseUrl,
-                                      apiKey: apiKeyCtrl.text.trim(),
-                                    );
-                                    if (ctx.mounted) Navigator.of(ctx).pop();
-                                  } on ApiException catch (e) {
-                                    setDialogState(() {
-                                      errText = e.message;
-                                      saving = false;
-                                    });
-                                  } catch (_) {
-                                    setDialogState(() {
-                                      errText = '保存失败，请检查网络连接';
-                                      saving = false;
-                                    });
-                                  }
-                                },
-                          child: const Text('保存'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+        builder: (_) => _ModelConfigDialog(
+          controller: widget.controller,
+          settings: snap,
         ),
-      ).whenComplete(() {
-        baseUrlCtrl.dispose();
-        modelCtrl.dispose();
-        apiKeyCtrl.dispose();
-      }),
+      ),
     );
   }
 
   void _openStickerUploadDialog() {
-    final idCtrl = TextEditingController();
-    final labelCtrl = TextEditingController();
-    final packCtrl = TextEditingController(text: 'default');
-    PickedImage? pickedImage;
-    String? errText;
-    var uploading = false;
-
     unawaited(
       showDialog<void>(
         context: context,
-        builder: (ctx) => StatefulBuilder(
-          builder: (ctx, setDialogState) => Dialog(
-            backgroundColor: PsyberTheme.letterSurface,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: PsyberTheme.hairline),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      '上传表情贴纸',
-                      style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w500),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '支持 PNG / WebP / GIF（≤ 2 MB），也可将图片直接放入服务端 stickers/ 目录。',
-                      style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet, height: 1.45),
-                    ),
-                    const SizedBox(height: 14),
-                    OutlinedButton.icon(
-                      onPressed: uploading
-                          ? null
-                          : () async {
-                              final picker = widget.imagePicker ?? defaultPlatformImagePicker;
-                              final res = await picker();
-                              if (res != null) {
-                                setDialogState(() => pickedImage = res);
-                              }
-                            },
-                      icon: const Icon(PhosphorIconsLight.image, size: 17),
-                      label: Text(pickedImage == null ? '选择贴纸图片' : pickedImage!.filename),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: idCtrl,
-                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                      decoration: const InputDecoration(
-                        labelText: '贴纸 ID',
-                        hintText: '例如 cat-nod（小写字母/数字/-）',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: labelCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '贴纸语义说明（≤ 20 字）',
-                        hintText: '例如 轻轻点头',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: packCtrl,
-                      decoration: const InputDecoration(labelText: '分组名（可选）'),
-                    ),
-                    if (errText != null) ...[
-                      const SizedBox(height: 10),
-                      Text(
-                        errText!,
-                        style: const TextStyle(color: PsyberTheme.dangerInk, fontSize: 12.5),
-                      ),
-                    ],
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: uploading ? null : () => Navigator.of(ctx).pop(),
-                          child: const Text('取消'),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton(
-                          onPressed: uploading
-                              ? null
-                              : () async {
-                                  final id = idCtrl.text.trim();
-                                  final label = labelCtrl.text.trim();
-                                  if (pickedImage == null || id.isEmpty || label.isEmpty) {
-                                    setDialogState(() => errText = '请选择图片并填写 ID 与语义说明');
-                                    return;
-                                  }
-                                  setDialogState(() {
-                                    uploading = true;
-                                    errText = null;
-                                  });
-                                  try {
-                                    await widget.controller.uploadSticker(
-                                      bytes: pickedImage!.bytes,
-                                      filename: pickedImage!.filename,
-                                      mimeType: pickedImage!.mimeType,
-                                      id: id,
-                                      label: label,
-                                      pack: packCtrl.text.trim().isEmpty
-                                          ? 'default'
-                                          : packCtrl.text.trim(),
-                                    );
-                                    if (ctx.mounted) Navigator.of(ctx).pop();
-                                  } on ApiException catch (e) {
-                                    setDialogState(() {
-                                      uploading = false;
-                                      errText = e.isEndpointUnavailable
-                                          ? '当前服务端暂未开启在线上传贴纸，可将图片放入服务端 stickers/ 目录。'
-                                          : e.message;
-                                    });
-                                  } catch (_) {
-                                    setDialogState(() {
-                                      uploading = false;
-                                      errText = '上传失败，请稍后重试';
-                                    });
-                                  }
-                                },
-                          child: const Text('上传'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+        builder: (_) => _StickerUploadDialog(
+          controller: widget.controller,
+          imagePicker: widget.imagePicker,
         ),
-      ).whenComplete(() {
-        idCtrl.dispose();
-        labelCtrl.dispose();
-        packCtrl.dispose();
-      }),
+      ),
     );
   }
 
@@ -2003,6 +1726,348 @@ class _McpEditorDialogState extends State<_McpEditorDialog> {
                     key: const Key('mcp_save_button'),
                     onPressed: _saving ? null : () => unawaited(_save()),
                     child: Text(_saving ? '保存中…' : '保存并热加载'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ModelConfigDialog extends StatefulWidget {
+  const _ModelConfigDialog({
+    required this.controller,
+    required this.settings,
+  });
+
+  final AppController controller;
+  final SettingsSnapshot? settings;
+
+  @override
+  State<_ModelConfigDialog> createState() => _ModelConfigDialogState();
+}
+
+class _ModelConfigDialogState extends State<_ModelConfigDialog> {
+  late String _providerKind;
+  late final TextEditingController _baseUrlCtrl;
+  late final TextEditingController _modelCtrl;
+  late final TextEditingController _apiKeyCtrl;
+  String? _errText;
+  bool _saving = false;
+  bool _hasExistingKey = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final snap = widget.settings;
+    final slot = snap?.chatSlot;
+    final currentProvider = slot != null ? snap?.providers[slot.provider] : null;
+    _providerKind = currentProvider?.kind ?? 'openai-compat';
+    _hasExistingKey = currentProvider?.authStatus == 'configured';
+    _baseUrlCtrl = TextEditingController(text: currentProvider?.baseUrl ?? '');
+    _modelCtrl = TextEditingController(text: slot?.model ?? '');
+    _apiKeyCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _baseUrlCtrl.dispose();
+    _modelCtrl.dispose();
+    _apiKeyCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final model = _modelCtrl.text.trim();
+    final baseUrl = _baseUrlCtrl.text.trim();
+    if (model.isEmpty) {
+      setState(() => _errText = '请填写模型 ID');
+      return;
+    }
+    if (_providerKind == 'openai-compat' && baseUrl.isEmpty) {
+      setState(() => _errText = '兼容接口请填写自定义 Base URL');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _errText = null;
+    });
+    try {
+      await widget.controller.updateLlmSettings(
+        providerKind: _providerKind,
+        modelName: model,
+        baseUrl: baseUrl.isEmpty ? null : baseUrl,
+        apiKey: _apiKeyCtrl.text.trim(),
+      );
+      if (mounted) Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errText = e.message;
+        _saving = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _errText = '保存失败，请检查网络连接';
+        _saving = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Dialog(
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                '配置模型与 API Key',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '保存后立即热生效，密钥仅写入服务端 0600 凭证文件。',
+                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
+              ),
+              const SizedBox(height: 14),
+              DropdownButtonFormField<String>(
+                initialValue: _providerKind,
+                decoration: const InputDecoration(labelText: '模型服务商'),
+                items: const [
+                  DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
+                  DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
+                  DropdownMenuItem(value: 'google', child: Text('Google')),
+                  DropdownMenuItem(
+                    value: 'openai-compat',
+                    child: Text('OpenAI 兼容接口（自定义地址）'),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _providerKind = v);
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _baseUrlCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
+                decoration: const InputDecoration(
+                  labelText: '接口地址 Base URL（兼容接口必填）',
+                  hintText: 'https://api.example.com/v1',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _modelCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
+                decoration: const InputDecoration(
+                  labelText: '主对话模型 ID',
+                  hintText: 'gpt-4o / deepseek-chat',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _apiKeyCtrl,
+                obscureText: true,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
+                decoration: InputDecoration(
+                  labelText: _hasExistingKey
+                      ? 'API Key（留空保持现有密钥不变）'
+                      : 'API Key（必填）',
+                ),
+              ),
+              if (_errText != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _errText!,
+                  style: TextStyle(color: colors.dangerInk, fontSize: 12.5),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _saving ? null : () => unawaited(_save()),
+                    child: const Text('保存'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StickerUploadDialog extends StatefulWidget {
+  const _StickerUploadDialog({
+    required this.controller,
+    this.imagePicker,
+  });
+
+  final AppController controller;
+  final ImageFilePicker? imagePicker;
+
+  @override
+  State<_StickerUploadDialog> createState() => _StickerUploadDialogState();
+}
+
+class _StickerUploadDialogState extends State<_StickerUploadDialog> {
+  final _idCtrl = TextEditingController();
+  final _labelCtrl = TextEditingController();
+  final _packCtrl = TextEditingController(text: 'default');
+  PickedImage? _pickedImage;
+  String? _errText;
+  bool _uploading = false;
+
+  @override
+  void dispose() {
+    _idCtrl.dispose();
+    _labelCtrl.dispose();
+    _packCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickImage() async {
+    final picker = widget.imagePicker ?? defaultPlatformImagePicker;
+    final res = await picker();
+    if (res != null && mounted) {
+      setState(() => _pickedImage = res);
+    }
+  }
+
+  Future<void> _upload() async {
+    final id = _idCtrl.text.trim();
+    final label = _labelCtrl.text.trim();
+    if (_pickedImage == null || id.isEmpty || label.isEmpty) {
+      setState(() => _errText = '请选择图片并填写 ID 与语义说明');
+      return;
+    }
+    setState(() {
+      _uploading = true;
+      _errText = null;
+    });
+    try {
+      await widget.controller.uploadSticker(
+        bytes: _pickedImage!.bytes,
+        filename: _pickedImage!.filename,
+        mimeType: _pickedImage!.mimeType,
+        id: id,
+        label: label,
+        pack: _packCtrl.text.trim().isEmpty ? 'default' : _packCtrl.text.trim(),
+      );
+      if (mounted) Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _errText = e.isEndpointUnavailable
+            ? '当前服务端暂未开启在线上传贴纸，可将图片放入服务端 stickers/ 目录。'
+            : e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _errText = '上传失败，请稍后重试';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Dialog(
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                '上传表情贴纸',
+                style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '支持 PNG / WebP / GIF（≤ 2 MB），也可将图片直接放入服务端 stickers/ 目录。',
+                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet, height: 1.45),
+              ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: _uploading ? null : () => unawaited(_pickImage()),
+                icon: const Icon(PhosphorIconsLight.image, size: 17),
+                label: Text(_pickedImage == null ? '选择贴纸图片' : _pickedImage!.filename),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _idCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
+                decoration: const InputDecoration(
+                  labelText: '贴纸 ID',
+                  hintText: '例如 cat-nod（小写字母/数字/-）',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _labelCtrl,
+                decoration: const InputDecoration(
+                  labelText: '贴纸语义说明（≤ 20 字）',
+                  hintText: '例如 轻轻点头',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _packCtrl,
+                decoration: const InputDecoration(labelText: '分组名（可选）'),
+              ),
+              if (_errText != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _errText!,
+                  style: TextStyle(color: colors.dangerInk, fontSize: 12.5),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: _uploading ? null : () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _uploading ? null : () => unawaited(_upload()),
+                    child: const Text('上传'),
                   ),
                 ],
               ),

@@ -712,6 +712,7 @@ class HistoryPage {
     required this.hasMore,
     required this.latestEventSeq,
     this.nextBefore,
+    this.activeTurnId,
     this.contextUsage,
   });
 
@@ -719,6 +720,7 @@ class HistoryPage {
   final bool hasMore;
   final String? nextBefore;
   final int latestEventSeq;
+  final String? activeTurnId;
   final ContextUsageInfo? contextUsage;
 
   factory HistoryPage.fromJson(Map<String, dynamic> json) {
@@ -737,6 +739,7 @@ class HistoryPage {
       hasMore: json['hasMore'] == true,
       nextBefore: json['nextBefore'] as String?,
       latestEventSeq: (json['latestEventSeq'] as num?)?.toInt() ?? 0,
+      activeTurnId: json['activeTurnId'] as String?,
       contextUsage: rawUsage is Map<String, dynamic>
           ? ContextUsageInfo.fromJson(rawUsage)
           : null,

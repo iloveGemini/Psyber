@@ -95,7 +95,7 @@ export interface TimelineItem {
 | `POST /api/v1/chat/messages/:id/retract` | `{}`（Ring 1.5 社交撤回） | `200`: `{ "retractedId": string, "eventSeq": number }`（仅允许用户撤回自己的活跃消息，置 `status = 'retracted'` 并广播 `message.updated`；流式生成中返 `409 TURN_IN_PROGRESS`；`departed` 返 `410 GONE`） |
 | `DELETE /api/v1/chat/messages/:id` | 无 | `200`: `{ "deletedId": string, "eventSeq": number }`（静默软删置 `status = 'deleted'`，绝不告知住户，广播 `message.updated`）；`departed` 返 `410 GONE` |
 | `POST /api/v1/turns/:turnId/abort` | 无 | `200`: `{ "ok": true, "turnId": string, "aborted": boolean }`（幂等；已结束轮返回 `aborted: false`） |
-| `POST /api/v1/turns/:turnId/retry` | `{}`（Ring 1.5 原地无痕重试） | `202`: `{ "turnId": string, "retriedFromTurnId": string }`（沿用上一失败轮次的用户原话直接续跑，绝不重复插入用户消息气泡）；非可重试失败轮返 `409 TURN_NOT_RETRYABLE` |
+| `POST /api/v1/turns/:turnId/retry` | `{}`（Ring 1.5 原地无痕重试） | `202`: `{ "turnId": string, "retriedFromTurnId": string }`（沿用上一失败轮次的用户原话直接续跑，绝不重复插入用户消息气泡；若上一轮已在多步工具循环中完成部分步骤，则补推已完成进度并从断点步骤接续）；非可重试失败轮返 `409 TURN_NOT_RETRYABLE` |
 | `POST /api/v1/chat/wrap-up` | `{}`（Ring 1.5 手动存记忆换段） | `202`: `{ "oldSessionId": string, "newSessionId": string, "queued": true }`（立即切新会话并入队后台异步 `daily_wrapup` 整理） |
 | `POST /api/v1/shares/:id/open` | `{}`（Ring 1.5 分享卡首次拆阅回执） | `200`: `{ "ok": true, "shareId": string, "openedAt": number, "firstOpen": boolean }`（幂等；仅首次写入 `share.opened` 并广播） |
 | `POST /api/v1/turns/:turnId/approval` | `{ "approvalId": string, "decision": "allow" \| "deny", "scope"?: "once" \| "session" }` | `200`: `{ "ok": true, "approvalId": string, "decision": "allow" \| "deny" }`；已超时或已被他端处理返 `409 APPROVAL_ALREADY_RESOLVED` |

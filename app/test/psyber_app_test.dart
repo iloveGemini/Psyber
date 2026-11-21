@@ -282,6 +282,8 @@ class FakePsyberApiClient implements PsyberApiClient {
   @override
   Future<DoorStatus> getDoor(ConnectionProfile profile) async => door;
 
+  String? activeTurnId;
+
   @override
   Future<HistoryPage> getHistory(
     ConnectionProfile profile, {
@@ -293,6 +295,7 @@ class FakePsyberApiClient implements PsyberApiClient {
       items: List<TimelineItem>.from(history),
       hasMore: false,
       latestEventSeq: history.isEmpty ? 0 : history.last.seq,
+      activeTurnId: activeTurnId,
     );
   }
 
@@ -1039,13 +1042,22 @@ void main() {
     expect(api.switchedVersions.first['version'], 2);
     expect(find.text('第 2 版回复内容'), findsOneWidget);
 
-    // 验证点击更多菜单打开上下文操作并软删
+    // 验证点击更多菜单打开上下文操作并触发编辑重发与软删
     await tester.tap(find.byKey(const Key('msg_more_ev_user_1')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('edit_msg_ev_user_1')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('delete_msg_ev_user_1')));
+    await tester.tap(find.byKey(const Key('edit_msg_ev_user_1')));
     await tester.pumpAndSettle();
-    expect(find.text('第一句问候'), findsNothing);
+    await tester.enterText(find.byType(TextField).last, '修改后的问候');
+    await tester.tap(find.text('保存并重发'));
+    await tester.pumpAndSettle();
+    expect(find.text('修改后的问候'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('msg_more_ev_user_1_v2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('delete_msg_ev_user_1_v2')));
+    await tester.pumpAndSettle();
+    expect(find.text('修改后的问候'), findsNothing);
 
     // 验证 Ring 1.5 观影伴看 SSE 槽位与结束伴看
     api.emitSse('activity.updated', {
@@ -1944,6 +1956,99 @@ void main() {
       expect(api.reconnectedMcpIds, ['fetch']);
     },
   );
+
+  testWidgets('工具轮次断流重连保留流式进度并按 turn.text / message.created 无缝恢复显示', (tester) async {
+    final api = FakePsyberApiClient();
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 1. 工具轮次开始，客户端已看到思考链与工具调用进度
+    api.activeTurnId = 'turn_tool_reconn';
+    api.emitSse('turn.start', {'turnId': 'turn_tool_reconn', 'mode': 'chat'}, id: '1');
+    api.emitSse(
+      'turn.thinking',
+      {'turnId': 'turn_tool_reconn', 'delta': '先查一下旧笔记'},
+      id: '2',
+    );
+    api.emitSse(
+      'turn.tool',
+      {
+        'turnId': 'turn_tool_reconn',
+        'callId': 'tc_1',
+        'name': 'glob',
+        'label': '翻了翻记忆目录',
+        'status': 'done',
+      },
+      id: '3',
+    );
+    await tester.pump();
+    expect(find.text('思考中…'), findsOneWidget);
+
+    // 2. 模拟短暂重连：activeTurnId 仍在服务端运行，重连不应清空已收到的流式思考链与工具进度
+    await controller.connectAndSync();
+    await tester.pump();
+    expect(controller.activeTurnNotifier.value?.turnId, 'turn_tool_reconn');
+    expect(controller.activeTurnNotifier.value?.thinking, '先查一下旧笔记');
+    expect(controller.activeTurnNotifier.value?.tools.length, 1);
+
+    // 3. 即使极端情况下 activeTurnNotifier 为空且错过 turn.start，后续 turn.text 也能自动恢复流式气泡
+    controller.activeTurnNotifier.value = null;
+    api.emitSse(
+      'turn.text',
+      {'turnId': 'turn_tool_reconn', 'delta': '我查到了，'},
+      id: '4',
+    );
+    api.emitSse(
+      'turn.text',
+      {'turnId': 'turn_tool_reconn', 'delta': '内容在这里。'},
+      id: '5',
+    );
+    await tester.pump();
+    expect(find.text('我查到了，内容在这里。'), findsOneWidget);
+
+    // 4. 服务端持久化后通过 message.created 落入时间线并无缝收起流式占位
+    api.activeTurnId = null;
+    api.emitSse(
+      'message.created',
+      {
+        'message': {
+          'id': 'ev_tool_1',
+          'seq': 10,
+          'sessionId': 'sess_1',
+          'turnId': 'turn_tool_reconn',
+          'role': 'assistant',
+          'kind': 'chat',
+          'content': '我查到了，内容在这里。',
+          'thinking': '先查一下旧笔记',
+          'toolSummary': [
+            {'name': 'glob', 'label': '翻了翻记忆目录', 'ok': true, 'kind': 'general'},
+          ],
+          'createdAt': 1795046499000,
+        },
+      },
+      id: '6',
+    );
+    await tester.pump();
+    expect(controller.activeTurnNotifier.value, isNull);
+    expect(find.text('我查到了，内容在这里。'), findsOneWidget);
+    expect(find.byKey(const Key('streaming_bubble')), findsNothing);
+  });
 }
 
 class _PaginatedFakeApiClient extends FakePsyberApiClient {

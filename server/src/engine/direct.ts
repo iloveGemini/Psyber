@@ -26,6 +26,7 @@ import { renderCircadianState } from "../mood/circadian.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
 import type {
   ExpressionPayload,
+  ShareCardRecord,
   ToolApprovalRequest,
   ToolApprovalResult,
   ToolExecutionContext,
@@ -133,6 +134,39 @@ export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): 
   return toolName;
 }
 
+export interface TurnCheckpoint {
+  turnId: string;
+  sessionId: string;
+  mode: "chat" | "wake";
+  userEventId?: string;
+  systemPrompt: string;
+  messages: ChatMessage[];
+  fullText: string;
+  fullThinking: string;
+  recordedToolCalls: Array<{
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    ok: boolean;
+    output: string;
+  }>;
+  toolSummary: Array<{
+    name: string;
+    label: string;
+    ok: boolean;
+    kind: "general" | "screen";
+  }>;
+  toolProgress: ToolProgressEvent[];
+  expressions: ExpressionPayload[];
+  shares: ShareCardRecord[];
+  touchedMemoryPaths: string[];
+  injectedDoorNoteMaxId: string | null;
+  injectedNoticeMaxId: string | null;
+  recallCount: number;
+  completedToolSteps: number;
+  rolledOver: boolean;
+}
+
 export interface RunTurnResult {
   turnId: string;
   sessionId: string;
@@ -145,6 +179,7 @@ export interface RunTurnResult {
   rolledOver: boolean;
   touchedMemoryPaths: string[];
   error?: { code: LlmErrorCode; message: string; retryable: boolean };
+  checkpoint?: TurnCheckpoint;
 }
 
 export interface DirectEngineDeps {
@@ -612,6 +647,7 @@ export class DirectEngine {
     groupId?: string;
     version?: number;
     historyBeforeSeq?: number;
+    resumeCheckpoint?: TurnCheckpoint;
     signal?: AbortSignal;
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
@@ -632,43 +668,60 @@ export class DirectEngine {
     groupId?: string;
     version?: number;
     historyBeforeSeq?: number;
+    resumeCheckpoint?: TurnCheckpoint;
     signal?: AbortSignal;
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
     const turnId = opts.turnId ?? ulid(this.deps.clock.now());
-    const systemPrompt = await this.getOrBuildStaticPrefix();
+    const cp =
+      opts.resumeCheckpoint && opts.resumeCheckpoint.sessionId === this.sessionId
+        ? opts.resumeCheckpoint
+        : undefined;
     const tier1Tools = this.deps.registry.getTier1Definitions();
-    const history = this.buildHistoryMessages(opts.userEventId, opts.historyBeforeSeq);
-    const {
-      content: dynamicUserContent,
-      injectedDoorNoteMaxId,
-      injectedNoticeMaxId,
-      recallCount,
-    } = await this.buildDynamicUserMessage({
-      mode: opts.mode,
-      turnId,
-      userText: opts.userText ?? "",
-      stickerId: opts.stickerId,
-      attachments: opts.attachments,
-      videoClip: opts.videoClip,
-      urgent: opts.urgent,
-      wakeReason: opts.wakeReason,
-      activityHint: opts.activityHint,
-    });
 
-    const messages: ChatMessage[] = [
-      ...history,
-      { role: "user", content: dynamicUserContent, timestamp: this.deps.clock.now() },
-    ];
+    let systemPrompt: string;
+    let messages: ChatMessage[];
+    let injectedDoorNoteMaxId: string | null;
+    let injectedNoticeMaxId: string | null;
+    let recallCount: number;
+
+    if (cp) {
+      systemPrompt = cp.systemPrompt;
+      messages = [...cp.messages];
+      injectedDoorNoteMaxId = cp.injectedDoorNoteMaxId;
+      injectedNoticeMaxId = cp.injectedNoticeMaxId;
+      recallCount = cp.recallCount;
+    } else {
+      systemPrompt = await this.getOrBuildStaticPrefix();
+      const history = this.buildHistoryMessages(opts.userEventId, opts.historyBeforeSeq);
+      const dynamic = await this.buildDynamicUserMessage({
+        mode: opts.mode,
+        turnId,
+        userText: opts.userText ?? "",
+        stickerId: opts.stickerId,
+        attachments: opts.attachments,
+        videoClip: opts.videoClip,
+        urgent: opts.urgent,
+        wakeReason: opts.wakeReason,
+        activityHint: opts.activityHint,
+      });
+      injectedDoorNoteMaxId = dynamic.injectedDoorNoteMaxId;
+      injectedNoticeMaxId = dynamic.injectedNoticeMaxId;
+      recallCount = dynamic.recallCount;
+      messages = [
+        ...history,
+        { role: "user", content: dynamic.content, timestamp: this.deps.clock.now() },
+      ];
+    }
 
     const toolCtx: ToolExecutionContext = {
       turnId,
       sessionId: this.sessionId,
       mode: opts.mode,
-      touchedMemoryPaths: new Set<string>(),
-      expressionCount: 0,
-      expressions: [],
-      shares: [],
+      touchedMemoryPaths: new Set<string>(cp?.touchedMemoryPaths ?? []),
+      expressionCount: cp?.expressions.length ?? 0,
+      expressions: cp ? [...cp.expressions] : [],
+      shares: cp ? [...cp.shares] : [],
       signal: opts.signal,
       onExpression: (p) => opts.callbacks?.onExpression?.(p),
       onDoorUpdated: (s, n) => opts.callbacks?.onDoorUpdated?.(s, n),
@@ -677,7 +730,7 @@ export class DirectEngine {
     };
 
     // wake 模式在前 16 字符确认非 [SILENT]（或产生实质工具调用）前暂缓广播
-    let streamStarted = opts.mode !== "wake";
+    let streamStarted = opts.mode !== "wake" || Boolean(cp);
     let pendingThinking = "";
     let pendingText = "";
     const flushWakeStart = () => {
@@ -696,6 +749,18 @@ export class DirectEngine {
 
     if (streamStarted) {
       opts.callbacks?.onTurnStart?.({ turnId, mode: opts.mode });
+      if (cp) {
+        // 断点续跑：先向客户端补推前序已完成步骤的思考链、工具手账进度与前缀正文
+        if (cp.fullThinking) {
+          opts.callbacks?.onThinkingDelta?.(cp.fullThinking);
+        }
+        for (const tp of cp.toolProgress) {
+          opts.callbacks?.onToolProgress?.({ ...tp, turnId });
+        }
+        if (cp.fullText) {
+          opts.callbacks?.onTextDelta?.(cp.fullText);
+        }
+      }
     }
 
     const retryDelays = this.deps.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
@@ -705,13 +770,14 @@ export class DirectEngine {
       arguments: Record<string, unknown>;
       ok: boolean;
       output: string;
-    }> = [];
+    }> = cp ? [...cp.recordedToolCalls] : [];
     const toolSummary: Array<{
       name: string;
       label: string;
       ok: boolean;
       kind: "general" | "screen";
-    }> = [];
+    }> = cp ? [...cp.toolSummary] : [];
+    const toolProgress: ToolProgressEvent[] = cp ? [...cp.toolProgress] : [];
 
     const cfgForTurn = this.deps.getConfig();
     const effectiveThinkingLevel = resolveEffectiveThinkingLevel(cfgForTurn);
@@ -734,10 +800,13 @@ export class DirectEngine {
     };
     maybeBroadcastModelSwitch(activeModelId);
 
-    let fullText = "";
-    let fullThinking = "";
+    let fullText = cp?.fullText ?? "";
+    let fullThinking = cp?.fullThinking ?? "";
+    let committedText = fullText;
+    let committedThinking = fullThinking;
+    let completedToolSteps = cp?.completedToolSteps ?? 0;
     let aborted = false;
-    let rolledOver = false;
+    let rolledOver = cp?.rolledOver ?? false;
     let lastUsage: {
       model?: string;
       inputTokens: number;
@@ -748,320 +817,386 @@ export class DirectEngine {
     } | undefined;
     let lastError: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
 
-    for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-      if (opts.signal?.aborted) {
-        aborted = true;
-        break;
-      }
+    const buildCheckpoint = (): TurnCheckpoint | undefined => {
+      if (completedToolSteps <= 0) return undefined;
+      return {
+        turnId,
+        sessionId: this.sessionId,
+        mode: opts.mode,
+        userEventId: opts.userEventId,
+        systemPrompt,
+        messages: [...messages],
+        fullText: committedText,
+        fullThinking: committedThinking,
+        recordedToolCalls: [...recordedToolCalls],
+        toolSummary: [...toolSummary],
+        toolProgress: [...toolProgress],
+        expressions: [...toolCtx.expressions],
+        shares: [...(toolCtx.shares ?? [])],
+        touchedMemoryPaths: Array.from(toolCtx.touchedMemoryPaths),
+        injectedDoorNoteMaxId,
+        injectedNoticeMaxId,
+        recallCount,
+        completedToolSteps,
+        rolledOver,
+      };
+    };
 
-      let stepText = "";
-      let stepThinking = "";
-      let stepThinkingSig: string | undefined;
-      const stepToolCalls: ChatToolCall[] = [];
-
-      // 对齐 Spec 01 §1.3：429 / 5xx（RATE_LIMITED / PROVIDER_ERROR）在尚未输出内容前指数退避重试 2 次
-      for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
-        let retryableFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
-        let producedOutputInAttempt = false;
-
-        for await (const chunk of this.deps.chatModel.stream({
-          systemPrompt,
-          messages,
-          tools: tier1Tools,
-          sessionId: this.sessionId,
-          thinkingLevel: effectiveThinkingLevel,
-          thinkingBudgetTokens: effectiveThinkingBudget,
-          signal: opts.signal,
-        })) {
-          if (opts.signal?.aborted) {
-            aborted = true;
-            break;
-          }
-          const latestModelId = this.deps.chatModel.modelId;
-          if (latestModelId && latestModelId !== activeModelId) {
-            activeModelId = latestModelId;
-            maybeBroadcastModelSwitch(activeModelId, "fallback");
-          }
-          if (chunk.type === "thinking_delta") {
-            producedOutputInAttempt = true;
-            stepThinking += chunk.delta;
-            fullThinking += chunk.delta;
-            if (chunk.signature) stepThinkingSig = chunk.signature;
-            if (streamStarted) {
-              opts.callbacks?.onThinkingDelta?.(chunk.delta);
-            } else {
-              pendingThinking += chunk.delta;
-            }
-          } else if (chunk.type === "text_delta") {
-            producedOutputInAttempt = true;
-            stepText += chunk.delta;
-            fullText += chunk.delta;
-            if (streamStarted) {
-              opts.callbacks?.onTextDelta?.(chunk.delta);
-            } else {
-              pendingText += chunk.delta;
-              const trimmed = pendingText.trimStart();
-              const couldBeSilent = "[SILENT]".startsWith(trimmed) || trimmed.startsWith("[SILENT]");
-              if (!couldBeSilent || pendingText.length >= WAKE_SILENT_PREFIX_BUFFER_LEN) {
-                if (trimmed !== "[SILENT]") {
-                  flushWakeStart();
-                }
-              }
-            }
-          } else if (chunk.type === "tool_call") {
-            producedOutputInAttempt = true;
-            stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
-          } else if (chunk.type === "usage") {
-            this.lastUsedTokens = chunk.totalTokens;
-            lastUsage = {
-              ...(activeModelId ? { model: activeModelId } : {}),
-              inputTokens: chunk.inputTokens,
-              outputTokens: chunk.outputTokens,
-              ...(chunk.cacheReadTokens !== undefined ? { cacheReadTokens: chunk.cacheReadTokens } : {}),
-              ...(chunk.cacheWriteTokens !== undefined ? { cacheWriteTokens: chunk.cacheWriteTokens } : {}),
-              ...(chunk.estimatedCostUsd !== undefined ? { estimatedCostUsd: chunk.estimatedCostUsd } : {}),
-            };
-            if (chunk.totalTokens >= rolloverLimitTokens) {
-              rolledOver = true;
-            }
-          } else if (chunk.type === "error") {
-            if (chunk.code === "CONTEXT_OVERFLOW") {
-              rolledOver = true;
-            }
-            const canRetry =
-              !producedOutputInAttempt &&
-              (chunk.code === "RATE_LIMITED" || chunk.code === "PROVIDER_ERROR") &&
-              attempt < retryDelays.length;
-            if (canRetry) {
-              retryableFailure = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
-            } else {
-              lastError = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
-              opts.callbacks?.onTurnError?.({ turnId, ...lastError });
-            }
-            break;
-          }
-        }
-
+    try {
+      for (let step = completedToolSteps; step <= MAX_TOOL_STEPS; step++) {
         if (opts.signal?.aborted) {
           aborted = true;
           break;
         }
-        if (retryableFailure) {
-          await sleepWithAbort(retryDelays[attempt], opts.signal);
+
+        // 第 MAX_TOOL_STEPS 步为无工具兜底收尾步，确保连续工具调用达上限后仍能吐出最终正文
+        const isWrapUpStep = step === MAX_TOOL_STEPS;
+        let stepText = "";
+        let stepThinking = "";
+        let stepThinkingSig: string | undefined;
+        const stepToolCalls: ChatToolCall[] = [];
+
+        // 对齐 Spec 01 §1.3：429 / 5xx（RATE_LIMITED / PROVIDER_ERROR）在尚未输出内容前指数退避重试 2 次
+        for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+          let retryableFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
+          let producedOutputInAttempt = false;
+
+          for await (const chunk of this.deps.chatModel.stream({
+            systemPrompt,
+            messages,
+            tools: isWrapUpStep ? [] : tier1Tools,
+            sessionId: this.sessionId,
+            thinkingLevel: effectiveThinkingLevel,
+            thinkingBudgetTokens: effectiveThinkingBudget,
+            signal: opts.signal,
+          })) {
+            if (opts.signal?.aborted) {
+              aborted = true;
+              break;
+            }
+            const latestModelId = this.deps.chatModel.modelId;
+            if (latestModelId && latestModelId !== activeModelId) {
+              activeModelId = latestModelId;
+              maybeBroadcastModelSwitch(activeModelId, "fallback");
+            }
+            if (chunk.type === "thinking_delta") {
+              if (chunk.delta.length > 0) {
+                producedOutputInAttempt = true;
+                stepThinking += chunk.delta;
+                fullThinking += chunk.delta;
+              }
+              if (chunk.signature) stepThinkingSig = chunk.signature;
+              if (chunk.delta.length > 0) {
+                if (streamStarted) {
+                  opts.callbacks?.onThinkingDelta?.(chunk.delta);
+                } else {
+                  pendingThinking += chunk.delta;
+                }
+              }
+            } else if (chunk.type === "text_delta") {
+              producedOutputInAttempt = true;
+              stepText += chunk.delta;
+              fullText += chunk.delta;
+              if (streamStarted) {
+                opts.callbacks?.onTextDelta?.(chunk.delta);
+              } else {
+                pendingText += chunk.delta;
+                const trimmed = pendingText.trimStart();
+                const couldBeSilent = "[SILENT]".startsWith(trimmed) || trimmed.startsWith("[SILENT]");
+                if (!couldBeSilent || pendingText.length >= WAKE_SILENT_PREFIX_BUFFER_LEN) {
+                  if (trimmed !== "[SILENT]") {
+                    flushWakeStart();
+                  }
+                }
+              }
+            } else if (chunk.type === "tool_call") {
+              producedOutputInAttempt = true;
+              if (!isWrapUpStep) {
+                stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
+              }
+            } else if (chunk.type === "usage") {
+              this.lastUsedTokens = chunk.totalTokens;
+              lastUsage = {
+                ...(activeModelId ? { model: activeModelId } : {}),
+                inputTokens: chunk.inputTokens,
+                outputTokens: chunk.outputTokens,
+                ...(chunk.cacheReadTokens !== undefined ? { cacheReadTokens: chunk.cacheReadTokens } : {}),
+                ...(chunk.cacheWriteTokens !== undefined ? { cacheWriteTokens: chunk.cacheWriteTokens } : {}),
+                ...(chunk.estimatedCostUsd !== undefined ? { estimatedCostUsd: chunk.estimatedCostUsd } : {}),
+              };
+              if (chunk.totalTokens >= rolloverLimitTokens) {
+                rolledOver = true;
+              }
+            } else if (chunk.type === "error") {
+              if (chunk.code === "CONTEXT_OVERFLOW") {
+                rolledOver = true;
+              }
+              const canRetry =
+                !producedOutputInAttempt &&
+                (chunk.code === "RATE_LIMITED" || chunk.code === "PROVIDER_ERROR") &&
+                attempt < retryDelays.length;
+              if (canRetry) {
+                retryableFailure = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
+              } else {
+                lastError = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
+                opts.callbacks?.onTurnError?.({ turnId, ...lastError });
+              }
+              break;
+            }
+          }
+
+          if (opts.signal?.aborted) {
+            aborted = true;
+            break;
+          }
+          if (retryableFailure) {
+            await sleepWithAbort(retryDelays[attempt], opts.signal);
+            continue;
+          }
+          break;
+        }
+
+        if (lastError || aborted) break;
+
+        // 单轮多步工具循环：完整保留本步 thinking + signature 发回模型
+        if (!isWrapUpStep && stepToolCalls.length > 0) {
+          messages.push({
+            role: "assistant",
+            content: stepText,
+            thinking: stepThinking || undefined,
+            thinkingSignature: stepThinkingSig,
+            toolCalls: stepToolCalls,
+            timestamp: this.deps.clock.now(),
+          });
+
+          for (const tc of stepToolCalls) {
+            const innerCheck =
+              tc.name === "call_tool" && typeof tc.arguments.name === "string"
+                ? tc.arguments.name.trim()
+                : tc.name;
+            if (tc.name === "express" || tc.name === "door" || innerCheck === "share") {
+              flushWakeStart();
+            }
+            const innerName =
+              tc.name === "call_tool" && typeof tc.arguments.name === "string"
+                ? tc.arguments.name.trim()
+                : tc.name;
+            const isEmbodiedOnly = tc.name === "express";
+            const toolKind: "general" | "screen" =
+              innerName === "look_at_screen" ? "screen" : "general";
+            const toolLabel = formatToolActionLabel(innerName, opts.mode);
+            if (!isEmbodiedOnly) {
+              opts.callbacks?.onToolProgress?.({
+                turnId,
+                callId: tc.id,
+                name: innerName,
+                label: toolLabel,
+                kind: toolKind,
+                status: "running",
+              });
+            }
+
+            const result = await this.deps.registry.invoke(tc.name, tc.arguments, toolCtx);
+            recordedToolCalls.push({
+              id: tc.id,
+              name: tc.name,
+              arguments: tc.arguments,
+              ok: result.ok,
+              output: result.output,
+            });
+            if (!isEmbodiedOnly) {
+              toolSummary.push({
+                name: innerName,
+                label: toolLabel,
+                ok: result.ok,
+                kind: toolKind,
+              });
+              const doneProgress: ToolProgressEvent = {
+                turnId,
+                callId: tc.id,
+                name: innerName,
+                label: toolLabel,
+                kind: toolKind,
+                status: result.ok ? "done" : "error",
+              };
+              toolProgress.push(doneProgress);
+              opts.callbacks?.onToolProgress?.(doneProgress);
+            }
+            // Spec 01 §2.2：tool_result 绝不重复追加 <runtime_context>
+            messages.push({
+              role: "toolResult",
+              toolCallId: tc.id,
+              toolName: tc.name,
+              content: result.output,
+              isError: !result.ok,
+              timestamp: this.deps.clock.now(),
+            });
+          }
+          committedText = fullText;
+          committedThinking = fullThinking;
+          completedToolSteps = step + 1;
           continue;
         }
+
         break;
       }
 
-      if (lastError || aborted) break;
-
-      // 单轮多步工具循环：完整保留本步 thinking + signature 发回模型
-      if (stepToolCalls.length > 0) {
-        messages.push({
-          role: "assistant",
-          content: stepText,
-          thinking: stepThinking || undefined,
-          thinkingSignature: stepThinkingSig,
-          toolCalls: stepToolCalls,
-          timestamp: this.deps.clock.now(),
-        });
-
-        for (const tc of stepToolCalls) {
-          const innerCheck =
-            tc.name === "call_tool" && typeof tc.arguments.name === "string"
-              ? tc.arguments.name.trim()
-              : tc.name;
-          if (tc.name === "express" || tc.name === "door" || innerCheck === "share") {
-            flushWakeStart();
+      // 更新盘中 Static Prefix 文件的 <prefix_delta>（不回改本会话 Static Prefix 快照）
+      if (!lastError) {
+        for (const rel of toolCtx.touchedMemoryPaths) {
+          if (STATIC_PREFIX_PATHS.has(rel)) {
+            const latest = await readOptionalMemoryFile(this.deps.dataDir, rel);
+            if (latest) this.prefixDelta.set(rel, latest);
           }
-          const innerName =
-            tc.name === "call_tool" && typeof tc.arguments.name === "string"
-              ? tc.arguments.name.trim()
-              : tc.name;
-          const isEmbodiedOnly = tc.name === "express";
-          const toolKind: "general" | "screen" =
-            innerName === "look_at_screen" ? "screen" : "general";
-          const toolLabel = formatToolActionLabel(innerName, opts.mode);
-          if (!isEmbodiedOnly) {
-            opts.callbacks?.onToolProgress?.({
-              turnId,
-              callId: tc.id,
-              name: innerName,
-              label: toolLabel,
-              kind: toolKind,
-              status: "running",
-            });
-          }
-
-          const result = await this.deps.registry.invoke(tc.name, tc.arguments, toolCtx);
-          recordedToolCalls.push({
-            id: tc.id,
-            name: tc.name,
-            arguments: tc.arguments,
-            ok: result.ok,
-            output: result.output,
-          });
-          if (!isEmbodiedOnly) {
-            toolSummary.push({
-              name: innerName,
-              label: toolLabel,
-              ok: result.ok,
-              kind: toolKind,
-            });
-            opts.callbacks?.onToolProgress?.({
-              turnId,
-              callId: tc.id,
-              name: innerName,
-              label: toolLabel,
-              kind: toolKind,
-              status: result.ok ? "done" : "error",
-            });
-          }
-          // Spec 01 §2.2：tool_result 绝不重复追加 <runtime_context>
-          messages.push({
-            role: "toolResult",
-            toolCallId: tc.id,
-            toolName: tc.name,
-            content: result.output,
-            isError: !result.ok,
-            timestamp: this.deps.clock.now(),
-          });
         }
-        continue;
       }
 
-      break;
-    }
-
-    // 更新盘中 Static Prefix 文件的 <prefix_delta>（不回改本会话 Static Prefix 快照）
-    for (const rel of toolCtx.touchedMemoryPaths) {
-      if (STATIC_PREFIX_PATHS.has(rel)) {
-        const latest = await readOptionalMemoryFile(this.deps.dataDir, rel);
-        if (latest) this.prefixDelta.set(rel, latest);
+      // 仅当本轮未报错且实际写入 memory/ 时才精准 Git 提交（报错轮保留触碰记录待断点重试一并提交）
+      const touched = Array.from(toolCtx.touchedMemoryPaths);
+      if (!lastError && touched.length > 0) {
+        await commitMemoryPaths(this.deps.dataDir, touched, `memory(turn): ${turnId}`);
       }
-    }
 
-    // 仅当本轮实际写入 memory/ 时才精准 Git 提交
-    const touched = Array.from(toolCtx.touchedMemoryPaths);
-    if (touched.length > 0) {
-      await commitMemoryPaths(this.deps.dataDir, touched, `memory(turn): ${turnId}`);
-    }
+      const shareCount = toolCtx.shares?.length ?? 0;
 
-    const shareCount = toolCtx.shares?.length ?? 0;
+      // wake [SILENT] 判定
+      const isSilent =
+        opts.mode === "wake" &&
+        !lastError &&
+        !aborted &&
+        (fullText.trim() === "[SILENT]" ||
+          (fullText.trim() === "" && toolCtx.expressions.length === 0 && shareCount === 0));
 
-    // wake [SILENT] 判定
-    const isSilent =
-      opts.mode === "wake" &&
-      !lastError &&
-      !aborted &&
-      (fullText.trim() === "[SILENT]" ||
-        (fullText.trim() === "" && toolCtx.expressions.length === 0 && shareCount === 0));
+      // Spec 01 §2.2：只要交互/唤醒轮正常完成（含 wake [SILENT]），推进 door_notes_read 游标
+      if (!lastError && !aborted && injectedDoorNoteMaxId) {
+        this.deps.events.setCursor("door_notes_read", injectedDoorNoteMaxId);
+      }
 
-    // Spec 01 §2.2：只要交互/唤醒轮正常完成（含 wake [SILENT]），推进 door_notes_read 游标
-    if (!lastError && !aborted && injectedDoorNoteMaxId) {
-      this.deps.events.setCursor("door_notes_read", injectedDoorNoteMaxId);
-    }
+      if (isSilent) {
+        if (rolledOver) await this.triggerRollover();
+        opts.callbacks?.onTurnSilence?.({ turnId, ownTime: opts.mode === "wake" });
+        return {
+          turnId,
+          sessionId: this.sessionId,
+          message: null,
+          text: "",
+          thinking: fullThinking,
+          recallCount,
+          aborted: false,
+          silent: true,
+          rolledOver,
+          touchedMemoryPaths: touched,
+        };
+      }
 
-    if (isSilent) {
-      if (rolledOver) await this.triggerRollover();
-      opts.callbacks?.onTurnSilence?.({ turnId, ownTime: opts.mode === "wake" });
+      if (
+        !lastError &&
+        !streamStarted &&
+        (fullText.trim().length > 0 || toolCtx.expressions.length > 0 || shareCount > 0)
+      ) {
+        flushWakeStart();
+      }
+
+      // Spec 02 §2.2：仅在非静默完成（产生了回复/表达/分享/工具调用）时推进 events_notice 游标
+      if (
+        !lastError &&
+        !aborted &&
+        injectedNoticeMaxId &&
+        (fullText.trim().length > 0 ||
+          toolCtx.expressions.length > 0 ||
+          shareCount > 0 ||
+          recordedToolCalls.length > 0)
+      ) {
+        this.deps.events.setCursor("events_notice", injectedNoticeMaxId);
+      }
+
+      let persisted: StoredEvent | null = null;
+      if (
+        !lastError &&
+        (fullText.length > 0 ||
+          toolCtx.expressions.length > 0 ||
+          shareCount > 0 ||
+          recordedToolCalls.length > 0 ||
+          fullThinking.length > 0 ||
+          aborted)
+      ) {
+        const metadata: Record<string, unknown> = {};
+        if (opts.userEventId) metadata.inReplyTo = opts.userEventId;
+        if (toolCtx.expressions.length > 0) metadata.expressions = toolCtx.expressions;
+        if (shareCount > 0 && toolCtx.shares) metadata.shares = toolCtx.shares;
+        if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
+        if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
+        if (activeModelId) metadata.model = activeModelId;
+        if (lastUsage) metadata.usage = lastUsage;
+        if (recallCount > 0) metadata.recallCount = recallCount;
+        if (aborted) metadata.aborted = true;
+        const { event } = this.deps.events.append({
+          sessionId: this.sessionId,
+          turnId,
+          groupId: opts.groupId ?? null,
+          version: opts.version ?? 1,
+          role: "assistant",
+          kind: opts.mode === "wake" ? "wake" : "chat",
+          content: fullText,
+          thinking: fullThinking || null,
+          metadata: Object.keys(metadata).length > 0 ? metadata : null,
+        });
+        persisted = event;
+        opts.callbacks?.onAssistantPersisted?.(event);
+        if (activeModelId) {
+          this.lastAssistantModel = activeModelId;
+        }
+      }
+
+      if (rolledOver) {
+        await this.triggerRollover();
+      }
+
+      if (!lastError) {
+        opts.callbacks?.onTurnDone?.({
+          turnId,
+          mode: opts.mode,
+          messageId: persisted?.id ?? null,
+          recallCount,
+          aborted,
+          silent: false,
+          rolledOver,
+          contextUsage: this.getContextUsage(),
+        });
+      }
+
       return {
         turnId,
         sessionId: this.sessionId,
-        message: null,
-        text: "",
+        message: persisted,
+        text: fullText,
         thinking: fullThinking,
-        recallCount,
-        aborted: false,
-        silent: true,
-        rolledOver,
-        touchedMemoryPaths: touched,
-      };
-    }
-
-    if (
-      !lastError &&
-      !streamStarted &&
-      (fullText.trim().length > 0 || toolCtx.expressions.length > 0 || shareCount > 0)
-    ) {
-      flushWakeStart();
-    }
-
-    // Spec 02 §2.2：仅在非静默完成（产生了回复/表达/分享/工具调用）时推进 events_notice 游标
-    if (
-      !lastError &&
-      !aborted &&
-      injectedNoticeMaxId &&
-      (fullText.trim().length > 0 ||
-        toolCtx.expressions.length > 0 ||
-        shareCount > 0 ||
-        recordedToolCalls.length > 0)
-    ) {
-      this.deps.events.setCursor("events_notice", injectedNoticeMaxId);
-    }
-
-    let persisted: StoredEvent | null = null;
-    if (
-      !lastError &&
-      (fullText.length > 0 || toolCtx.expressions.length > 0 || shareCount > 0 || aborted)
-    ) {
-      const metadata: Record<string, unknown> = {};
-      if (opts.userEventId) metadata.inReplyTo = opts.userEventId;
-      if (toolCtx.expressions.length > 0) metadata.expressions = toolCtx.expressions;
-      if (shareCount > 0 && toolCtx.shares) metadata.shares = toolCtx.shares;
-      if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
-      if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
-      if (activeModelId) metadata.model = activeModelId;
-      if (lastUsage) metadata.usage = lastUsage;
-      if (recallCount > 0) metadata.recallCount = recallCount;
-      if (aborted) metadata.aborted = true;
-      const { event } = this.deps.events.append({
-        sessionId: this.sessionId,
-        turnId,
-        groupId: opts.groupId ?? null,
-        version: opts.version ?? 1,
-        role: "assistant",
-        kind: opts.mode === "wake" ? "wake" : "chat",
-        content: fullText,
-        thinking: fullThinking || null,
-        metadata: Object.keys(metadata).length > 0 ? metadata : null,
-      });
-      persisted = event;
-      opts.callbacks?.onAssistantPersisted?.(event);
-      if (activeModelId) {
-        this.lastAssistantModel = activeModelId;
-      }
-    }
-
-    if (rolledOver) {
-      await this.triggerRollover();
-    }
-
-    if (!lastError) {
-      opts.callbacks?.onTurnDone?.({
-        turnId,
-        mode: opts.mode,
-        messageId: persisted?.id ?? null,
         recallCount,
         aborted,
         silent: false,
         rolledOver,
-        contextUsage: this.getContextUsage(),
-      });
+        touchedMemoryPaths: touched,
+        error: lastError,
+        ...(lastError ? { checkpoint: buildCheckpoint() } : {}),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message || "生成过程中发生未预期异常" : "生成过程中发生未预期异常";
+      lastError = { code: "PROVIDER_ERROR", message, retryable: true };
+      opts.callbacks?.onTurnError?.({ turnId, ...lastError });
+      return {
+        turnId,
+        sessionId: this.sessionId,
+        message: null,
+        text: fullText,
+        thinking: fullThinking,
+        recallCount,
+        aborted,
+        silent: false,
+        rolledOver,
+        touchedMemoryPaths: Array.from(toolCtx.touchedMemoryPaths),
+        error: lastError,
+        checkpoint: buildCheckpoint(),
+      };
     }
-
-    return {
-      turnId,
-      sessionId: this.sessionId,
-      message: persisted,
-      text: fullText,
-      thinking: fullThinking,
-      recallCount,
-      aborted,
-      silent: false,
-      rolledOver,
-      touchedMemoryPaths: touched,
-      error: lastError,
-    };
   }
 }

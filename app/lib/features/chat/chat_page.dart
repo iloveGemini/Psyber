@@ -57,6 +57,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _showDesktopSettings = false;
   bool _showScrollToBottom = false;
   bool _isDraggingFiles = false;
+  bool _autoScrollScheduled = false;
   String _lastSavedDraft = '';
 
   @override
@@ -64,6 +65,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.controller.expressionNotifier.addListener(_onExpression);
+    widget.controller.activeTurnNotifier.addListener(_onStreamOrTimelineUpdated);
+    widget.controller.timelineNotifier.addListener(_onStreamOrTimelineUpdated);
     _scrollController.addListener(_onScroll);
     _inputController.addListener(_onDraftChanged);
     unawaited(_restoreDraft());
@@ -114,6 +117,23 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
   }
 
+  /// 当用户停留在底部附近时，随流式生成或新消息到来自动轻滑贴底，避免正文长出视口外。
+  void _onStreamOrTimelineUpdated() {
+    if (!mounted || !_scrollController.hasClients || _showScrollToBottom) return;
+    final distFromBottom =
+        _scrollController.position.maxScrollExtent - _scrollController.offset;
+    if (distFromBottom > 160 || _autoScrollScheduled) return;
+    _autoScrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoScrollScheduled = false;
+      if (!mounted || !_scrollController.hasClients || _showScrollToBottom) return;
+      final maxExtent = _scrollController.position.maxScrollExtent;
+      if (_scrollController.offset < maxExtent) {
+        _scrollController.jumpTo(maxExtent);
+      }
+    });
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 仅真正切入后台（paused/hidden）时中断 SSE，避免桌面窗口失焦或系统弹窗（inactive）频繁断流
@@ -128,6 +148,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.expressionNotifier.removeListener(_onExpression);
+    widget.controller.activeTurnNotifier.removeListener(_onStreamOrTimelineUpdated);
+    widget.controller.timelineNotifier.removeListener(_onStreamOrTimelineUpdated);
     _scrollController.removeListener(_onScroll);
     _inputController.removeListener(_onDraftChanged);
     DesktopMediaBridge.clearDropEvents();

@@ -58,7 +58,7 @@ export interface ModelRef {
 | 槽位 / 场景 | 异常类型 | 标准错误码 / 降级行为 |
 | :--- | :--- | :--- |
 | `chat`（主对话） | OAuth 失效 / Key 无效 | SSE 推 `turn.error { code: "AUTH_EXPIRED", retryable: false }`，引导进设置更新凭证 |
-| `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；若配置了 `slots.fallbacks` 则按顺序自动切换备用模型（仅在相对上一条助手回复的模型发生变化时广播 `turn.model_switched`）；全部耗尽则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` 并支持客户端原地无痕重试（`POST /turns/:turnId/retry`，不重复插入用户消息） |
+| `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；若配置了 `slots.fallbacks` 则按顺序自动切换备用模型（仅在相对上一条助手回复的模型发生变化时广播 `turn.model_switched`）；全部耗尽则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` 并支持客户端原地无痕重试（`POST /turns/:turnId/retry`，不重复插入用户消息；若多步工具调用已在前序步骤成功拿到工具结果，保留本轮内存检查点从断点步骤续跑而非整轮重来） |
 | `chat`（主对话） | 上下文接近/超出上限 | **直接切新 `session_id`**（注入 `<gist>` + 最近 6 轮原始对话）继续正常回复，旧会话交由后台单队列异步整理，**绝不进入前台忙态、绝不阻塞发消息**；若单轮输入本身超限则推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
 | `memory_task`（写作轮） | 写作阶段模型错误 / 超时 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
