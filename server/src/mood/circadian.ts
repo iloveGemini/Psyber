@@ -27,6 +27,8 @@ export interface HeartbeatSnapshot {
   unreadDoorNotesCount: number;
   /** 最早一条未读门缝纸条的创建时间（Unix 毫秒） */
   oldestUnreadDoorNoteMs: number | null;
+  /** 用户主动开启的「勿扰」开关：开启时自动抑制非紧急主动 wake */
+  userUndisturbed?: boolean;
 }
 
 function parseHhMm(hhmm: string, fallbackMin: number): number {
@@ -116,6 +118,9 @@ export function evaluateHeartbeat(snap: HeartbeatSnapshot): HeartbeatDecision {
   }
 
   if (!cfg.proactiveEnabled) {
+    return { action: "idle" };
+  }
+  if (snap.userUndisturbed) {
     return { action: "idle" };
   }
   if (snap.consecutiveUnansweredWakes >= 2) {

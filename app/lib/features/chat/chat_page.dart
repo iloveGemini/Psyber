@@ -136,7 +136,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> _send() async {
+  Future<void> _send({bool urgent = false}) async {
     final text = _inputController.text.trim();
     if ((text.isEmpty &&
             _pendingAttachments.isEmpty &&
@@ -163,6 +163,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         attachments: attachmentHashes.isEmpty ? null : attachmentHashes,
         stickerId: _pendingSticker?.id,
         videoClip: videoClip,
+        urgent: urgent,
       );
       _lastSavedDraft = '';
       _inputController.clear();
@@ -743,7 +744,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                   prevModel != item.model;
 
                                               Widget entry;
-                                              if (item.isMemoryTask) {
+                                              if (item.isShareOpened) {
+                                                entry = const SizedBox.shrink();
+                                              } else if (item.retracted) {
+                                                entry = RetractedMessageRow(item: item);
+                                              } else if (item.isMemoryTask) {
                                                 entry = MemoryTaskRow(item: item);
                                               } else if (item.isSilence) {
                                                 entry = SilenceLine(
@@ -876,7 +881,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                               },
                               onAbort: () =>
                                   unawaited(widget.controller.abortActiveTurn()),
-                              onSend: _send,
+                              onSend: ({bool urgent = false}) =>
+                                  unawaited(_send(urgent: urgent)),
                             ),
                           ),
                         ),

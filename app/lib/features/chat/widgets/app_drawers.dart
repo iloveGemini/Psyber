@@ -10,6 +10,7 @@ import '../../../core/models/models.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../shared/theme.dart';
 import '../../settings/drawer_modal.dart';
+import 'dual_status_card.dart';
 
 /// 左区面板正文：复用于窄屏遮罩抽屉与宽屏可折叠侧边栏。
 class LeftArchivePanelContent extends StatelessWidget {
@@ -68,14 +69,7 @@ class LeftArchivePanelContent extends StatelessWidget {
             ],
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Text(
-            '存放私密日记与门缝纸条。',
-            style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.4),
-          ),
-        ),
-        const SizedBox(height: 12),
+        DualStatusCard(controller: controller),
         Divider(height: 1, color: colors.hairline),
         Expanded(
           child: ListView(

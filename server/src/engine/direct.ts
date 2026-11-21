@@ -66,6 +66,7 @@ export interface TurnStreamCallbacks {
   onTextDelta?: (delta: string) => void;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
+  onMessageRetracted?: (event: StoredEvent) => void;
   onModelSwitched?: (info: { turnId: string; model: string; reason?: string }) => void;
   onTurnSilence?: (info: { turnId: string; ownTime: boolean }) => void;
   onTurnDone?: (info: {
@@ -91,6 +92,8 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   tool_search: "翻找了工具箱",
   call_tool: "取用了扩展工具",
   look_at_screen: "看了一眼你的屏幕",
+  retract_message: "撤回了一条消息",
+  share: "递出了一张分享卡",
 };
 
 const WAKE_TOOL_LABELS: Record<string, string> = {
@@ -103,6 +106,8 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
   tool_search: "趁你不在，翻了翻工具箱",
   call_tool: "趁你不在，取用了扩展工具",
   look_at_screen: "看了一眼你的屏幕",
+  retract_message: "撤回了一条消息",
+  share: "留了一张分享卡",
 };
 
 export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
@@ -313,14 +318,23 @@ export class DirectEngine {
       if (ev.sessionId !== this.sessionId) continue;
       if (excludeEventId && ev.id === excludeEventId) continue;
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
+        // 双向社交撤回不对称性：用户撤回后，住户上下文只见占位看不到原文
+        const content =
+          ev.status === "retracted"
+            ? "（对方撤回了一条消息）"
+            : this.formatHistoryUserContent(ev);
         history.push({
           role: "user",
-          content: this.formatHistoryUserContent(ev),
+          content,
           timestamp: ev.createdAt,
         });
       } else if (ev.role === "assistant" && (ev.kind === "chat" || ev.kind === "wake")) {
-        // 跨轮历史严格剥除 thinking，防止陈旧思考污染后续轮次与缓存
-        history.push({ role: "assistant", content: ev.content, timestamp: ev.createdAt });
+        // 跨轮历史严格剥除 thinking；住户自己撤回的消息在自身上下文里保留原话
+        const content =
+          ev.status === "retracted"
+            ? `${ev.content}\n（我后来撤回了这条消息，对方看不到内容）`
+            : ev.content;
+        history.push({ role: "assistant", content, timestamp: ev.createdAt });
       }
     }
     return history;
@@ -334,6 +348,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
   }): Promise<{ content: ChatUserContent; injectedDoorNoteMaxId: string | null; recallCount: number }> {
@@ -343,9 +358,47 @@ export class DirectEngine {
     const unreadNotesCount = this.deps.events.countUnreadDoorNotes();
     const circadianLabel = renderCircadianState(nowMs, tz, cfg.circadian);
 
-    const ctxBlocks: string[] = [
-      `<runtime time="${vagueTimeOfDay(nowMs, tz)}" weekday="${localWeekday(nowMs, tz)}" circadian="${circadianLabel}" door="${cfg.door.state}" notes="${unreadNotesCount}" />`,
-    ];
+    const runtimeAttrs = [
+      `time="${vagueTimeOfDay(nowMs, tz)}"`,
+      `weekday="${localWeekday(nowMs, tz)}"`,
+      `circadian="${circadianLabel}"`,
+      `door="${cfg.door.state}"`,
+      `notes="${unreadNotesCount}"`,
+      ...(opts.urgent ? [`urgent="true"`] : []),
+      ...(cfg.userStatus?.undisturbed ? [`user_dnd="true"`] : []),
+      ...(cfg.recallEvalNoticeResident ? [`eval_mode="true"`] : []),
+    ].join(" ");
+    const ctxBlocks: string[] = [`<runtime ${runtimeAttrs} />`];
+
+    if (opts.urgent) {
+      ctxBlocks.push(
+        `<urgent_channel>对方在门关着时开启了「一次性紧急通道」发来这一条消息，发完通道已自动重新关上。</urgent_channel>`,
+      );
+    }
+
+    const userStatusParts: string[] = [];
+    if (cfg.userStatus?.undisturbed) userStatusParts.push("开着勿扰");
+    if (cfg.userStatus?.moodText) userStatusParts.push(`心绪「${cfg.userStatus.moodText}」`);
+    if (userStatusParts.length > 0) {
+      ctxBlocks.push(
+        `<user_status>对方主动挂出的状态：${userStatusParts.join("；")}。</user_status>`,
+      );
+    }
+
+    if (cfg.recallEvalNoticeResident) {
+      ctxBlocks.push(
+        `<eval_notice>对方当前开启了召回评测检视模式，可能会查看本轮召回的记忆卡片清单并做标注。</eval_notice>`,
+      );
+    }
+
+    const recentShares = this.deps.events.listRecentShares(nowMs - 7 * 24 * 3600_000, 5);
+    if (recentShares.length > 0) {
+      const shareParts = recentShares.map((s) => {
+        const readStatus = s.openedAt ? `已点开看（${vagueWhen(s.openedAt, nowMs, tz)}）` : "还没打开";
+        return `《${s.title}》（${vagueWhen(s.createdAt, nowMs, tz)}分享；${readStatus}）`;
+      });
+      ctxBlocks.push(`<shared_items>我最近分享给对方的：${shareParts.join("；")}</shared_items>`);
+    }
 
     const stickersBlock = this.buildStickersBlock();
     if (stickersBlock) {
@@ -469,7 +522,14 @@ export class DirectEngine {
     const recentEvents = this.deps.events.listRecentSessionMessages(oldSessionId, 12);
     this.rolloverCarryOver = recentEvents.map((ev) => ({
       role: ev.role === "assistant" ? "assistant" : "user",
-      content: ev.role === "user" ? this.formatHistoryUserContent(ev) : ev.content,
+      content:
+        ev.role === "user"
+          ? ev.status === "retracted"
+            ? "（对方撤回了一条消息）"
+            : this.formatHistoryUserContent(ev)
+          : ev.status === "retracted"
+            ? `${ev.content}\n（我后来撤回了这条消息，对方看不到内容）`
+            : ev.content,
       timestamp: ev.createdAt,
     }));
     this.rolloverGistAnchor = await buildGistBlock(this.deps.dataDir, this.deps.memoryIndex);
@@ -491,6 +551,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -507,6 +568,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -528,6 +590,7 @@ export class DirectEngine {
       stickerId: opts.stickerId,
       attachments: opts.attachments,
       videoClip: opts.videoClip,
+      urgent: opts.urgent,
       wakeReason: opts.wakeReason,
       activityHint: opts.activityHint,
     });
@@ -544,8 +607,10 @@ export class DirectEngine {
       touchedMemoryPaths: new Set<string>(),
       expressionCount: 0,
       expressions: [],
+      shares: [],
       onExpression: (p) => opts.callbacks?.onExpression?.(p),
       onDoorUpdated: (s, n) => opts.callbacks?.onDoorUpdated?.(s, n),
+      onMessageRetracted: (ev) => opts.callbacks?.onMessageRetracted?.(ev),
     };
 
     // wake 模式在前 16 字符确认非 [SILENT]（或产生实质工具调用）前暂缓广播
@@ -721,7 +786,11 @@ export class DirectEngine {
         });
 
         for (const tc of stepToolCalls) {
-          if (tc.name === "express" || tc.name === "door") {
+          const innerCheck =
+            tc.name === "call_tool" && typeof tc.arguments.name === "string"
+              ? tc.arguments.name.trim()
+              : tc.name;
+          if (tc.name === "express" || tc.name === "door" || innerCheck === "share") {
             flushWakeStart();
           }
           const innerName =
@@ -797,12 +866,15 @@ export class DirectEngine {
       await commitMemoryPaths(this.deps.dataDir, touched, `memory(turn): ${turnId}`);
     }
 
+    const shareCount = toolCtx.shares?.length ?? 0;
+
     // wake [SILENT] 判定
     const isSilent =
       opts.mode === "wake" &&
       !lastError &&
       !aborted &&
-      (fullText.trim() === "[SILENT]" || (fullText.trim() === "" && toolCtx.expressions.length === 0));
+      (fullText.trim() === "[SILENT]" ||
+        (fullText.trim() === "" && toolCtx.expressions.length === 0 && shareCount === 0));
 
     // Spec 01 §2.2：只要交互/唤醒轮正常完成（含 wake [SILENT]），推进 door_notes_read 游标
     if (!lastError && !aborted && injectedDoorNoteMaxId) {
@@ -826,15 +898,23 @@ export class DirectEngine {
       };
     }
 
-    if (!lastError && !streamStarted && (fullText.trim().length > 0 || toolCtx.expressions.length > 0)) {
+    if (
+      !lastError &&
+      !streamStarted &&
+      (fullText.trim().length > 0 || toolCtx.expressions.length > 0 || shareCount > 0)
+    ) {
       flushWakeStart();
     }
 
     let persisted: StoredEvent | null = null;
-    if (!lastError && (fullText.length > 0 || toolCtx.expressions.length > 0 || aborted)) {
+    if (
+      !lastError &&
+      (fullText.length > 0 || toolCtx.expressions.length > 0 || shareCount > 0 || aborted)
+    ) {
       const metadata: Record<string, unknown> = {};
       if (opts.userEventId) metadata.inReplyTo = opts.userEventId;
       if (toolCtx.expressions.length > 0) metadata.expressions = toolCtx.expressions;
+      if (shareCount > 0 && toolCtx.shares) metadata.shares = toolCtx.shares;
       if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
       if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
       if (currentModelId) metadata.model = currentModelId;

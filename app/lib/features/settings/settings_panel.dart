@@ -606,12 +606,30 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                       children: [
                         ValueListenableBuilder<bool>(
                           valueListenable: widget.controller.recallEvalModeNotifier,
-                          builder: (context, enabled, _) => _QuietSwitchTile(
-                            key: const Key('recall_eval_switch'),
-                            title: '召回评测模式',
-                            subtitle: '开启后在回复下显示「想起 N 张卡」',
-                            value: enabled,
-                            onChanged: widget.controller.toggleRecallEvalMode,
+                          builder: (context, enabled, _) => Column(
+                            children: [
+                              _QuietSwitchTile(
+                                key: const Key('recall_eval_switch'),
+                                title: '召回评测模式',
+                                subtitle: '开启后在回复下显示「想起 N 张卡」',
+                                value: enabled,
+                                onChanged: widget.controller.toggleRecallEvalMode,
+                              ),
+                              if (enabled) ...[
+                                const Divider(height: 1),
+                                _QuietSwitchTile(
+                                  key: const Key('recall_eval_notice_switch'),
+                                  title: '评测检视对住户透明',
+                                  subtitle: '开启后如实告知住户当前处于召回评测检视中',
+                                  value: snap?.recallEvalNoticeResident ?? false,
+                                  onChanged: (v) => unawaited(
+                                    widget.controller.patchSettings({
+                                      'recallEvalNoticeResident': v,
+                                    }),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                         const Divider(height: 1),

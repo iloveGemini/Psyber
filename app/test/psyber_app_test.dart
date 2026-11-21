@@ -66,6 +66,9 @@ class FakePsyberApiClient implements PsyberApiClient {
   String? lastRevokedDeviceId;
   final List<String> retriedTurnIds = <String>[];
   int wrapUpCallCount = 0;
+  UserStatus userStatus = UserStatus.initial;
+  final List<String> retractedIds = <String>[];
+  final List<String> openedShareIds = <String>[];
 
   StreamController<SseEventFrame>? _streamController;
 
@@ -264,14 +267,17 @@ class FakePsyberApiClient implements PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    bool urgent = false,
   }) async {
     sentPayloads.add({
       'content': content,
       'attachments': attachments,
       'stickerId': stickerId,
       'videoClip': videoClip?.toJson(),
+      'urgent': urgent,
     });
-    final isClosed = door.state.isDoorNoteMode;
+    final isUrgentBypass = door.state == DoorState.closed && urgent;
+    final isDoorNote = door.state.isDoorNoteMode && !isUrgentBypass;
     final nextSeq = (history.isEmpty ? 0 : history.last.seq) + 1;
     StickerView? matchedSticker;
     if (stickerId != null) {
@@ -286,20 +292,21 @@ class FakePsyberApiClient implements PsyberApiClient {
       id: 'ev_$nextSeq',
       seq: nextSeq,
       sessionId: 'sess_1',
-      turnId: isClosed ? null : 'turn_$nextSeq',
+      turnId: isDoorNote ? null : 'turn_$nextSeq',
       clientMessageId: clientMessageId,
       role: 'user',
-      kind: isClosed ? 'door_note' : 'chat',
+      kind: isDoorNote ? 'door_note' : 'chat',
       content: content,
       attachments: attachments ?? const <String>[],
       sticker: matchedSticker,
       videoClip: videoClip,
+      urgent: isUrgentBypass,
       createdAt: 1795046400000 + nextSeq * 1000,
     );
     history.add(msg);
     return SendMessageResult(
       message: msg,
-      deliveredAs: isClosed ? 'door_note' : 'chat',
+      deliveredAs: isDoorNote ? 'door_note' : 'chat',
       turnId: msg.turnId,
     );
   }
@@ -323,6 +330,58 @@ class FakePsyberApiClient implements PsyberApiClient {
   @override
   Future<void> deleteMessage(ConnectionProfile profile, String messageId) async {
     history.removeWhere((e) => e.id == messageId);
+  }
+
+  @override
+  Future<TimelineItem> retractMessage(
+    ConnectionProfile profile,
+    String messageId,
+  ) async {
+    retractedIds.add(messageId);
+    final idx = history.indexWhere((e) => e.id == messageId);
+    if (idx < 0) {
+      throw const ApiException(statusCode: 404, code: 'NOT_FOUND', message: '未找到消息');
+    }
+    final old = history[idx];
+    final updated = TimelineItem(
+      id: old.id,
+      seq: old.seq,
+      sessionId: old.sessionId,
+      turnId: old.turnId,
+      role: old.role,
+      kind: old.kind,
+      content: '',
+      retracted: true,
+      retractedBy: 'user',
+      createdAt: old.createdAt,
+    );
+    history[idx] = updated;
+    return updated;
+  }
+
+  @override
+  Future<int?> openShare(ConnectionProfile profile, String shareId) async {
+    openedShareIds.add(shareId);
+    return 1795046900000;
+  }
+
+  @override
+  Future<UserStatus> getUserStatus(ConnectionProfile profile) async => userStatus;
+
+  @override
+  Future<UserStatus> updateUserStatus(
+    ConnectionProfile profile, {
+    String? moodText,
+    bool clearMood = false,
+    bool? undisturbed,
+  }) async {
+    userStatus = userStatus.copyWith(
+      moodText: moodText,
+      clearMood: clearMood,
+      undisturbed: undisturbed,
+      updatedAt: 1795046900000,
+    );
+    return userStatus;
   }
 
   @override
@@ -1375,6 +1434,221 @@ void main() {
 
       expect(api.wrapUpCallCount, 1);
       expect(find.text('已开启新一段，旧对话正在后台整理'), findsOneWidget);
+    },
+  );
+
+  testWidgets('3 秒二次点击防误触删除 + 双向社交撤回占位显示', (tester) async {
+    final api = FakePsyberApiClient()
+      ..history = [
+        const TimelineItem(
+          id: 'ev_u1',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'user',
+          kind: 'chat',
+          content: '发错窗口的一句话',
+          createdAt: 1795046401000,
+        ),
+        const TimelineItem(
+          id: 'ev_a1',
+          seq: 2,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'chat',
+          content: '测试可删除的回复',
+          createdAt: 1795046402000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 1. 删除需要两步点击（首击显示「再点删除」不删，二次点击才删除）
+    await tester.tap(find.byKey(const Key('hover_delete_ev_a1')));
+    await tester.pump();
+    expect(find.text('再点删除'), findsOneWidget);
+    expect(find.text('测试可删除的回复'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('hover_delete_ev_a1')));
+    await tester.pumpAndSettle();
+    expect(find.text('测试可删除的回复'), findsNothing);
+
+    // 2. 用户一键撤回自己的消息 -> 变为居中占位「你撤回了一条消息」
+    await tester.tap(find.byKey(const Key('hover_retract_ev_u1')));
+    await tester.pumpAndSettle();
+    expect(api.retractedIds, ['ev_u1']);
+    expect(find.text('发错窗口的一句话'), findsNothing);
+    expect(find.text('你撤回了一条消息'), findsOneWidget);
+
+    // 3. 住户侧撤回通过 SSE 同步 -> 显示「对方撤回了一条消息」
+    api.emitSse('message.updated', {
+      'action': 'retract',
+      'retractedId': 'ev_a2',
+      'message': {
+        'id': 'ev_a2',
+        'seq': 3,
+        'sessionId': 'sess_1',
+        'role': 'assistant',
+        'kind': 'chat',
+        'content': '',
+        'retracted': true,
+        'retractedBy': 'resident',
+        'createdAt': 1795046403000,
+      },
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('对方撤回了一条消息'), findsOneWidget);
+  });
+
+  testWidgets('折叠分享卡首次点开上报拆阅回执 + 关门态二次确认一次性紧急直达', (tester) async {
+    final api = FakePsyberApiClient()
+      ..door = const DoorStatus(
+        state: DoorState.closed,
+        note: '先静一静',
+        updatedAt: 1795046400000,
+        unreadDoorNotes: 0,
+      )
+      ..history = [
+        const TimelineItem(
+          id: 'ev_share_1',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'chat',
+          content: '写了一小段随笔递给你。',
+          shares: [
+            ShareCardItem(
+              id: 'sh_1',
+              title: '雨夜随笔',
+              content: '窗外下雨了，顺手记几句。',
+              createdAt: 1795046401000,
+            ),
+          ],
+          createdAt: 1795046401000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 分享卡默认折叠：仅显示标题，不展示正文，且未上报拆阅
+    expect(find.text('雨夜随笔'), findsOneWidget);
+    expect(find.text('窗外下雨了，顺手记几句。'), findsNothing);
+    expect(api.openedShareIds, isEmpty);
+
+    // 点击展开后显示正文并上报一次拆阅回执
+    await tester.tap(find.byKey(const Key('share_card_toggle_sh_1')));
+    await tester.pumpAndSettle();
+    expect(find.text('窗外下雨了，顺手记几句。'), findsOneWidget);
+    expect(api.openedShareIds, ['sh_1']);
+
+    // 关门态点击「有急事」-> 弹二次确认 -> 确认开启 -> 发送一条后自动关闭
+    await tester.tap(find.byKey(const Key('urgent_channel_button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('confirm_urgent_channel_button')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('confirm_urgent_channel_button')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('chat_input_field')), '急事直达测试');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('chat_send_button')));
+    await tester.pumpAndSettle();
+
+    expect(api.sentPayloads.length, 1);
+    expect(api.sentPayloads.first['urgent'], true);
+    expect(find.text('紧急直达'), findsOneWidget);
+    // 发完自动复位回门缝纸条态（「有急事」重新出现而非「取消紧急」）
+    expect(find.text('有急事'), findsOneWidget);
+  });
+
+  testWidgets(
+    '左侧边栏顶部双人状态卡支持快捷留心绪与一键切换勿扰',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final api = FakePsyberApiClient()
+        ..door = const DoorStatus(
+          state: DoorState.open,
+          note: '正在听黑胶',
+          updatedAt: 1795046400000,
+          unreadDoorNotes: 0,
+        );
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('dual_status_card')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('dual_status_card')),
+          matching: find.text('正在听黑胶'),
+        ),
+        findsOneWidget,
+      );
+
+      // 一键切换勿扰
+      await tester.tap(find.byKey(const Key('user_dnd_toggle')));
+      await tester.pumpAndSettle();
+      expect(api.userStatus.undisturbed, isTrue);
+      expect(find.text('勿扰中'), findsOneWidget);
+
+      // 点击心绪气泡写下一句心绪
+      await tester.tap(find.byKey(const Key('user_mood_bubble')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('user_mood_input')), '有点累，刚下班');
+      await tester.tap(find.byKey(const Key('user_mood_save_button')));
+      await tester.pumpAndSettle();
+
+      expect(api.userStatus.moodText, '有点累，刚下班');
+      expect(find.text('有点累，刚下班'), findsOneWidget);
     },
   );
 }

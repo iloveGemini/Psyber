@@ -84,7 +84,7 @@ class AdaptiveComposer extends StatefulWidget {
   final Future<bool> Function()? onPasteClipboard;
   final VoidCallback? onVoiceInput;
   final VoidCallback? onAbort;
-  final VoidCallback onSend;
+  final void Function({bool urgent}) onSend;
 
   @override
   State<AdaptiveComposer> createState() => _AdaptiveComposerState();
@@ -92,6 +92,7 @@ class AdaptiveComposer extends StatefulWidget {
 
 class _AdaptiveComposerState extends State<AdaptiveComposer> {
   late final FocusNode _inputFocusNode;
+  bool _urgentOpen = false;
 
   bool get _isDesktopOrWeb {
     if (kIsWeb) return true;
@@ -156,7 +157,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
             HardwareKeyboard.instance.isControlPressed;
         if (isPrimarySendCombo) {
           if (!widget.sending) {
-            widget.onSend();
+            _triggerSend();
           }
           return KeyEventResult.handled;
         }
@@ -164,11 +165,61 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
           return KeyEventResult.ignored;
         }
         if (!widget.sending) {
-          widget.onSend();
+          _triggerSend();
         }
         return KeyEventResult.handled;
       },
     );
+  }
+
+  @override
+  void didUpdateWidget(covariant AdaptiveComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.door.state != DoorState.closed && _urgentOpen) {
+      _urgentOpen = false;
+    }
+  }
+
+  void _triggerSend() {
+    final useUrgent = widget.door.state == DoorState.closed && _urgentOpen;
+    if (_urgentOpen) {
+      setState(() => _urgentOpen = false);
+    }
+    widget.onSend(urgent: useUrgent);
+  }
+
+  Future<void> _confirmUrgentChannel() async {
+    if (_urgentOpen) {
+      setState(() => _urgentOpen = false);
+      return;
+    }
+    final colors = context.colors;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.letterSurface,
+        title: const Text('开启一次性紧急通道？', style: TextStyle(fontSize: 16)),
+        content: Text(
+          '门正关着，开启后仅限这一条消息直接突破关门送达；发完后通道会自动重新关上。',
+          style: TextStyle(fontSize: 13.5, color: colors.inkQuiet, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('算了，塞纸条'),
+          ),
+          FilledButton(
+            key: const Key('confirm_urgent_channel_button'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('确认开启（仅此一条）'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted && widget.door.state == DoorState.closed) {
+      setState(() => _urgentOpen = true);
+      _inputFocusNode.requestFocus();
+    }
   }
 
   @override
@@ -270,7 +321,9 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
       );
     }
 
-    final isDoorNote = door.state.isDoorNoteMode;
+    final canUseUrgent = door.state == DoorState.closed;
+    final isUrgentActive = canUseUrgent && _urgentOpen;
+    final isDoorNote = door.state.isDoorNoteMode && !isUrgentActive;
     final isQuiet = door.state == DoorState.quiet;
 
     return SafeArea(
@@ -299,8 +352,10 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                     border: Border.all(
                       color: widget.isDraggingFiles
                           ? colors.accentBorder
-                          : (isDoorNote ? colors.hairlineWarm : colors.hairline),
-                      width: widget.isDraggingFiles ? 1.5 : 1,
+                          : (isUrgentActive
+                              ? colors.dangerInk
+                              : (isDoorNote ? colors.hairlineWarm : colors.hairline)),
+                      width: (widget.isDraggingFiles || isUrgentActive) ? 1.5 : 1,
                     ),
                   ),
                   child: Column(
@@ -328,30 +383,65 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                             ],
                           ),
                         ),
-                      if (isDoorNote) ...[
+                      if (door.state.isDoorNoteMode) ...[
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 9, 14, 6),
+                          padding: const EdgeInsets.fromLTRB(14, 8, 10, 6),
                           child: Row(
                             children: [
                               Icon(
-                                PhosphorIconsLight.envelopeSimpleOpen,
+                                isUrgentActive
+                                    ? PhosphorIconsLight.lightning
+                                    : PhosphorIconsLight.envelopeSimpleOpen,
                                 size: 14,
-                                color: colors.thresholdAmber,
+                                color: isUrgentActive
+                                    ? colors.dangerInk
+                                    : colors.thresholdAmber,
                               ),
                               const SizedBox(width: 6),
-                              Text(
-                                '门缝纸条 · 写入后不会打扰或强迫回复',
-                                style: PsyberTheme.editorialSerif.copyWith(
-                                  fontSize: 12,
-                                  color: colors.thresholdAmber,
+                              Expanded(
+                                child: Text(
+                                  isUrgentActive
+                                      ? '紧急直达（仅此一条）· 发完自动重新关上'
+                                      : '门缝纸条 · 写入后不会打扰或强迫回复',
+                                  style: PsyberTheme.editorialSerif.copyWith(
+                                    fontSize: 12,
+                                    color: isUrgentActive
+                                        ? colors.dangerInk
+                                        : colors.thresholdAmber,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
+                              if (canUseUrgent)
+                                TextButton(
+                                  key: const Key('urgent_channel_button'),
+                                  onPressed: widget.sending
+                                      ? null
+                                      : () => unawaited(_confirmUrgentChannel()),
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 2,
+                                    ),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    foregroundColor: isUrgentActive
+                                        ? colors.inkQuiet
+                                        : colors.thresholdAmber,
+                                  ),
+                                  child: Text(
+                                    isUrgentActive ? '取消紧急' : '有急事',
+                                    style: const TextStyle(fontSize: 11.5),
+                                  ),
+                                ),
                             ],
                           ),
                         ),
                         CustomPaint(
                           size: const Size(double.infinity, 1),
-                          painter: _DashedHairlinePainter(colors.hairlineWarm),
+                          painter: _DashedHairlinePainter(
+                            isUrgentActive ? colors.dangerSoft : colors.hairlineWarm,
+                          ),
                         ),
                       ],
                       if (widget.pendingAttachments.isNotEmpty ||
@@ -458,12 +548,12 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                     ? TextInputAction.newline
                                     : TextInputAction.send,
                                 onSubmitted:
-                                    _isDesktopOrWeb ? null : (_) => widget.onSend(),
+                                    _isDesktopOrWeb ? null : (_) => _triggerSend(),
                                 decoration: InputDecoration(
                                   filled: false,
-                                  hintText: isDoorNote
-                                      ? '写下要塞进门缝的纸条…'
-                                      : '说点什么…',
+                                  hintText: isUrgentActive
+                                      ? '紧急直达（仅此一条）…'
+                                      : (isDoorNote ? '写下要塞进门缝的纸条…' : '说点什么…'),
                                   border: InputBorder.none,
                                   enabledBorder: InputBorder.none,
                                   focusedBorder: InputBorder.none,
@@ -513,18 +603,24 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                 }
 
                                 if (hasDraft) {
-                                  final Color btnBg = isDoorNote
-                                      ? colors.thresholdAmberSoft
-                                      : colors.accent;
-                                  final Color btnFg = isDoorNote
-                                      ? colors.thresholdAmber
-                                      : colors.onAccent;
+                                  final Color btnBg = isUrgentActive
+                                      ? colors.dangerInk
+                                      : (isDoorNote
+                                          ? colors.thresholdAmberSoft
+                                          : colors.accent);
+                                  final Color btnFg = isUrgentActive
+                                      ? Colors.white
+                                      : (isDoorNote
+                                          ? colors.thresholdAmber
+                                          : colors.onAccent);
                                   final BorderSide? btnSide = isDoorNote
                                       ? BorderSide(color: colors.thresholdAmber)
                                       : null;
 
                                   return Tooltip(
-                                    message: isDoorNote ? '塞纸条' : '发送',
+                                    message: isUrgentActive
+                                        ? '紧急发送'
+                                        : (isDoorNote ? '塞纸条' : '发送'),
                                     child: IconButton(
                                       key: const Key('chat_send_button'),
                                       padding: EdgeInsets.zero,
@@ -543,7 +639,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                             MaterialTapTargetSize.shrinkWrap,
                                       ),
                                       onPressed:
-                                          widget.sending ? null : widget.onSend,
+                                          widget.sending ? null : _triggerSend,
                                       icon: widget.sending
                                           ? SizedBox(
                                               width: 13,

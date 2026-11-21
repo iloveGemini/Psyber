@@ -84,6 +84,8 @@ class AppController {
       ValueNotifier<bool>(false);
   final ValueNotifier<DoorStatus> doorNotifier =
       ValueNotifier<DoorStatus>(DoorStatus.initial);
+  final ValueNotifier<UserStatus> userStatusNotifier =
+      ValueNotifier<UserStatus>(UserStatus.initial);
   final ValueNotifier<List<TimelineItem>> timelineNotifier =
       ValueNotifier<List<TimelineItem>>(const <TimelineItem>[]);
   final ValueNotifier<ActiveTurnState?> activeTurnNotifier =
@@ -269,6 +271,7 @@ class AppController {
     showReconnectingHintNotifier.value = false;
     timelineNotifier.value = const <TimelineItem>[];
     doorNotifier.value = DoorStatus.initial;
+    userStatusNotifier.value = UserStatus.initial;
     activeTurnNotifier.value = null;
     turnErrorNotifier.value = null;
     turnFailureNotifier.value = null;
@@ -343,9 +346,11 @@ class AppController {
     final results = await Future.wait<Object>([
       _api.getDoor(profile),
       _api.getHistory(profile, limit: 50),
+      _api.getUserStatus(profile).catchError((_) => userStatusNotifier.value),
     ]);
     if (_disposed) return;
     doorNotifier.value = results[0] as DoorStatus;
+    userStatusNotifier.value = results[2] as UserStatus;
     final page = results[1] as HistoryPage;
     if (page.contextUsage != null) {
       contextUsageNotifier.value = page.contextUsage;
@@ -444,6 +449,7 @@ class AppController {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    bool urgent = false,
   }) async {
     final profile = profileNotifier.value;
     final text = rawText.trim();
@@ -466,6 +472,7 @@ class AppController {
       attachments: attachments,
       stickerId: hasSticker ? stickerId.trim() : null,
       videoClip: videoClip,
+      urgent: urgent,
     );
     if (_disposed) return res;
     _upsertTimelineItem(res.message);
@@ -543,6 +550,46 @@ class AppController {
     timelineNotifier.value = List<TimelineItem>.unmodifiable(
       timelineNotifier.value.where((e) => e.id != messageId),
     );
+  }
+
+  Future<void> retractMessage(String messageId) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    final updated = await _api.retractMessage(profile, messageId);
+    if (_disposed) return;
+    if (updated.id.isNotEmpty) {
+      _upsertTimelineItem(updated);
+    }
+  }
+
+  Future<void> openShare(String shareId) async {
+    final profile = profileNotifier.value;
+    if (profile == null || shareId.isEmpty) return;
+    try {
+      final openedAt = await _api.openShare(profile, shareId);
+      if (_disposed || openedAt == null) return;
+      _markShareOpenedLocal(shareId, openedAt);
+    } catch (_) {
+      // 拆阅回执网络失败静默降级，不打断阅读
+    }
+  }
+
+  Future<void> updateUserStatus({
+    String? moodText,
+    bool clearMood = false,
+    bool? undisturbed,
+  }) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    final next = await _api.updateUserStatus(
+      profile,
+      moodText: moodText,
+      clearMood: clearMood,
+      undisturbed: undisturbed,
+    );
+    if (!_disposed) {
+      userStatusNotifier.value = next;
+    }
   }
 
   Future<void> editMessage(String messageId, String newContent) async {
@@ -714,6 +761,16 @@ class AppController {
           farewell: frame.data['farewell'] as String?,
         );
         return;
+      case 'user_status.updated':
+        userStatusNotifier.value = UserStatus.fromJson(frame.data);
+        return;
+      case 'share.opened':
+        final shareId = frame.data['shareId'] as String?;
+        final openedAt = (frame.data['openedAt'] as num?)?.toInt();
+        if (shareId != null && shareId.isNotEmpty && openedAt != null) {
+          _markShareOpenedLocal(shareId, openedAt);
+        }
+        return;
       case 'turn.start':
         final turnId = frame.data['turnId'] as String? ?? '';
         final mode = frame.data['mode'] as String? ?? 'chat';
@@ -840,6 +897,49 @@ class AppController {
     timelineNotifier.value = List<TimelineItem>.unmodifiable(list);
   }
 
+  void _markShareOpenedLocal(String shareId, int openedAt) {
+    var changed = false;
+    final next = timelineNotifier.value.map((item) {
+      if (item.shares.isEmpty) return item;
+      final hasTarget = item.shares.any((s) => s.id == shareId && s.openedAt == null);
+      if (!hasTarget) return item;
+      changed = true;
+      return TimelineItem(
+        id: item.id,
+        seq: item.seq,
+        sessionId: item.sessionId,
+        turnId: item.turnId,
+        clientMessageId: item.clientMessageId,
+        groupId: item.groupId,
+        version: item.version,
+        versionCount: item.versionCount,
+        activity: item.activity,
+        role: item.role,
+        kind: item.kind,
+        content: item.content,
+        thinking: item.thinking,
+        attachments: item.attachments,
+        sticker: item.sticker,
+        expressions: item.expressions,
+        shares: item.shares
+            .map((s) => s.id == shareId ? s.copyWith(openedAt: openedAt) : s)
+            .toList(growable: false),
+        toolSummary: item.toolSummary,
+        model: item.model,
+        videoClip: item.videoClip,
+        recallCount: item.recallCount,
+        aborted: item.aborted,
+        retracted: item.retracted,
+        retractedBy: item.retractedBy,
+        urgent: item.urgent,
+        createdAt: item.createdAt,
+      );
+    }).toList(growable: false);
+    if (changed) {
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(next);
+    }
+  }
+
   void _scheduleReconnect() {
     if (_disposed || _isPaused || profileNotifier.value == null) return;
     connectionNotifier.value = ConnectionPhase.reconnecting;
@@ -882,6 +982,7 @@ class AppController {
     connectionNotifier.dispose();
     showReconnectingHintNotifier.dispose();
     doorNotifier.dispose();
+    userStatusNotifier.dispose();
     timelineNotifier.dispose();
     activeTurnNotifier.dispose();
     expressionNotifier.dispose();

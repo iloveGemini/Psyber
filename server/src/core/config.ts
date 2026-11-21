@@ -113,6 +113,16 @@ export interface LlmConfig {
 /**
  * 单住户实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
+/** 用户主动挂出的双人状态签（心绪短句 + 勿扰开关，绝非系统偷窥猜测） */
+export interface UserStatusConfig {
+  /** 用户主动留下的简短心绪（最多 60 字），默认 null */
+  moodText: string | null;
+  /** 勿扰开关：开启时自动抑制住户非紧急主动 wake 推送，默认 false */
+  undisturbed: boolean;
+  /** 最近一次状态更新时间戳（Unix 毫秒） */
+  updatedAt: number;
+}
+
 export interface PsyberConfig {
   /** 实例唯一 UUID，用于多地址防串连校验与抽屉域分离；首次初始化生成，不可静默重置 */
   instanceId: string;
@@ -127,6 +137,10 @@ export interface PsyberConfig {
     /** 最近一次门状态变更时间戳（Unix 毫秒） */
     updatedAt: number;
   };
+  /** 用户侧双人状态签（心绪短句与勿扰开关） */
+  userStatus?: UserStatusConfig;
+  /** 开启召回评测检视时是否坦诚告知住户（可选透明化开关，默认 false） */
+  recallEvalNoticeResident?: boolean;
   /** 已配对客户端设备列表（仅存 token 哈希） */
   auth: {
     devices: PairedDevice[];
@@ -280,6 +294,18 @@ export async function loadOrCreateConfig(
       ...DEFAULT_NOTIFICATIONS_CONFIG,
       ...(cfg.notifications ?? {}),
     },
+    userStatus: cfg.userStatus
+      ? {
+          moodText:
+            typeof cfg.userStatus.moodText === "string" && cfg.userStatus.moodText.trim()
+              ? cfg.userStatus.moodText.trim().slice(0, 60)
+              : null,
+          undisturbed: cfg.userStatus.undisturbed === true,
+          updatedAt:
+            typeof cfg.userStatus.updatedAt === "number" ? cfg.userStatus.updatedAt : nowMs,
+        }
+      : undefined,
+    recallEvalNoticeResident: Boolean(cfg.recallEvalNoticeResident),
     llm: cfg.llm,
     genesisCompleted: Boolean(cfg.genesisCompleted),
   };

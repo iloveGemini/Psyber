@@ -472,6 +472,82 @@ class WrapUpResult {
 }
 
 @immutable
+class ShareCardItem {
+  const ShareCardItem({
+    required this.id,
+    required this.title,
+    required this.content,
+    this.createdAt = 0,
+    this.openedAt,
+  });
+
+  final String id;
+  final String title;
+  final String content;
+  final int createdAt;
+  final int? openedAt;
+
+  bool get isOpened => openedAt != null;
+
+  ShareCardItem copyWith({int? openedAt}) {
+    return ShareCardItem(
+      id: id,
+      title: title,
+      content: content,
+      createdAt: createdAt,
+      openedAt: openedAt ?? this.openedAt,
+    );
+  }
+
+  factory ShareCardItem.fromJson(Map<String, dynamic> json) {
+    return ShareCardItem(
+      id: json['id'] as String? ?? '',
+      title: json['title'] as String? ?? '分享',
+      content: json['content'] as String? ?? '',
+      createdAt: (json['createdAt'] as num?)?.toInt() ?? 0,
+      openedAt: (json['openedAt'] as num?)?.toInt(),
+    );
+  }
+}
+
+@immutable
+class UserStatus {
+  const UserStatus({
+    this.moodText,
+    this.undisturbed = false,
+    this.updatedAt = 0,
+  });
+
+  static const UserStatus initial = UserStatus();
+
+  final String? moodText;
+  final bool undisturbed;
+  final int updatedAt;
+
+  UserStatus copyWith({
+    String? moodText,
+    bool clearMood = false,
+    bool? undisturbed,
+    int? updatedAt,
+  }) {
+    return UserStatus(
+      moodText: clearMood ? null : (moodText ?? this.moodText),
+      undisturbed: undisturbed ?? this.undisturbed,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  factory UserStatus.fromJson(Map<String, dynamic> json) {
+    final rawMood = json['moodText'] as String?;
+    return UserStatus(
+      moodText: rawMood != null && rawMood.trim().isNotEmpty ? rawMood.trim() : null,
+      undisturbed: json['undisturbed'] == true,
+      updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+@immutable
 class TimelineItem {
   const TimelineItem({
     required this.id,
@@ -491,11 +567,15 @@ class TimelineItem {
     this.attachments = const <String>[],
     this.sticker,
     this.expressions = const <ExpressionPayload>[],
+    this.shares = const <ShareCardItem>[],
     this.toolSummary = const <ToolSummaryItem>[],
     this.model,
     this.videoClip,
     this.recallCount,
     this.aborted = false,
+    this.retracted = false,
+    this.retractedBy,
+    this.urgent = false,
   });
 
   final String id;
@@ -514,11 +594,15 @@ class TimelineItem {
   final List<String> attachments;
   final StickerView? sticker;
   final List<ExpressionPayload> expressions;
+  final List<ShareCardItem> shares;
   final List<ToolSummaryItem> toolSummary;
   final String? model;
   final VideoClipInfo? videoClip;
   final int? recallCount;
   final bool aborted;
+  final bool retracted;
+  final String? retractedBy;
+  final bool urgent;
   final int createdAt;
 
   bool get isUser => role == 'user';
@@ -526,6 +610,7 @@ class TimelineItem {
   bool get isDoorNote => kind == 'door_note';
   bool get isMemoryTask => kind == 'memory_task';
   bool get isSilence => kind == 'silence';
+  bool get isShareOpened => kind == 'share.opened';
   bool get isSystemNotice =>
       role == 'system' ||
       kind == 'door.updated' ||
@@ -566,9 +651,21 @@ class TimelineItem {
         }
       }
     }
+    final rawShares = json['shares'] ?? metaMap['shares'];
+    final shares = <ShareCardItem>[];
+    if (rawShares is List<dynamic>) {
+      for (final item in rawShares) {
+        if (item is Map<String, dynamic>) {
+          shares.add(ShareCardItem.fromJson(item));
+        }
+      }
+    }
     final rawRecall = json['recallCount'] ?? metaMap['recallCount'];
     final rawModel = json['model'] ?? metaMap['model'];
     final rawVideoClip = json['videoClip'] ?? metaMap['videoClip'];
+    final retracted = json['retracted'] == true || json['status'] == 'retracted';
+    final retractedBy = (json['retractedBy'] ?? metaMap['retractedBy']) as String?;
+    final urgent = json['urgent'] == true || metaMap['urgent'] == true;
     return TimelineItem(
       id: json['id'] as String? ?? '',
       seq: (json['seq'] as num?)?.toInt() ?? 0,
@@ -581,20 +678,28 @@ class TimelineItem {
       activity: json['activity'] as String?,
       role: json['role'] as String? ?? 'system',
       kind: json['kind'] as String? ?? 'chat',
-      content: json['content'] as String? ?? '',
-      thinking: json['thinking'] as String?,
-      attachments: attachments,
-      sticker: rawSticker is Map<String, dynamic>
-          ? StickerView.fromJson(rawSticker)
-          : null,
-      expressions: expressions,
-      toolSummary: toolSummary,
+      content: retracted ? '' : (json['content'] as String? ?? ''),
+      thinking: retracted ? null : (json['thinking'] as String?),
+      attachments: retracted ? const <String>[] : attachments,
+      sticker: retracted
+          ? null
+          : (rawSticker is Map<String, dynamic>
+              ? StickerView.fromJson(rawSticker)
+              : null),
+      expressions: retracted ? const <ExpressionPayload>[] : expressions,
+      shares: retracted ? const <ShareCardItem>[] : shares,
+      toolSummary: retracted ? const <ToolSummaryItem>[] : toolSummary,
       model: rawModel is String && rawModel.isNotEmpty ? rawModel : null,
-      videoClip: rawVideoClip is Map<String, dynamic>
-          ? VideoClipInfo.fromJson(rawVideoClip)
-          : null,
+      videoClip: retracted
+          ? null
+          : (rawVideoClip is Map<String, dynamic>
+              ? VideoClipInfo.fromJson(rawVideoClip)
+              : null),
       recallCount: rawRecall is num ? rawRecall.toInt() : null,
       aborted: json['aborted'] == true || metaMap['aborted'] == true,
+      retracted: retracted,
+      retractedBy: retractedBy,
+      urgent: urgent,
       createdAt: (json['createdAt'] as num?)?.toInt() ?? 0,
     );
   }
@@ -813,6 +918,7 @@ class SettingsSnapshot {
     this.webhookEnabled = false,
     this.webhookUrl = '',
     this.devices = const <PairedDeviceView>[],
+    this.recallEvalNoticeResident = false,
   });
 
   final String timezone;
@@ -824,6 +930,7 @@ class SettingsSnapshot {
   final bool webhookEnabled;
   final String webhookUrl;
   final List<PairedDeviceView> devices;
+  final bool recallEvalNoticeResident;
 
   factory SettingsSnapshot.fromJson(Map<String, dynamic> json) {
     final llm = json['llm'] is Map<String, dynamic>
@@ -891,6 +998,7 @@ class SettingsSnapshot {
       webhookEnabled: webhookMap['enabled'] == true,
       webhookUrl: webhookMap['url'] as String? ?? '',
       devices: devices,
+      recallEvalNoticeResident: json['recallEvalNoticeResident'] == true,
     );
   }
 }

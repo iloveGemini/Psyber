@@ -9,8 +9,9 @@ export type EventKind =
   | "wake"
   | "memory_task"
   | "activity_event"
-  | "door.updated";
-export type EventStatus = "active" | "candidate" | "discarded" | "deleted";
+  | "door.updated"
+  | "share.opened";
+export type EventStatus = "active" | "candidate" | "discarded" | "deleted" | "retracted";
 
 export interface StoredEvent {
   id: string;
@@ -208,7 +209,7 @@ export class EventStore {
         ? this.db
             .query(
               `SELECT * FROM events
-               WHERE status = 'active' AND seq < ?
+               WHERE status IN ('active', 'retracted') AND seq < ?
                ORDER BY seq DESC
                LIMIT ?`,
             )
@@ -216,7 +217,7 @@ export class EventStore {
         : this.db
             .query(
               `SELECT * FROM events
-               WHERE status = 'active'
+               WHERE status IN ('active', 'retracted')
                ORDER BY seq DESC
                LIMIT ?`,
             )
@@ -245,13 +246,83 @@ export class EventStore {
         seq: number;
         status: EventStatus;
       } | null;
-      if (!row || row.status !== "active") {
+      if (!row || (row.status !== "active" && row.status !== "retracted")) {
         return { deleted: false, eventSeq: null };
       }
       this.db.query("UPDATE events SET status = 'deleted' WHERE id = ?").run(id);
       return { deleted: true, eventSeq: row.seq };
     });
     return tx();
+  }
+
+  /**
+   * 双向社交撤回（Spec 04 §4）：只允许撤回自己的活跃消息，标记 status = 'retracted'，
+   * 保留原文在数据库列中以实现不对称可见性（用户撤回对住户隐藏，住户撤回仅对前端隐藏）。
+   */
+  retract(
+    id: string,
+    by: "user" | "resident",
+  ): { ok: true; event: StoredEvent } | { ok: false; code: string; error: string } {
+    const tx = this.db.transaction(() => {
+      const row = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow | null;
+      if (!row) {
+        return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (row.status === "retracted") {
+        return { ok: false as const, code: "ALREADY_RETRACTED", error: "这条消息已经撤回过了" };
+      }
+      if (row.status !== "active") {
+        return { ok: false as const, code: "NOT_RETRACTABLE", error: "只能撤回当前活跃的消息" };
+      }
+      if (by === "user" && (row.role !== "user" || (row.kind !== "chat" && row.kind !== "door_note"))) {
+        return { ok: false as const, code: "FORBIDDEN_RETRACT", error: "只能撤回自己发送的消息" };
+      }
+      if (by === "resident" && (row.role !== "assistant" || (row.kind !== "chat" && row.kind !== "wake"))) {
+        return { ok: false as const, code: "FORBIDDEN_RETRACT", error: "只能撤回自己说过的话" };
+      }
+
+      const meta: Record<string, unknown> = row.metadata
+        ? (JSON.parse(row.metadata) as Record<string, unknown>)
+        : {};
+      meta.retractedBy = by;
+      meta.retractedAt = this.clock.now();
+      this.db
+        .query("UPDATE events SET status = 'retracted', metadata = ? WHERE id = ?")
+        .run(JSON.stringify(meta), id);
+      const updated = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow;
+      return { ok: true as const, event: mapRow(updated) };
+    });
+    return tx();
+  }
+
+  /**
+   * 按精准原文子串查找住户可撤回的活跃消息（防止模型幻觉乱撤）：
+   * 必须匹配且仅匹配 1 条；0 条或多条均拒绝撤回。
+   */
+  findRetractableAssistantMessage(
+    sessionId: string,
+    quote: string,
+  ): { event?: StoredEvent; error?: string } {
+    const needle = quote.trim();
+    if (!needle) {
+      return { error: "请精准引用要撤回的那句话中的一段原文，不能留空。" };
+    }
+    const rows = this.db
+      .query(
+        `SELECT * FROM events
+         WHERE session_id = ? AND role = 'assistant' AND status = 'active'
+           AND kind IN ('chat', 'wake')
+         ORDER BY seq ASC`,
+      )
+      .all(sessionId) as EventRow[];
+    const matches = rows.filter((r) => r.content.includes(needle));
+    if (matches.length === 0) {
+      return { error: `我说过的话里没找到「${needle}」（已经撤回的不算）。` };
+    }
+    if (matches.length > 1) {
+      return { error: `「${needle}」匹配到了 ${matches.length} 条回复，请多引用几个字精确定位。` };
+    }
+    return { event: mapRow(matches[0]) };
   }
 
   getCursor(taskKey: string): string | null {
@@ -321,12 +392,12 @@ export class EventStore {
     };
   }
 
-  /** 查询指定会话最近 N 条活跃对话消息（按 seq ASC 返回，用于换段保留最近 6 轮过渡） */
+  /** 查询指定会话最近 N 条活跃或已撤回对话消息（按 seq ASC 返回，用于换段保留最近 6 轮过渡） */
   listRecentSessionMessages(sessionId: string, limit = 12): StoredEvent[] {
     const rows = this.db
       .query(
         `SELECT * FROM events
-         WHERE session_id = ? AND status = 'active'
+         WHERE session_id = ? AND status IN ('active', 'retracted')
            AND role IN ('user', 'assistant')
            AND kind IN ('chat', 'door_note', 'wake')
          ORDER BY seq DESC
@@ -442,5 +513,135 @@ export class EventStore {
       )
       .get(cursor) as { created_at: number } | null;
     return row ? row.created_at : null;
+  }
+
+  /**
+   * 标记住户主动分享卡首次被用户点开拆阅（幂等保留首次 openedAt，并写入 share.opened 系统事件）。
+   */
+  openShare(
+    shareId: string,
+  ):
+    | { ok: true; shareId: string; title: string; openedAt: number; firstOpen: boolean }
+    | { ok: false; error: string } {
+    const tx = this.db.transaction(() => {
+      const rows = this.db
+        .query(
+          `SELECT * FROM events
+           WHERE role = 'assistant' AND status = 'active'
+             AND metadata IS NOT NULL AND metadata LIKE '%"shares"%'
+           ORDER BY seq DESC
+           LIMIT 200`,
+        )
+        .all() as EventRow[];
+
+      for (const row of rows) {
+        if (!row.metadata) continue;
+        let meta: Record<string, unknown>;
+        try {
+          meta = JSON.parse(row.metadata) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (!Array.isArray(meta.shares)) continue;
+        const shares = meta.shares as Array<{
+          id?: string;
+          title?: string;
+          content?: string;
+          createdAt?: number;
+          openedAt?: number;
+        }>;
+        const target = shares.find((s) => s && s.id === shareId);
+        if (!target) continue;
+
+        const title = typeof target.title === "string" ? target.title : "分享";
+        if (typeof target.openedAt === "number") {
+          return {
+            ok: true as const,
+            shareId,
+            title,
+            openedAt: target.openedAt,
+            firstOpen: false,
+          };
+        }
+
+        const nowMs = this.clock.now();
+        target.openedAt = nowMs;
+        this.db
+          .query("UPDATE events SET metadata = ? WHERE id = ?")
+          .run(JSON.stringify(meta), row.id);
+
+        return {
+          ok: true as const,
+          shareId,
+          title,
+          openedAt: nowMs,
+          firstOpen: true,
+        };
+      }
+
+      return { ok: false as const, error: "找不到对应的分享卡片" };
+    });
+
+    const result = tx();
+    if (result.ok && result.firstOpen) {
+      this.append({
+        sessionId: "system",
+        role: "system",
+        kind: "share.opened",
+        content: `对方点开看了你分享的《${result.title}》`,
+        metadata: {
+          shareId: result.shareId,
+          title: result.title,
+          openedAt: result.openedAt,
+        },
+      });
+    }
+    return result;
+  }
+
+  /** 列举近期住户递出的分享卡及拆阅状态（供 <runtime_context> 客观回执给住户） */
+  listRecentShares(
+    sinceMs: number,
+    limit = 5,
+  ): Array<{ id: string; title: string; createdAt: number; openedAt?: number }> {
+    const rows = this.db
+      .query(
+        `SELECT metadata, created_at FROM events
+         WHERE role = 'assistant' AND status = 'active'
+           AND created_at >= ?
+           AND metadata IS NOT NULL AND metadata LIKE '%"shares"%'
+         ORDER BY seq DESC
+         LIMIT 50`,
+      )
+      .all(sinceMs) as Array<{ metadata: string | null; created_at: number }>;
+
+    const items: Array<{ id: string; title: string; createdAt: number; openedAt?: number }> = [];
+    for (const row of rows) {
+      if (!row.metadata) continue;
+      try {
+        const meta = JSON.parse(row.metadata) as Record<string, unknown>;
+        if (!Array.isArray(meta.shares)) continue;
+        for (const s of meta.shares) {
+          if (!s || typeof s !== "object") continue;
+          const item = s as {
+            id?: unknown;
+            title?: unknown;
+            createdAt?: unknown;
+            openedAt?: unknown;
+          };
+          if (typeof item.id !== "string" || typeof item.title !== "string") continue;
+          items.push({
+            id: item.id,
+            title: item.title,
+            createdAt: typeof item.createdAt === "number" ? item.createdAt : row.created_at,
+            ...(typeof item.openedAt === "number" ? { openedAt: item.openedAt } : {}),
+          });
+          if (items.length >= limit) return items;
+        }
+      } catch {
+        // 忽略损坏 JSON
+      }
+    }
+    return items;
   }
 }

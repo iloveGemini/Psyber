@@ -138,9 +138,27 @@ abstract class PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    bool urgent = false,
   });
 
   Future<void> deleteMessage(ConnectionProfile profile, String messageId);
+
+  /// Ring 1.5：双向社交撤回（用户撤回自己的消息，住户仅见占位不知原文）。
+  Future<TimelineItem> retractMessage(ConnectionProfile profile, String messageId);
+
+  /// Ring 1.5：首次点开住户分享卡上报拆阅回执。
+  Future<int?> openShare(ConnectionProfile profile, String shareId);
+
+  /// Ring 1.5：读取用户双人状态签（心绪短句 + 勿扰开关）。
+  Future<UserStatus> getUserStatus(ConnectionProfile profile);
+
+  /// Ring 1.5：更新用户双人状态签。
+  Future<UserStatus> updateUserStatus(
+    ConnectionProfile profile, {
+    String? moodText,
+    bool clearMood = false,
+    bool? undisturbed,
+  });
 
   /// Ring 1.5：失败轮次原地无痕重试（不重复插入用户消息）。
   Future<String?> retryTurn(ConnectionProfile profile, String turnId);
@@ -595,6 +613,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    bool urgent = false,
   }) async {
     final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages');
     final payload = <String, dynamic>{
@@ -609,6 +628,9 @@ class HttpPsyberApiClient implements PsyberApiClient {
     }
     if (videoClip != null) {
       payload['videoClip'] = videoClip.toJson();
+    }
+    if (urgent) {
+      payload['urgent'] = true;
     }
     final json = await _requestJson(
       method: 'POST',
@@ -629,6 +651,81 @@ class HttpPsyberApiClient implements PsyberApiClient {
       uri: uri,
       bearerToken: profile.token,
     );
+  }
+
+  @override
+  Future<TimelineItem> retractMessage(
+    ConnectionProfile profile,
+    String messageId,
+  ) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages/$messageId/retract',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return TimelineItem.fromJson(
+      (json['message'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+    );
+  }
+
+  @override
+  Future<int?> openShare(ConnectionProfile profile, String shareId) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/shares/$shareId/open',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return (json['openedAt'] as num?)?.toInt();
+  }
+
+  @override
+  Future<UserStatus> getUserStatus(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/user-status');
+    try {
+      final json = await _requestJson(
+        method: 'GET',
+        uri: uri,
+        bearerToken: profile.token,
+      );
+      return UserStatus.fromJson(json);
+    } on ApiException catch (e) {
+      if (e.isEndpointUnavailable) return UserStatus.initial;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<UserStatus> updateUserStatus(
+    ConnectionProfile profile, {
+    String? moodText,
+    bool clearMood = false,
+    bool? undisturbed,
+  }) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/user-status');
+    final payload = <String, dynamic>{};
+    if (clearMood) {
+      payload['moodText'] = null;
+    } else if (moodText != null) {
+      payload['moodText'] = moodText;
+    }
+    if (undisturbed != null) {
+      payload['undisturbed'] = undisturbed;
+    }
+    final json = await _requestJson(
+      method: 'PATCH',
+      uri: uri,
+      bearerToken: profile.token,
+      body: payload,
+    );
+    return UserStatus.fromJson(json);
   }
 
   @override

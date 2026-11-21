@@ -1,6 +1,7 @@
 import type { DoorState } from "../core/config.ts";
 import type { ExpressionPayload } from "../expression/express.ts";
 import type { ToolResult } from "../memory/tools.ts";
+import type { StoredEvent } from "../store/events.ts";
 
 export type { ExpressionPayload };
 
@@ -14,6 +15,14 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>;
 }
 
+export interface ShareCardRecord {
+  id: string;
+  title: string;
+  content: string;
+  createdAt: number;
+  openedAt?: number;
+}
+
 export interface ToolExecutionContext {
   turnId: string;
   sessionId: string;
@@ -21,8 +30,10 @@ export interface ToolExecutionContext {
   touchedMemoryPaths: Set<string>;
   expressionCount: number;
   expressions: ExpressionPayload[];
+  shares?: ShareCardRecord[];
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
+  onMessageRetracted?: (event: StoredEvent) => void;
 }
 
 export interface RegisteredTool {

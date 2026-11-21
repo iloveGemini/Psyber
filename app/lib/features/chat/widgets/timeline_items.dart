@@ -11,6 +11,7 @@ import '../../../expression/expression_renderer.dart';
 import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
 import 'recall_feedback_bar.dart';
+import 'share_card.dart';
 import 'turn_journal_card.dart';
 import 'video_tile.dart';
 
@@ -173,6 +174,30 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
 /// - 居中窄阅读列（maxWidth 680px），桌面端气泡不再横跨全屏；
 /// - 移除气泡右下角常驻垃圾桶图标，操作（复制/删除/Ring 1.5 编辑/重摇）收拢至悬停微浮栏与长按菜单；
 /// - 预留 Ring 1.5 版本组切换器（< 1 / 2 >）与图片灯箱放大。
+/// 双向社交撤回居中占位行（隐藏原文与思考，仅留「有过一条，收回了」）。
+class RetractedMessageRow extends StatelessWidget {
+  const RetractedMessageRow({super.key, required this.item});
+
+  final TimelineItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final isUser = item.retractedBy == 'user' || (item.retractedBy == null && item.isUser);
+    final label = isUser ? '你撤回了一条消息' : '对方撤回了一条消息';
+    return Padding(
+      key: Key('retracted_msg_${item.id}'),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Text(
+          label,
+          style: TextStyle(fontSize: 11.5, color: colors.inkFaint),
+        ),
+      ),
+    );
+  }
+}
+
 class MessageBubbleRow extends StatefulWidget {
   const MessageBubbleRow({
     super.key,
@@ -195,6 +220,28 @@ class MessageBubbleRow extends StatefulWidget {
 
 class _MessageBubbleRowState extends State<MessageBubbleRow> {
   bool _hovered = false;
+  bool _armingDelete = false;
+  Timer? _deleteArmTimer;
+
+  @override
+  void dispose() {
+    _deleteArmTimer?.cancel();
+    super.dispose();
+  }
+
+  void _onDeleteTap() {
+    if (!_armingDelete) {
+      _deleteArmTimer?.cancel();
+      setState(() => _armingDelete = true);
+      _deleteArmTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _armingDelete = false);
+      });
+      return;
+    }
+    _deleteArmTimer?.cancel();
+    setState(() => _armingDelete = false);
+    unawaited(_handleDelete());
+  }
 
   void _openLightbox(BuildContext context, ConnectionProfile profile, String url) {
     unawaited(
@@ -296,6 +343,16 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     }
   }
 
+  Future<void> _handleRetract() async {
+    try {
+      await widget.controller.retractMessage(widget.item.id);
+    } on ApiException catch (e) {
+      widget.controller.turnErrorNotifier.value = e.message;
+    } catch (_) {
+      widget.controller.turnErrorNotifier.value = '撤回消息失败，请稍后重试';
+    }
+  }
+
   void _openContextActions() {
     final item = widget.item;
     final canEdit = widget.isLatestUserMessage &&
@@ -304,6 +361,10 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         item.kind == 'chat' &&
         !widget.doorState.isDoorNoteMode &&
         !widget.doorState.isReadOnly;
+    final canRetract = item.isUser &&
+        !item.retracted &&
+        !widget.doorState.isReadOnly &&
+        widget.controller.activeTurnNotifier.value == null;
 
     unawaited(
       showModalBottomSheet<void>(
@@ -345,6 +406,16 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     unawaited(_handleReroll());
                   },
                 ),
+              if (canRetract)
+                ListTile(
+                  key: Key('retract_msg_${item.id}'),
+                  leading: const Icon(PhosphorIconsLight.arrowUDownLeft, size: 19),
+                  title: const Text('撤回这条消息（对方看不到内容）'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    unawaited(_handleRetract());
+                  },
+                ),
               if (!widget.doorState.isReadOnly)
                 ListTile(
                   key: Key('delete_msg_${item.id}'),
@@ -354,7 +425,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     color: PsyberTheme.dangerInk,
                   ),
                   title: const Text(
-                    '删除这条消息',
+                    '静默删除（修对话，不告知对方）',
                     style: TextStyle(color: PsyberTheme.dangerInk),
                   ),
                   onTap: () {
@@ -442,6 +513,17 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                   style: PsyberTheme.editorialSerif.copyWith(
                                     fontSize: 11.5,
                                     color: colors.thresholdAmber,
+                                  ),
+                                ),
+                              ),
+                            if (item.urgent && isUser)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 5),
+                                child: Text(
+                                  '紧急直达',
+                                  style: PsyberTheme.editorialSerif.copyWith(
+                                    fontSize: 11,
+                                    color: colors.dangerInk,
                                   ),
                                 ),
                               ),
@@ -562,6 +644,11 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                         color: colors.inkDeep,
                                       ),
                               ),
+                            for (final share in item.shares)
+                              ShareCard(
+                                share: share,
+                                onOpen: widget.controller.openShare,
+                              ),
                             if (item.aborted)
                               const Padding(
                                 padding: EdgeInsets.only(top: 4),
@@ -641,22 +728,80 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
   }
 
   Widget _buildHoverActionPill({required bool isLeft}) {
+    final colors = context.colors;
+    final item = widget.item;
+    final canRetract = item.isUser &&
+        !item.retracted &&
+        !widget.doorState.isReadOnly &&
+        widget.controller.activeTurnNotifier.value == null;
+    final canDelete = !widget.doorState.isReadOnly;
+    final visible = _hovered || _armingDelete;
+
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 120),
-      opacity: _hovered ? 1.0 : 0.0,
+      opacity: visible ? 1.0 : 0.0,
       child: Padding(
         padding: EdgeInsets.only(
           left: isLeft ? 0 : 4,
           right: isLeft ? 4 : 0,
           bottom: 2,
         ),
-        child: IconButton(
-          key: Key('msg_more_${widget.item.id}'),
-          icon: const Icon(PhosphorIconsLight.dotsThree, size: 17, color: PsyberTheme.inkQuiet),
-          tooltip: '消息操作',
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          onPressed: _openContextActions,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canRetract)
+              IconButton(
+                key: Key('hover_retract_${item.id}'),
+                icon: Icon(
+                  PhosphorIconsLight.arrowUDownLeft,
+                  size: 15,
+                  color: colors.inkQuiet,
+                ),
+                tooltip: '撤回这一条（对方看不到内容）',
+                padding: const EdgeInsets.all(4),
+                constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                onPressed: () => unawaited(_handleRetract()),
+              ),
+            if (canDelete)
+              InkWell(
+                key: Key('hover_delete_${item.id}'),
+                borderRadius: BorderRadius.circular(6),
+                onTap: _onDeleteTap,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_armingDelete)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 3),
+                          child: Text(
+                            '再点删除',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.dangerInk,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      Icon(
+                        PhosphorIconsLight.trash,
+                        size: 15,
+                        color: _armingDelete ? colors.dangerInk : colors.inkQuiet,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            IconButton(
+              key: Key('msg_more_${item.id}'),
+              icon: Icon(PhosphorIconsLight.dotsThree, size: 17, color: colors.inkQuiet),
+              tooltip: '消息操作',
+              padding: const EdgeInsets.all(4),
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: _openContextActions,
+            ),
+          ],
         ),
       ),
     );

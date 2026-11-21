@@ -69,6 +69,7 @@ interface RawEventRow {
   id: string;
   seq: number;
   turn_id: string | null;
+  status: string;
   role: string;
   kind: string;
   content: string;
@@ -127,6 +128,12 @@ async function executeSingleTidyPass(
     .filter((r) => r.space === "daily" && r.kind === "state" && r.status === "active");
 
   const transcriptLines = opts.batch.map((e) => {
+    if (e.status === "retracted") {
+      if (e.role === "user") {
+        return "对方: （对方撤回了一条消息）";
+      }
+      return `我: ${e.content}（已撤回，对方看不到内容）`;
+    }
     if (e.kind === "door_note") {
       return `[对方从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}`;
     }
@@ -309,9 +316,9 @@ async function executeSingleTidyPass(
 function queryNextPendingBatch(db: Database, cursorId: string): RawEventRow[] {
   const allPending = db
     .query(
-      `SELECT id, seq, turn_id, role, kind, content
+      `SELECT id, seq, turn_id, status, role, kind, content
        FROM events
-       WHERE status = 'active'
+       WHERE status IN ('active', 'retracted')
          AND role IN ('user', 'assistant')
          AND kind IN ('chat', 'wake', 'door_note')
          AND id > ?

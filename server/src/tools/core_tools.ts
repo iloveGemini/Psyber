@@ -1,5 +1,6 @@
 import type { Clock } from "../core/clock.ts";
 import type { DoorState, PsyberConfig } from "../core/config.ts";
+import { ulid } from "../core/ulid.ts";
 import {
   MAX_EXPRESSIONS_PER_TURN,
   normalizeExpressionPayload,
@@ -361,6 +362,87 @@ export function registerCoreTier1Tools(
       const res = await memoryTools.write(p, String(args.content ?? ""));
       if (res.ok) ctx.touchedMemoryPaths.add(p);
       return res;
+    },
+  });
+
+  // Ring 1.5 Tier 3 工具：双向社交撤回（必须精准引用原文防幻觉乱撤）
+  registry.register({
+    name: "retract_message",
+    tier: 3,
+    security: "guarded",
+    description:
+      "撤回我之前发给对方的一条消息。对方那边只会看到「对方撤回了一条消息」而看不到原文，但我自己的记忆里仍会保留原话。必须精准引用要撤回那句中的一段原文。",
+    tags: ["retract", "social", "撤回", "收回"],
+    parameters: {
+      type: "object",
+      properties: {
+        quote: {
+          type: "string",
+          description: "必填：要撤回的那条回复中的一段精准原文子串，用于唯一锁定目标消息",
+        },
+      },
+      required: ["quote"],
+    },
+    guard: async (args) => {
+      const quote = typeof args.quote === "string" ? args.quote.trim() : "";
+      if (!quote) {
+        return { ok: false, reason: "retract_message 必须提供非空原文 quote，不能靠猜撤回。" };
+      }
+      return { ok: true };
+    },
+    execute: async (args, ctx) => {
+      const quote = String(args.quote ?? "").trim();
+      const found = events.findRetractableAssistantMessage(ctx.sessionId, quote);
+      if (!found.event) {
+        return { ok: false, output: found.error ?? "未找到可撤回的消息。" };
+      }
+      const retracted = events.retract(found.event.id, "resident");
+      if (!retracted.ok) {
+        return { ok: false, output: retracted.error };
+      }
+      ctx.onMessageRetracted?.(retracted.event);
+      const preview = found.event.content.trim().replace(/\s+/g, " ");
+      const snippet = preview.length > 40 ? `${preview.slice(0, 40)}…` : preview;
+      return {
+        ok: true,
+        output: `已撤回：「${snippet}」。对方那边现在显示「对方撤回了一条消息」，看不到内容；我自己还记得。`,
+      };
+    },
+  });
+
+  registry.register({
+    name: "share",
+    tier: 3,
+    security: "auto",
+    description:
+      "把一段笔记、随笔或日记折成一张暖黄分享卡递给对方。聊天流默认只显示标题与「点开看」，只有对方真的点开展开后，系统才会回执告知你对方看过了。",
+    tags: ["share", "card", "分享", "随笔", "递给对方"],
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "分享卡标题（简洁明了）" },
+        content: { type: "string", description: "分享正文（支持 Markdown）" },
+      },
+      required: ["title", "content"],
+    },
+    execute: async (args, ctx) => {
+      const title = typeof args.title === "string" ? args.title.trim() : "";
+      const content = typeof args.content === "string" ? args.content.trim() : "";
+      if (!title) return { ok: false, output: "share 缺少标题 title" };
+      if (!content) return { ok: false, output: "share 缺少正文 content" };
+      const nowMs = clock.now();
+      const shareItem = {
+        id: ulid(nowMs),
+        title: title.slice(0, 80),
+        content,
+        createdAt: nowMs,
+      };
+      ctx.shares ??= [];
+      ctx.shares.push(shareItem);
+      return {
+        ok: true,
+        output: `已把《${shareItem.title}》折成分享卡递给对方（默认只显示标题，对方点开看后你会收到回执）。`,
+      };
     },
   });
 }

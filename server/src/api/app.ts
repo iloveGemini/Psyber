@@ -22,6 +22,24 @@ export function hashBearerToken(token: string): string {
 
 function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const meta = ev.metadata ?? {};
+  if (ev.status === "retracted") {
+    const retractedBy =
+      meta.retractedBy === "user" || meta.retractedBy === "resident"
+        ? meta.retractedBy
+        : ev.role === "user"
+          ? "user"
+          : "resident";
+    return {
+      ...ev,
+      content: "",
+      thinking: null,
+      metadata: { retractedBy, retractedAt: meta.retractedAt ?? ev.createdAt },
+      versionCount: 1,
+      retracted: true,
+      retractedBy,
+    };
+  }
+
   const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : null;
   const stickerRec = stickerId ? events.getSticker(stickerId) : null;
   const recallCount = typeof meta.recallCount === "number" ? meta.recallCount : undefined;
@@ -30,6 +48,8 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const usage = meta.usage && typeof meta.usage === "object" ? meta.usage : undefined;
   const videoClip =
     meta.videoClip && typeof meta.videoClip === "object" ? meta.videoClip : undefined;
+  const urgent = meta.urgent === true ? true : undefined;
+  const shares = Array.isArray(meta.shares) ? meta.shares : undefined;
 
   return {
     ...ev,
@@ -39,6 +59,8 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     ...(model !== undefined ? { model } : {}),
     ...(usage !== undefined ? { usage } : {}),
     ...(videoClip !== undefined ? { videoClip } : {}),
+    ...(urgent ? { urgent: true } : {}),
+    ...(shares !== undefined ? { shares } : {}),
     ...(stickerRec
       ? {
           sticker: {
@@ -91,6 +113,7 @@ export function createApp(deps: AppDeps): Hono {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    urgent?: boolean;
     activityHint?: string;
   }) => {
     if (!deps.engine) return;
@@ -105,6 +128,7 @@ export function createApp(deps: AppDeps): Hono {
         stickerId: opts.stickerId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,
+        urgent: opts.urgent,
         activityHint: opts.activityHint,
         turnId: activeTurnId,
         signal: ac.signal,
@@ -118,6 +142,12 @@ export function createApp(deps: AppDeps): Hono {
             deps.sse?.emit("turn.expression", { turnId: activeTurnId, ...payload }),
           onDoorUpdated: (state, note) =>
             deps.sse?.emit("door.updated", { state, note, updatedAt: deps.clock.now() }),
+          onMessageRetracted: (ev) =>
+            deps.sse?.emit("message.updated", {
+              action: "retract",
+              retractedId: ev.id,
+              message: toTimelineItem(ev, deps.events),
+            }),
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
           onTurnSilence: (info) => deps.sse?.emit("turn.silence", info),
           onTurnDone: (info) => {
@@ -204,6 +234,7 @@ export function createApp(deps: AppDeps): Hono {
       attachments?: unknown;
       stickerId?: string;
       videoClip?: unknown;
+      urgent?: boolean;
     };
     try {
       body = await c.req.json();
@@ -226,6 +257,7 @@ export function createApp(deps: AppDeps): Hono {
     const hasAttachments = attachments.length > 0;
     const stickerId = typeof body.stickerId === "string" ? body.stickerId.trim() : "";
     const hasSticker = stickerId.length > 0;
+    const urgentRequested = body.urgent === true;
 
     let videoClip: { durationSec: number; frameHashes: string[] } | undefined;
     if (body.videoClip && typeof body.videoClip === "object" && !Array.isArray(body.videoClip)) {
@@ -250,6 +282,21 @@ export function createApp(deps: AppDeps): Hono {
       );
     }
 
+    const cfg = deps.getConfig();
+    const doorState = cfg.door.state as string;
+    if (doorState === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (doorState === "cooling_off" && urgentRequested) {
+      return c.json(
+        { error: { code: "DOOR_COOLING_OFF", message: "冷静期期间严禁紧急打扰，请先写门缝纸条" } },
+        409,
+      );
+    }
+
     if (hasSticker) {
       const sticker = deps.events.getSticker(stickerId);
       if (!sticker) {
@@ -258,15 +305,17 @@ export function createApp(deps: AppDeps): Hono {
       deps.events.incrementStickerUsage(stickerId);
     }
 
-    const cfg = deps.getConfig();
-    const isClosed = cfg.door.state === "closed";
-    const kind = isClosed ? "door_note" : "chat";
-    const turnId = isClosed ? null : ulid(deps.clock.now());
+    const isUrgentBypass = doorState === "closed" && urgentRequested;
+    const deliverAsDoorNote =
+      (doorState === "closed" && !isUrgentBypass) || doorState === "cooling_off";
+    const kind = deliverAsDoorNote ? "door_note" : "chat";
+    const turnId = deliverAsDoorNote ? null : ulid(deps.clock.now());
 
     const metadata: Record<string, unknown> = {};
     if (hasAttachments) metadata.attachments = attachments;
     if (hasSticker) metadata.stickerId = stickerId;
     if (videoClip) metadata.videoClip = videoClip;
+    if (isUrgentBypass) metadata.urgent = true;
 
     const { event, deduplicated } = deps.events.append({
       sessionId: deps.getActiveSessionId(),
@@ -284,7 +333,7 @@ export function createApp(deps: AppDeps): Hono {
       // 对齐 Spec 04 §2.2：新消息（含门缝纸条）落盘时立即重置连续未回唤醒计数
       deps.onUserMessagePersisted?.();
       deps.sse?.emit("message.created", { message: timelineItem });
-      if (!isClosed && deps.engine && event.turnId) {
+      if (!deliverAsDoorNote && deps.engine && event.turnId) {
         const activityHint = typeof body.activityHint === "string" ? body.activityHint : undefined;
         retryOrigins.set(event.turnId, { userEventId: event.id, activityHint });
         dispatchChatTurn({
@@ -293,6 +342,7 @@ export function createApp(deps: AppDeps): Hono {
           stickerId: hasSticker ? stickerId : undefined,
           attachments: hasAttachments ? attachments : undefined,
           videoClip,
+          urgent: isUrgentBypass || undefined,
           activityHint,
         });
       }
@@ -301,7 +351,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(
       {
         message: timelineItem,
-        deliveredAs: isClosed ? "door_note" : "chat",
+        deliveredAs: deliverAsDoorNote ? "door_note" : "chat",
         turnId: event.turnId,
       },
       202,
@@ -409,12 +459,74 @@ export function createApp(deps: AppDeps): Hono {
     if (!VALID_ULID_OR_ID_RE.test(id)) {
       return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
     }
+    const cfg = deps.getConfig();
+    if ((cfg.door.state as string) === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
     const res = deps.events.softDelete(id);
     if (!res.deleted) {
       return c.json({ error: { code: "NOT_FOUND", message: "消息不存在或已删除" } }, 404);
     }
     deps.sse?.emit("message.updated", { action: "delete", deletedId: id });
     return c.json({ deletedId: id, eventSeq: res.eventSeq });
+  });
+
+  app.post("/api/v1/chat/messages/:id/retract", (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    if ((cfg.door.state as string) === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (activeAborts.size > 0) {
+      return c.json(
+        { error: { code: "TURN_IN_PROGRESS", message: "对方正在回复中，稍后再撤回" } },
+        409,
+      );
+    }
+    const res = deps.events.retract(id, "user");
+    if (!res.ok) {
+      const status = res.code === "NOT_FOUND" ? 404 : 409;
+      return c.json({ error: { code: res.code, message: res.error } }, status);
+    }
+    const timelineItem = toTimelineItem(res.event, deps.events);
+    deps.sse?.emit("message.updated", {
+      action: "retract",
+      retractedId: id,
+      message: timelineItem,
+    });
+    return c.json({ retractedId: id, eventSeq: res.event.seq, message: timelineItem });
+  });
+
+  app.post("/api/v1/shares/:id/open", (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法分享卡 ID" } }, 400);
+    }
+    const res = deps.events.openShare(id);
+    if (!res.ok) {
+      return c.json({ error: { code: "NOT_FOUND", message: res.error } }, 404);
+    }
+    if (res.firstOpen) {
+      deps.sse?.emit("share.opened", {
+        shareId: res.shareId,
+        openedAt: res.openedAt,
+      });
+    }
+    return c.json({
+      ok: true,
+      shareId: res.shareId,
+      openedAt: res.openedAt,
+      firstOpen: res.firstOpen,
+    });
   });
 
   app.post("/api/v1/turns/:turnId/abort", (c) => {

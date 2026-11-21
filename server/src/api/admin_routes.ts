@@ -50,6 +50,12 @@ function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials) {
       slots: cfg.llm?.slots ?? {},
       thinking: cfg.llm?.thinking ?? { enabled: true },
     },
+    userStatus: {
+      moodText: cfg.userStatus?.moodText ?? null,
+      undisturbed: cfg.userStatus?.undisturbed === true,
+      updatedAt: cfg.userStatus?.updatedAt ?? 0,
+    },
+    recallEvalNoticeResident: Boolean(cfg.recallEvalNoticeResident),
     circadian: cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG,
     notifications: cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG,
     recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
@@ -324,6 +330,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       llm?: Partial<LlmConfig>;
       credentials?: Record<string, { apiKey?: string }>;
       revokeDeviceIds?: string[];
+      recallEvalNoticeResident?: boolean;
     };
     try {
       body = await c.req.json();
@@ -347,6 +354,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     const cfg = deps.getConfig();
     if (typeof body.timezone === "string" && body.timezone.trim()) {
       cfg.timezone = body.timezone.trim();
+    }
+    if (typeof body.recallEvalNoticeResident === "boolean") {
+      cfg.recallEvalNoticeResident = body.recallEvalNoticeResident;
     }
     if (body.circadian && typeof body.circadian === "object") {
       cfg.circadian = { ...(cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG), ...body.circadian };
@@ -387,5 +397,57 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
     deps.onSettingsUpdated?.();
     return c.json({ ok: true, settings: sanitizeSettings(cfg, creds) });
+  });
+
+  // Ring 1.5 用户双人状态签（手动心绪短句 + 勿扰开关，勿扰开启时抑制非紧急主动 wake）
+  app.get("/api/v1/user-status", (c) => {
+    const cfg = deps.getConfig();
+    return c.json({
+      moodText: cfg.userStatus?.moodText ?? null,
+      undisturbed: cfg.userStatus?.undisturbed === true,
+      updatedAt: cfg.userStatus?.updatedAt ?? 0,
+    });
+  });
+
+  app.patch("/api/v1/user-status", async (c) => {
+    let body: { moodText?: string | null; undisturbed?: boolean };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    const prev = cfg.userStatus ?? { moodText: null, undisturbed: false, updatedAt: 0 };
+    let moodText = prev.moodText;
+    if (body.moodText !== undefined) {
+      if (body.moodText === null) {
+        moodText = null;
+      } else if (typeof body.moodText === "string") {
+        const trimmed = body.moodText.trim();
+        moodText = trimmed ? trimmed.slice(0, 60) : null;
+      } else {
+        return c.json(
+          { error: { code: "INVALID_USER_STATUS", message: "moodText 须为字符串或 null" } },
+          400,
+        );
+      }
+    }
+    let undisturbed = prev.undisturbed;
+    if (body.undisturbed !== undefined) {
+      if (typeof body.undisturbed !== "boolean") {
+        return c.json(
+          { error: { code: "INVALID_USER_STATUS", message: "undisturbed 须为布尔值" } },
+          400,
+        );
+      }
+      undisturbed = body.undisturbed;
+    }
+    const updatedAt = deps.clock.now();
+    cfg.userStatus = { moodText, undisturbed, updatedAt };
+    if (deps.dataDir) {
+      await saveConfig(deps.dataDir, cfg);
+    }
+    deps.sse?.emit("user_status.updated", { moodText, undisturbed, updatedAt });
+    return c.json({ moodText, undisturbed, updatedAt });
   });
 }

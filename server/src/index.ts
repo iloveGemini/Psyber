@@ -285,6 +285,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
         consecutiveUnansweredWakes,
         unreadDoorNotesCount,
         oldestUnreadDoorNoteMs,
+        userUndisturbed: Boolean(config.userStatus?.undisturbed),
       });
 
       if (decision.action === "sleep_tidy") {
