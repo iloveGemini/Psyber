@@ -44,12 +44,30 @@ const DEFAULT_RETRY_DELAYS_MS = [1000, 3000];
 const STICKER_INJECT_LIMIT = 30;
 const STICKER_INJECT_MAX_CHARS = 500;
 
+export interface ToolProgressEvent {
+  turnId: string;
+  callId: string;
+  name: string;
+  label: string;
+  kind: "general" | "screen";
+  status: "running" | "done" | "error";
+}
+
+export interface ContextUsageSnapshot {
+  usedTokens: number;
+  limitTokens: number;
+  ratio: number;
+}
+
 export interface TurnStreamCallbacks {
   onTurnStart?: (info: { turnId: string; mode: "chat" | "wake" }) => void;
   onThinkingDelta?: (delta: string) => void;
+  onToolProgress?: (info: ToolProgressEvent) => void;
   onTextDelta?: (delta: string) => void;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
+  onModelSwitched?: (info: { turnId: string; model: string; reason?: string }) => void;
+  onTurnSilence?: (info: { turnId: string; ownTime: boolean }) => void;
   onTurnDone?: (info: {
     turnId: string;
     mode: "chat" | "wake";
@@ -58,8 +76,38 @@ export interface TurnStreamCallbacks {
     aborted: boolean;
     silent: boolean;
     rolledOver: boolean;
+    contextUsage?: ContextUsageSnapshot;
   }) => void;
   onTurnError?: (err: { turnId: string; code: LlmErrorCode; message: string; retryable: boolean }) => void;
+}
+
+const CHAT_TOOL_LABELS: Record<string, string> = {
+  glob: "翻了翻记忆目录",
+  grep: "在旧笔记里找线索",
+  read: "翻开看了一篇记忆",
+  write: "提笔写下一张记忆",
+  edit: "修改了记忆片段",
+  door: "调整了门锁状态",
+  tool_search: "翻找了工具箱",
+  call_tool: "取用了扩展工具",
+  look_at_screen: "看了一眼你的屏幕",
+};
+
+const WAKE_TOOL_LABELS: Record<string, string> = {
+  glob: "趁你不在，翻了翻记忆目录",
+  grep: "趁你不在，翻找旧线索",
+  read: "趁你不在，翻看了旧笔记",
+  write: "趁你不在，写了一笔新笔记",
+  edit: "趁你不在，整理修改了笔记",
+  door: "调整了门锁状态",
+  tool_search: "趁你不在，翻了翻工具箱",
+  call_tool: "趁你不在，取用了扩展工具",
+  look_at_screen: "看了一眼你的屏幕",
+};
+
+export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
+  const table = mode === "wake" ? WAKE_TOOL_LABELS : CHAT_TOOL_LABELS;
+  return table[toolName] ?? toolName;
 }
 
 export interface RunTurnResult {
@@ -140,6 +188,8 @@ export class DirectEngine {
   private readonly turnMutex = new AsyncMutex();
   private rolloverGistAnchor: string | null = null;
   private rolloverCarryOver: ChatMessage[] = [];
+  private lastUsedTokens = 0;
+  private lastAssistantModel: string | null = null;
 
   constructor(private readonly deps: DirectEngineDeps) {
     this.sessionId = ulid(deps.clock.now());
@@ -147,6 +197,25 @@ export class DirectEngine {
 
   getActiveSessionId(): string {
     return this.sessionId;
+  }
+
+  getContextUsage(): ContextUsageSnapshot {
+    const limitTokens = Math.max(1, Math.floor(this.deps.chatModel.contextWindow * ROLLOVER_RATIO));
+    const ratio = Math.min(1, Math.max(0, this.lastUsedTokens / limitTokens));
+    return {
+      usedTokens: this.lastUsedTokens,
+      limitTokens,
+      ratio,
+    };
+  }
+
+  /** 手动「存记忆换段」：在互斥锁保护下切新 session_id 并触发后台异步整理 */
+  manualRollover(): Promise<{ oldSessionId: string; newSessionId: string }> {
+    return this.turnMutex.runExclusive(async () => {
+      const oldSessionId = this.sessionId;
+      await this.triggerRollover();
+      return { oldSessionId, newSessionId: this.sessionId };
+    });
   }
 
   /** 构建或复用当前会话的 Static Prefix 快照（盘中修改不回改，保护 Cache Breakpoint #1） */
@@ -264,6 +333,7 @@ export class DirectEngine {
     userText: string;
     stickerId?: string;
     attachments?: string[];
+    videoClip?: { durationSec: number; frameHashes: string[] };
     wakeReason?: string;
     activityHint?: string;
   }): Promise<{ content: ChatUserContent; injectedDoorNoteMaxId: string | null; recallCount: number }> {
@@ -378,9 +448,14 @@ export class DirectEngine {
     }
 
     const displayUserText = this.formatUserTextWithSticker(opts.userText, opts.stickerId);
+    const videoNote = opts.videoClip
+      ? `[附带了一段约 ${Math.max(1, Math.round(opts.videoClip.durationSec))} 秒的短视频，以下是按时间提取的画面帧]`
+      : "";
     const unavailableNote =
       unavailableAttachmentCount > 0 ? `[附带了 ${unavailableAttachmentCount} 张图片，暂无法读取]` : "";
-    const topText = [displayUserText, unavailableNote].filter((s) => s.trim().length > 0).join("\n");
+    const topText = [displayUserText, videoNote, unavailableNote]
+      .filter((s) => s.trim().length > 0)
+      .join("\n");
 
     const runtimeBlock = `<runtime_context>\n${ctxBlocks.join("\n")}\n</runtime_context>`;
     const fullText = topText ? `${topText}\n\n${runtimeBlock}` : runtimeBlock;
@@ -402,6 +477,7 @@ export class DirectEngine {
     this.sessionId = ulid(this.deps.clock.now());
     this.staticPrefixSnapshot = null;
     this.prefixDelta.clear();
+    this.lastUsedTokens = 0;
     this.deps.onRollover?.(oldSessionId, this.sessionId);
   }
 
@@ -414,6 +490,7 @@ export class DirectEngine {
     userEventId?: string;
     stickerId?: string;
     attachments?: string[];
+    videoClip?: { durationSec: number; frameHashes: string[] };
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -429,6 +506,7 @@ export class DirectEngine {
     userEventId?: string;
     stickerId?: string;
     attachments?: string[];
+    videoClip?: { durationSec: number; frameHashes: string[] };
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
@@ -449,6 +527,7 @@ export class DirectEngine {
       userText: opts.userText ?? "",
       stickerId: opts.stickerId,
       attachments: opts.attachments,
+      videoClip: opts.videoClip,
       wakeReason: opts.wakeReason,
       activityHint: opts.activityHint,
     });
@@ -499,11 +578,35 @@ export class DirectEngine {
       ok: boolean;
       output: string;
     }> = [];
+    const toolSummary: Array<{
+      name: string;
+      label: string;
+      ok: boolean;
+      kind: "general" | "screen";
+    }> = [];
+
+    const currentModelId = this.deps.chatModel.modelId;
+    if (
+      opts.mode === "chat" &&
+      currentModelId &&
+      this.lastAssistantModel &&
+      this.lastAssistantModel !== currentModelId
+    ) {
+      opts.callbacks?.onModelSwitched?.({ turnId, model: currentModelId });
+    }
 
     let fullText = "";
     let fullThinking = "";
     let aborted = false;
     let rolledOver = false;
+    let lastUsage: {
+      model?: string;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      estimatedCostUsd?: number;
+    } | undefined;
     let lastError: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
 
     for (let step = 0; step < MAX_TOOL_STEPS; step++) {
@@ -563,6 +666,15 @@ export class DirectEngine {
             producedOutputInAttempt = true;
             stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
           } else if (chunk.type === "usage") {
+            this.lastUsedTokens = chunk.totalTokens;
+            lastUsage = {
+              ...(currentModelId ? { model: currentModelId } : {}),
+              inputTokens: chunk.inputTokens,
+              outputTokens: chunk.outputTokens,
+              ...(chunk.cacheReadTokens !== undefined ? { cacheReadTokens: chunk.cacheReadTokens } : {}),
+              ...(chunk.cacheWriteTokens !== undefined ? { cacheWriteTokens: chunk.cacheWriteTokens } : {}),
+              ...(chunk.estimatedCostUsd !== undefined ? { estimatedCostUsd: chunk.estimatedCostUsd } : {}),
+            };
             if (chunk.totalTokens >= this.deps.chatModel.contextWindow * ROLLOVER_RATIO) {
               rolledOver = true;
             }
@@ -612,6 +724,25 @@ export class DirectEngine {
           if (tc.name === "express" || tc.name === "door") {
             flushWakeStart();
           }
+          const innerName =
+            tc.name === "call_tool" && typeof tc.arguments.name === "string"
+              ? tc.arguments.name.trim()
+              : tc.name;
+          const isEmbodiedOnly = tc.name === "express";
+          const toolKind: "general" | "screen" =
+            innerName === "look_at_screen" ? "screen" : "general";
+          const toolLabel = formatToolActionLabel(innerName, opts.mode);
+          if (!isEmbodiedOnly) {
+            opts.callbacks?.onToolProgress?.({
+              turnId,
+              callId: tc.id,
+              name: innerName,
+              label: toolLabel,
+              kind: toolKind,
+              status: "running",
+            });
+          }
+
           const result = await this.deps.registry.invoke(tc.name, tc.arguments, toolCtx);
           recordedToolCalls.push({
             id: tc.id,
@@ -620,6 +751,22 @@ export class DirectEngine {
             ok: result.ok,
             output: result.output,
           });
+          if (!isEmbodiedOnly) {
+            toolSummary.push({
+              name: innerName,
+              label: toolLabel,
+              ok: result.ok,
+              kind: toolKind,
+            });
+            opts.callbacks?.onToolProgress?.({
+              turnId,
+              callId: tc.id,
+              name: innerName,
+              label: toolLabel,
+              kind: toolKind,
+              status: result.ok ? "done" : "error",
+            });
+          }
           // Spec 01 §2.2：tool_result 绝不重复追加 <runtime_context>
           messages.push({
             role: "toolResult",
@@ -664,6 +811,7 @@ export class DirectEngine {
 
     if (isSilent) {
       if (rolledOver) await this.triggerRollover();
+      opts.callbacks?.onTurnSilence?.({ turnId, ownTime: opts.mode === "wake" });
       return {
         turnId,
         sessionId: this.sessionId,
@@ -685,8 +833,12 @@ export class DirectEngine {
     let persisted: StoredEvent | null = null;
     if (!lastError && (fullText.length > 0 || toolCtx.expressions.length > 0 || aborted)) {
       const metadata: Record<string, unknown> = {};
+      if (opts.userEventId) metadata.inReplyTo = opts.userEventId;
       if (toolCtx.expressions.length > 0) metadata.expressions = toolCtx.expressions;
       if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
+      if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
+      if (currentModelId) metadata.model = currentModelId;
+      if (lastUsage) metadata.usage = lastUsage;
       if (recallCount > 0) metadata.recallCount = recallCount;
       if (aborted) metadata.aborted = true;
       const { event } = this.deps.events.append({
@@ -699,6 +851,9 @@ export class DirectEngine {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
       });
       persisted = event;
+      if (currentModelId) {
+        this.lastAssistantModel = currentModelId;
+      }
     }
 
     if (rolledOver) {
@@ -714,6 +869,7 @@ export class DirectEngine {
         aborted,
         silent: false,
         rolledOver,
+        contextUsage: this.getContextUsage(),
       });
     }
 

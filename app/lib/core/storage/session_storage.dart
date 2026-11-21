@@ -3,15 +3,18 @@ import 'dart:io';
 
 import '../models/models.dart';
 
-/// 本地会话凭证存储抽象（Ring 1 原子写 + POSIX 0600 权限；Ring 1.5 升级为 flutter_secure_storage）。
+/// 本地会话凭证与输入草稿存储抽象（Ring 1 原子写 + POSIX 0600 权限）。
 abstract class SessionStorage {
   Future<ConnectionProfile?> load();
   Future<void> save(ConnectionProfile profile);
   Future<void> clear();
+  Future<String> loadDraft();
+  Future<void> saveDraft(String draft);
 }
 
 class MemorySessionStorage implements SessionStorage {
   ConnectionProfile? _profile;
+  String _draft = '';
 
   MemorySessionStorage([this._profile]);
 
@@ -26,6 +29,15 @@ class MemorySessionStorage implements SessionStorage {
   @override
   Future<void> clear() async {
     _profile = null;
+    _draft = '';
+  }
+
+  @override
+  Future<String> loadDraft() async => _draft;
+
+  @override
+  Future<void> saveDraft(String draft) async {
+    _draft = draft;
   }
 }
 
@@ -92,8 +104,48 @@ class FileSessionStorage implements SessionStorage {
       if (await _file.exists()) {
         await _file.delete();
       }
+      final draftFile = _draftFile();
+      if (await draftFile.exists()) {
+        await draftFile.delete();
+      }
     } catch (_) {
       // 忽略清理失败
+    }
+  }
+
+  File _draftFile() => File('${_file.parent.path}/client_draft.txt');
+
+  @override
+  Future<String> loadDraft() async {
+    try {
+      final f = _draftFile();
+      if (!await f.exists()) return '';
+      return await f.readAsString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  @override
+  Future<void> saveDraft(String draft) async {
+    try {
+      final f = _draftFile();
+      if (draft.isEmpty) {
+        if (await f.exists()) await f.delete();
+        return;
+      }
+      await f.parent.create(recursive: true);
+      final tmp = File('${f.path}.tmp.${DateTime.now().microsecondsSinceEpoch}');
+      try {
+        await tmp.writeAsString(draft, flush: true);
+        await tmp.rename(f.path);
+      } finally {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      }
+    } catch (_) {
+      // 草稿存储失败静默忽略，不干扰主对话
     }
   }
 }

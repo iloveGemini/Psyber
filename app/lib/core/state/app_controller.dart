@@ -91,6 +91,16 @@ class AppController {
   final ValueNotifier<ExpressionPayload?> expressionNotifier =
       ValueNotifier<ExpressionPayload?>(null);
   final ValueNotifier<String?> turnErrorNotifier = ValueNotifier<String?>(null);
+  final ValueNotifier<TurnFailureState?> turnFailureNotifier =
+      ValueNotifier<TurnFailureState?>(null);
+  final ValueNotifier<TurnSilenceNotice?> turnSilenceNotifier =
+      ValueNotifier<TurnSilenceNotice?>(null);
+  final ValueNotifier<ContextUsageInfo?> contextUsageNotifier =
+      ValueNotifier<ContextUsageInfo?>(null);
+  final ValueNotifier<bool> retryingTurnNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> wrappingUpNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<String?> pendingModelSwitchNotifier =
+      ValueNotifier<String?>(null);
   final ValueNotifier<SettingsSnapshot?> settingsNotifier =
       ValueNotifier<SettingsSnapshot?>(null);
   final ValueNotifier<ActivitySessionView?> activeActivityNotifier =
@@ -119,6 +129,10 @@ class AppController {
   String? _lastStreamSeq;
 
   bool get hasMoreHistory => _hasMoreHistory;
+
+  Future<String> loadDraft() => _storage.loadDraft();
+
+  Future<void> saveDraft(String draft) => _storage.saveDraft(draft);
 
   Future<void> initialize() async {
     final saved = await _storage.load();
@@ -257,6 +271,10 @@ class AppController {
     doorNotifier.value = DoorStatus.initial;
     activeTurnNotifier.value = null;
     turnErrorNotifier.value = null;
+    turnFailureNotifier.value = null;
+    turnSilenceNotifier.value = null;
+    contextUsageNotifier.value = null;
+    pendingModelSwitchNotifier.value = null;
     settingsNotifier.value = null;
     activeActivityNotifier.value = null;
     _hasLoadedOlder = false;
@@ -329,6 +347,9 @@ class AppController {
     if (_disposed) return;
     doorNotifier.value = results[0] as DoorStatus;
     final page = results[1] as HistoryPage;
+    if (page.contextUsage != null) {
+      contextUsageNotifier.value = page.contextUsage;
+    }
     if (_hasLoadedOlder && page.items.isNotEmpty) {
       final latestMinSeq = page.items.first.seq;
       final latestIds = page.items.map((e) => e.id).toSet();
@@ -422,16 +443,21 @@ class AppController {
     String rawText, {
     List<String>? attachments,
     String? stickerId,
+    VideoClipInfo? videoClip,
   }) async {
     final profile = profileNotifier.value;
     final text = rawText.trim();
     final hasAttachments = attachments != null && attachments.isNotEmpty;
     final hasSticker = stickerId != null && stickerId.trim().isNotEmpty;
-    if (profile == null || (text.isEmpty && !hasAttachments && !hasSticker)) {
+    final hasVideo = videoClip != null && videoClip.frameHashes.isNotEmpty;
+    if (profile == null ||
+        (text.isEmpty && !hasAttachments && !hasSticker && !hasVideo)) {
       return null;
     }
 
     turnErrorNotifier.value = null;
+    turnFailureNotifier.value = null;
+    turnSilenceNotifier.value = null;
     final clientMessageId = _generateClientMessageId();
     final res = await _api.sendMessage(
       profile,
@@ -439,6 +465,7 @@ class AppController {
       content: text,
       attachments: attachments,
       stickerId: hasSticker ? stickerId.trim() : null,
+      videoClip: videoClip,
     );
     if (_disposed) return res;
     _upsertTimelineItem(res.message);
@@ -448,6 +475,64 @@ class AppController {
       );
     }
     return res;
+  }
+
+  /// 失败轮次原地无痕重试（不重复插入用户消息）。
+  Future<void> retryFailedTurn() async {
+    final profile = profileNotifier.value;
+    final failure = turnFailureNotifier.value;
+    final turnId = failure?.turnId;
+    if (profile == null || turnId == null || turnId.isEmpty || retryingTurnNotifier.value) {
+      return;
+    }
+    retryingTurnNotifier.value = true;
+    try {
+      await _api.retryTurn(profile, turnId);
+      if (!_disposed) {
+        turnFailureNotifier.value = null;
+        turnErrorNotifier.value = null;
+      }
+    } on ApiException catch (e) {
+      if (!_disposed) {
+        turnFailureNotifier.value = TurnFailureState(
+          turnId: turnId,
+          code: e.code,
+          message: e.message,
+          retryable: e.statusCode >= 500 || e.code == 'RATE_LIMITED',
+        );
+      }
+    } catch (_) {
+      if (!_disposed) {
+        turnErrorNotifier.value = '重试失败，请检查网络连接';
+      }
+    } finally {
+      if (!_disposed) {
+        retryingTurnNotifier.value = false;
+      }
+    }
+  }
+
+  /// 手动触发「存记忆换段」：立即切新 session_id 并将旧对话送去后台异步整理。
+  Future<WrapUpResult?> wrapUpMemorySession() async {
+    final profile = profileNotifier.value;
+    if (profile == null || wrappingUpNotifier.value) return null;
+    wrappingUpNotifier.value = true;
+    try {
+      final res = await _api.wrapUpSession(profile);
+      if (_disposed) return res;
+      final cur = contextUsageNotifier.value;
+      contextUsageNotifier.value = ContextUsageInfo(
+        usedTokens: 0,
+        limitTokens: cur?.limitTokens ?? 150000,
+        ratio: 0.0,
+      );
+      unawaited(refreshSnapshot());
+      return res;
+    } finally {
+      if (!_disposed) {
+        wrappingUpNotifier.value = false;
+      }
+    }
   }
 
   Future<void> deleteMessage(String messageId) async {
@@ -633,6 +718,8 @@ class AppController {
         final turnId = frame.data['turnId'] as String? ?? '';
         final mode = frame.data['mode'] as String? ?? 'chat';
         turnErrorNotifier.value = null;
+        turnFailureNotifier.value = null;
+        turnSilenceNotifier.value = null;
         activeTurnNotifier.value = ActiveTurnState(turnId: turnId, mode: mode);
         return;
       case 'turn.thinking':
@@ -678,11 +765,45 @@ class AppController {
         }
         return;
       case 'turn.error':
-        turnErrorNotifier.value =
+        final errTurnId = frame.data['turnId'] as String?;
+        final errCode = frame.data['code'] as String? ?? 'PROVIDER_ERROR';
+        final errMsg =
             frame.data['message'] as String? ?? '生成遇到了一点问题，请稍后重试';
+        final retryable = frame.data['retryable'] != false;
+        if (errTurnId != null && errTurnId.isNotEmpty) {
+          turnFailureNotifier.value = TurnFailureState(
+            turnId: errTurnId,
+            code: errCode,
+            message: errMsg,
+            retryable: retryable,
+          );
+          turnErrorNotifier.value = null;
+        } else {
+          turnErrorNotifier.value = errMsg;
+        }
         activeTurnNotifier.value = null;
         return;
+      case 'turn.silence':
+        turnSilenceNotifier.value = TurnSilenceNotice(
+          turnId: frame.data['turnId'] as String? ?? 'silence',
+          ownTime: frame.data['ownTime'] == true,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+        );
+        activeTurnNotifier.value = null;
+        return;
+      case 'turn.model_switched':
+        final nextModel = frame.data['model'] as String?;
+        if (nextModel != null && nextModel.isNotEmpty) {
+          pendingModelSwitchNotifier.value = nextModel;
+        }
+        return;
       case 'turn.done':
+        final rawUsage = frame.data['contextUsage'];
+        if (rawUsage is Map<String, dynamic>) {
+          contextUsageNotifier.value = ContextUsageInfo.fromJson(rawUsage);
+        }
+        turnFailureNotifier.value = null;
+        pendingModelSwitchNotifier.value = null;
         activeTurnNotifier.value = null;
         // 补齐最新落盘的助手消息与门状态（确保 recallCount 与持久化 ID 精确一致）
         unawaited(refreshSnapshot());
@@ -765,6 +886,12 @@ class AppController {
     activeTurnNotifier.dispose();
     expressionNotifier.dispose();
     turnErrorNotifier.dispose();
+    turnFailureNotifier.dispose();
+    turnSilenceNotifier.dispose();
+    contextUsageNotifier.dispose();
+    retryingTurnNotifier.dispose();
+    wrappingUpNotifier.dispose();
+    pendingModelSwitchNotifier.dispose();
     settingsNotifier.dispose();
     activeActivityNotifier.dispose();
     recallEvalModeNotifier.dispose();

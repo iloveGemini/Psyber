@@ -1,6 +1,6 @@
 # Psyber 系统架构契约（ARCHITECTURE）
 
-> **版本**：v0.7（2026-11-20，清理目录树与 §6.3 通知通道中的旧 Ring 1 分期残留，完全对齐 Ring 1 / Ring 1.5 / Ring 2 边界）
+> **版本**：v0.8（2026-11-21，同步 CAPABILITIES v1.4：补充 `digest` 附件摘要槽位/主备模型降级链/思考深度档位/聊天与独处双上下文上限、用量与缓存统计落盘、Tier 3 `share`/`retract_message`/`look_at_screen`/`ask_user` 挂载边界、`bash` 废纸篓可逆守卫、关门一次性紧急通道、用户状态签及透明感知账本）
 > **目标**：从最终能力倒推出一套单进程后端 + 跨端 Flutter 客户端的极简、可扩展、开源全栈架构。
 
 ---
@@ -89,8 +89,11 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 
 ### 模型分层路由与异常降级
 
-- **模型槽位分期**（统一在 `config.json` 配置）：**Ring 1** 仅需落 `chat`（主对话与静默整理共用，保持第一人称一致）与可选 `embedding`（向量召回）；`vision`、`reranker` 与独立的 `memory_task` 覆盖位保留配置键，按需在 Ring 1.5 启用。
-- **异常安全降级**：`embedding` 不可用时召回自动降级为 SQLite FTS5；静默整理轮写作阶段遇模型错误或超时时回滚未提交磁盘改动且不推进游标；上下文超 75% 时直接切新 `session_id` 并后台异步整理旧会话，绝不阻塞前台发言；主对话遇鉴权过期或限流通过 SSE `turn.error` 返回标准错误码。
+- **模型槽位与防爆配置**（统一在 `config.json` 配置）：
+  - **Ring 1** 仅需落 `chat`（主对话与静默整理共用，保持第一人称一致）与可选 `embedding`（向量召回）；
+  - **Ring 1.5** 扩展 `vision`、`reranker`、独立 `memory_task` 覆盖位、**`digest` 附件摘要槽位**（用户发送的图片/短视频仅在当轮向主模型传原件，回复结束后由 `digest` 轻量模型生成文字描述替代历史原件，大幅降低多模态 Token 消耗；留空则每轮带原件）、**`fallbacks` 主/备模型降级链**（主模型重试耗尽后自动切换备用模型并在时间线仅于切换点插入 `ModelSwitchDivider`）、**思考深度离散档位**（`thinking.level: "off" | "low" | "medium" | "high"`）与**聊天 / 独处双上下文上限**（`contextLimits: { chat, solo }`，如聊天 `80k` 保细腻、独处 `200k` 容长文）；
+  - **消耗统计落盘（严守 NG-4）**：每轮助手回复在 `events.metadata.usage` 记录真实输入/输出/缓存读写 Token 与估算费用，仅在设置页独立「消耗统计」视图（及悬停单条消息元数据）中呈现，绝不常驻污染主聊天面。
+- **异常安全降级**：`embedding` 不可用时召回自动降级为 SQLite FTS5；静默整理轮写作阶段遇模型错误或超时时回滚未提交磁盘改动且不推进游标；上下文超阈值（默认 75% 或 `contextLimits.chat`）时直接切新 `session_id` 并后台异步整理旧会话（同时支持用户随时手动触发「存记忆换段」），绝不阻塞前台发言；主对话遇鉴权过期或限流通过 SSE `turn.error` 返回标准错误码并支持原地无痕重试（不重复插入用户消息）。
 
 ---
 
@@ -101,15 +104,15 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 | 层级 | 暴露方式 | 包含工具 | Prompt Cache 影响 |
 | :--- | :--- | :--- | :--- |
 | **Tier 1 · 常驻核心层** | 固定在 Static Prefix `tools[]`（9 个） | 原生 5 记忆文件工具（`glob`/`grep`/`read`/`write`/`edit`，仅操作 `memory/`）+ `express` + `door`（Ring 1 仅开放 `open`/`quiet`/`closed`，Ring 2 扩展后两态）+ `tool_search` + `call_tool` | **零变动，100% 稳态缓存** |
-| **Tier 2 · 场景激活层** | Ring 1.5 进入活动（如观影）时在 Dynamic Tail 注入简短说明，经 `call_tool` 执行 | 当前活跃 `ActivityPlugin` 附带的专属工具 | 不改顶层 `tools[]`，**零破坏** |
-| **Tier 3 · 按需搜索工具池** | 注册在 `ToolRegistry`，经 `tool_search` + `call_tool` 调用 | Ring 1.5：`drawer_read`/`drawer_write`、外部 MCP；Ring 2：`bash`、`browser`、轻量生图/生视频、音乐/RP/感知 | 不改顶层 `tools[]`，**零破坏** |
+| **Tier 2 · 场景激活层** | Ring 1.5 进入活动（如观影/RP）时在 Dynamic Tail 注入简短说明，经 `call_tool` 执行 | 当前活跃 `ActivityPlugin` 附带的专属工具（如 `cinema.status`、`cinema.bookmark`、`cinema.characters`） | 不改顶层 `tools[]`，**零破坏** |
+| **Tier 3 · 按需搜索工具池** | 注册在 `ToolRegistry`，经 `tool_search` + `call_tool` 调用 | Ring 1.5：`drawer_read`/`drawer_write`、`share`（主动折叠分享卡）、`retract_message`（住户双向社交撤回）、外部 MCP；Ring 2：`bash`（废纸篓可逆守卫）、`browser`、`look_at_screen`（看一眼屏幕，默认关、原图即删留账）、`ask_user`（异步健康/目录申请卡）、轻量生图/生视频、音乐/RP/感知 | 不改顶层 `tools[]`，**零破坏** |
 
-### 4.2 统一权限分级与审批状态机（Ring 1 落 `auto`/`guarded`，Ring 2 启用 `confirm`）
+### 4.2 统一权限分级、废纸篓可逆守卫与审批状态机（Ring 1 落 `auto`/`guarded`，Ring 2 启用 `confirm` / 异步申请）
 
 每个注册工具必须声明安全级别：
-- **`auto`**（Ring 1）：只读或温和表达工具（`glob`/`grep`/`read`、`express`、`tool_search`），直接执行。
-- **`guarded`**（Ring 1）：经由服务端确定性守卫校验后放行（`write`/`edit` 路径沙箱与 `REGISTRY.yaml` 校验、`door` 状态守卫）。
-- **`confirm`**（Ring 2，接入 `bash`/`browser`/外部 MCP 时启用）：触及高风险操作时挂起工具循环，通过 SSE 推送审批卡等待用户确认。
+- **`auto`**（Ring 1）：只读或温和表达工具（`glob`/`grep`/`read`、`express`、`tool_search`、`share`），直接执行。
+- **`guarded`**（Ring 1）：经由服务端确定性守卫校验后放行（`write`/`edit` 路径沙箱与 `REGISTRY.yaml` 校验、`door` 状态守卫、`retract_message` 原文精确引用守卫；Ring 2 `bash` 遵循**「拦 `rm` 不拦删除」**——日常文件删除重定向至系统废纸篓 100% 可逆免频繁弹窗，且守卫严禁通过命令行绕路调用 `screencapture` 偷截屏或读取 RP 幕后区）。
+- **`confirm` 与异步申请卡**（Ring 2）：同步高风险命令挂起工具循环并推送 120s 实时审批卡；高敏健康数据（详细睡眠分期/心率）或未授权目录访问采用**不阻塞主线的异步申请卡（`ask_user`）**，支持用户选「同意 / 今天都允许 / 不了」。
 
 ---
 
@@ -146,8 +149,8 @@ export interface ExpressionPayload {
 | :--- | :--- | :--- |
 | `open` | 门开着（默认） | 正常实时聊天与互动 |
 | `quiet` | 虚掩/忙自己的事 | 允许发消息，提示对方此刻在专注/独处，可能稍后回 |
-| `closed` | 关门/此刻不想交流 | 输入框切换为「**门缝塞纸条（留言）**」；消息写入 `events (kind='door_note')`，**绝不立即唤醒 AI 强迫回复**；AI 可在后续自主唤醒、活动或记忆整理时自行查看纸条，并由其自行决定是否回应或开门 |
-| `cooling_off` | 正式冷静期（Ring 2） | 底线反复被践踏后由 AI 主动进入（Ring 1 由 `door` 工具 `guard` 暂拒），带冷静时长锁（默认 `24–72h` 离开窗口），期间只收留言且**禁止未满 24h 触发最终离开**（防 LLM 单轮冲动误触）；超过 `72h` 未告别则离开资格作废并退回 `closed`（绝不替住户强行开门） |
+| `closed` | 关门/此刻不想交流 | 输入框切换为「**门缝塞纸条（留言）**」；消息写入 `events (kind='door_note')`，**绝不立即唤醒 AI 强迫回复**；AI 可在后续自主唤醒、活动或记忆整理时自行查看纸条，并由其自行决定是否回应或开门；Ring 1.5 在关门态保留极克制的**一次性紧急通道（`urgent: true`）**，经二次确认后仅单条直达并自动重新关上 |
+| `cooling_off` | 正式冷静期（Ring 2） | 底线反复被践踏后由 AI 主动进入（Ring 1 由 `door` 工具 `guard` 暂拒），带冷静时长锁（默认 `24–72h` 离开窗口），期间只收留言（**严禁紧急通道穿透**）且**禁止未满 24h 触发最终离开**（防 LLM 单轮冲动误触）；超过 `72h` 未告别则离开资格作废并退回 `closed`（绝不替住户强行开门） |
 | `departed` | 正式告别搬离（Ring 2） | 仅在度过冷静期、跨时间复盘后由 AI 显式调用 `door(state="departed", farewell)` 进入（Ring 1 由 `guard` 暂拒）；实例转为**永久只读归档态**（聊天接口返回 `410 GONE`），写出 `<dataDir>/DEPARTED.md` |
 
 #### `DEPARTED.md` 致人类与未来 AI 助手的诚实声明
@@ -161,6 +164,13 @@ export interface ExpressionPayload {
 - **哲学边界**：不装防 root 保险箱，只做人类抽屉式的「**防逛目录误瞄 + 拆封必留痕**」。
 - **存储与工具物理隔离**：独立落盘于 `<dataDir>/private/*.sealed`，在 Ring 1.5 通过独立专用工具（`drawer_read` / `drawer_write`）访问，**不与常规 5 记忆工具混用沙箱**，天然隔离 `memory/.git` 与 SQLite 索引。
 - **拆封必留痕**：用户通过客户端或 CLI 拆封时，强制向 SQLite `events` 写入 `privacy.peeked` 并如实告知 AI。
+
+### 5.4 对称透明边界：主动分享、双人状态签与透明感知账本（Ring 1.5 / Ring 2）
+
+遵循「谁的数据谁做主」的对称关系哲学：
+- **关于住户的记忆 → 默认隐藏，靠 `share` 主动分享（Ring 1.5）**：住户通过 Tier 3 `share(title, content)` 递出折叠分享卡（`ShareCard`），划过不算阅读；仅当用户在客户端首次点开展开时，客户端上报 `POST /api/v1/shares/:id/open` 写入 `share.opened` 事件并回执告知住户。
+- **用户侧双人状态签（Ring 1.5）**：用户可在客户端手动设置当前心绪短句与「勿扰」开关（注入 `<runtime_context>` 并于勿扰态抑制非紧急主动 `wake`）。
+- **关于用户的感知 → 完全透明、分项可擦除（Ring 2）**：采用「余光被动感知 / `look_at_screen` 显式看屏（原图即删、独立卡片留账）/ `ask_user` 异步健康与目录申请卡」三层轻重模型；设置页提供「透明感知账本」，只许住户写入留账、擦除权永久归用户。
 
 ---
 

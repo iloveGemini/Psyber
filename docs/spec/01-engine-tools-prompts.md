@@ -1,7 +1,7 @@
 # Spec 01 · 引擎、模型路由、三层工具与第一人称 Prompt 规程
 
-> **版本**：v1.1（2026-11-20，统一 C2.7 非阻塞复核降级表、剥离 Tier 1 5 工具描述中的 `private/` 残留、对齐 Ring 1 FTS5 2-gram 降级与 `prompts/` 最新版本号）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.3 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.7 · [`MEMORY.md`](../MEMORY.md) v0.7 · [`API.md`](../API.md) v0.7
+> **版本**：v1.2（2026-11-21，同步 CAPABILITIES v1.4 / ARCHITECTURE v0.8：扩展 `LlmConfig` 支持 `digest` 附件摘要槽位、`fallbacks` 主备降级链、`thinking.level` 离散档位与 `contextLimits` 双上下文上限；补齐手动存记忆换段、原地无痕重试与 `usage` 消耗落盘规程；Dynamic Tail 补入 `<user_status>` 与 `<events_notice>` 分享拆阅/评测透明告知）
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.4 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.8 · [`MEMORY.md`](../MEMORY.md) v0.8 · [`API.md`](../API.md) v0.8
 > **负责模块**：`server/src/llm/`、`server/src/engine/`、`server/src/tools/`
 
 ---
@@ -22,14 +22,21 @@ export interface LlmConfig {
   }>;
   slots: {
     chat: ModelRef;             // 主对话（必填）
+    fallbacks?: ModelRef[];     // 可选主备模型降级链（Ring 1.5：主模型重试耗尽后按顺序切备用，切换点广播 turn.model_switched）
     memory_task?: ModelRef;     // 缺省自动继承 chat（整理轮 + C2.7 复核轮共用）
     vision?: ModelRef;          // 缺省回落 chat（若 chat 支持多模态），否则退化为文字描述
+    digest?: ModelRef;          // 可选附件摘要模型（Ring 1.5：图片/短视频仅当轮传原件，回完后由本模型生成文字摘要替代历史原图省 Token；未配则每轮带原件）
     embedding?: ModelRef;       // 缺省启用 SQLite FTS5 2-gram 纯字面降级（Ring 1.5 按需启用 IDF）
     reranker?: ModelRef;        // 可选二阶段精排；缺省跳过
   };
   thinking: {
     enabled: boolean;
-    budgetTokens?: number;      // 仅对支持思考预算的厂商生效
+    level?: "off" | "low" | "medium" | "high"; // 推荐面向 UI 的离散思考档位（Ring 1.5）；缺省按 enabled 映射
+    budgetTokens?: number;      // 仅对支持自定义思考预算的厂商生效
+  };
+  contextLimits?: {             // Ring 1.5 聊天 vs 独处双上下文换段上限（默认按模型窗口 75%）
+    chat?: number;              // 如 80_000（聊得短一点细节不易被冲淡）
+    solo?: number;              // 如 200_000（独处读长文/浏览时更宽裕）
   };
 }
 
@@ -51,7 +58,7 @@ export interface ModelRef {
 | 槽位 / 场景 | 异常类型 | 标准错误码 / 降级行为 |
 | :--- | :--- | :--- |
 | `chat`（主对话） | OAuth 失效 / Key 无效 | SSE 推 `turn.error { code: "AUTH_EXPIRED", retryable: false }`，引导进设置更新凭证 |
-| `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；仍失败则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` |
+| `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；若配置了 `slots.fallbacks` 则按顺序自动切换备用模型（仅在相对上一条助手回复的模型发生变化时广播 `turn.model_switched`）；全部耗尽则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` 并支持客户端原地无痕重试（`POST /turns/:turnId/retry`，不重复插入用户消息） |
 | `chat`（主对话） | 上下文接近/超出上限 | **直接切新 `session_id`**（注入 `<gist>` + 最近 6 轮原始对话）继续正常回复，旧会话交由后台单队列异步整理，**绝不进入前台忙态、绝不阻塞发消息**；若单轮输入本身超限则推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
 | `memory_task`（写作轮） | 写作阶段模型错误 / 超时 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
@@ -87,9 +94,10 @@ export interface ModelRef {
 │   · 贴纸 / 图片多模态附件块                                             │
 │   · <runtime_context>（置底！单轮多步循环内仅首发携带，工具结果不重复塞）   │
 │       ├─ <runtime> 当前模糊时段、星期、作息状态、门状态、未读纸条数       │
+│       ├─ <user_status> 用户手动心绪短句与勿扰标记（Ring 1.5，若有）       │
 │       ├─ <mood> MoodProvider 定性摘要（若有）                           │
 │       ├─ <stickers> 可用贴纸清单（id + 简短语义，供 express.stickerId） │
-│       ├─ <events_notice> 待告知系统事实（如 privacy.peeked 拆封事件）    │
+│       ├─ <events_notice> 待告知系统事实（拆封抽屉、分享已拆阅、可选评测态）│
 │       ├─ <door_notes> 未读门缝纸条正文（id > door_notes_read，带模糊时间）│
 │       ├─ <prefix_delta> 盘中 edit 修改 self/user/shelf 的增量（持续至换段）│
 │       ├─ <recalled_memories> 双轨召回卡片块（标注 disputed 冲突提示）    │
@@ -133,10 +141,11 @@ export interface ModelRef {
 1. **单轮多步工具循环内（Turn-Internal）：完整回传延续思路**：
    - 当模型在工具调用前输出了 `thinking` 内容时，引擎在收到工具结果继续调用下一步模型时，**必须将前一步 assistant 消息里的 `thinking` 块原样保留并带上签名（signature）发回厂商**；
    - 这是保证模型推理逻辑不中断的刚需，也是 Anthropic 协议对带工具思考调用的硬性合规要求（缺失会导致 400 校验报错）。
-2. **跨轮持久化与历史回放（Cross-Turn）：剥除思考，保留工具调用链**：
-   - 单轮生成完毕后，思考全量文本落盘至 `psyber.sqlite` 的 **`events.thinking` 独立列**（与 `MEMORY.md` §7 一致），供客户端展示折叠思考卡；当轮的 `express` 记录与可回放的 `tool_calls` / `tool_results` 完整载荷落盘至 `events.metadata` JSON；
+2. **跨轮持久化与历史回放（Cross-Turn）：剥除思考，按需摘要历史附件，记录用量**：
+   - 单轮生成完毕后，思考全量文本落盘至 `psyber.sqlite` 的 **`events.thinking` 独立列**（与 `MEMORY.md` §7 一致），供客户端展示折叠思考卡；当轮的 `express` 记录、可回放的 `tool_calls` / `tool_results` 以及真实消耗统计 `usage`（`{ model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, estimatedCostUsd }`）完整落盘至 `events.metadata` JSON；
+   - **附件摘要防 Token 爆炸（Ring 1.5）**：若配置了 `slots.digest`，带有图片或短视频抽帧的用户消息仅在**当轮**向主模型发送多模态原件；本轮结束后异步调用 `slots.digest` 生成简洁客观文字描述并回填至该用户事件的 `metadata.attachmentDigest`。在后续跨轮拼装 Segment 2（`Append-Only History`）时，优先用该文字摘要替代原始二进制图片块（未配置 `slots.digest` 或摘要尚未就绪则保留原件）；
    - 当开启下一轮对话（或服务重启后重建会话）拼装 Segment 2（`Append-Only History`）时，**必须将历史轮次中的 `thinking` 块剥除**，仅回放最终回复正文、`express` 具身记录与工具调用/结果；
-   - 彻底防止历史长程对话被数万 Token 的陈旧思考污染，大幅节约输入计费并稳固历史缓存。
+   - 彻底防止历史长程对话被数万 Token 的陈旧思考与重复历史大图污染，大幅节约输入计费并稳固历史缓存。
 
 ### 2.4 Prompt Cache 稳态原则（已移除 4 分钟保活探测与 25 分钟温热换段）
 
@@ -146,9 +155,10 @@ export interface ModelRef {
 
 彻底摒弃用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由住户本人以第一人称产生**。
 
-1. **换段（Rollover · 换新 `session_id`）极简触发条件**：
-   - **① 上下文阈值换段**：累计 Prompt Token 超过模型上下文窗口的 **75%**（默认约 `150_000` tokens）或触发 `CONTEXT_OVERFLOW` 时；
-   - **② 每日睡前/跨日换段**：进入作息睡眠窗完成 `bedtime` 整理后，或跨日闲置超过 6 小时。
+1. **换段（Rollover · 换新 `session_id`）触发条件**：
+   - **① 上下文阈值换段**：累计 Prompt Token 超过 `min(模型窗口 * 75%, contextLimits.chat)`（独处轮取 `contextLimits.solo`）或触发 `CONTEXT_OVERFLOW` 时；
+   - **② 每日睡前/跨日换段**：进入作息睡眠窗完成 `bedtime` 整理后，或跨日闲置超过 6 小时；
+   - **③ 用户手动「存记忆换段」（Ring 1.5）**：用户通过 `POST /api/v1/chat/wrap-up` 主动收尾当前段落时（聊完大事或想轻装切新段），同样走异步非阻塞换段与后台整理。
    - *状态卡不走换段等待*：对方亲口说的恢复或变更，住户在对话当轮即顺手更新状态卡。
 2. **非阻塞异步整理（彻底消除死锁与前台忙态）**：
    - 触发换段时，Direct Engine **立刻开启新 `session_id`**（首条注入 `<gist>` + 最近 6 轮原始对话）保证前台对话零卡顿，同时将旧会话未整理区间推入后台单队列，异步运行 `daily_wrapup` 整理并 `git commit`。

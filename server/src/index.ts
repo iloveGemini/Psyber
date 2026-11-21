@@ -300,6 +300,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           callbacks: {
             onTurnStart: (info) => sse.emit("turn.start", info),
             onThinkingDelta: (delta) => sse.emit("turn.thinking", { turnId: wakeTurnId, delta }),
+            onToolProgress: (info) => sse.emit("turn.tool", { ...info }),
             onTextDelta: (delta) => sse.emit("turn.text", { turnId: wakeTurnId, delta }),
             onExpression: (payload) => sse.emit("turn.expression", { turnId: wakeTurnId, ...payload }),
             onDoorUpdated: (state, note) => {
@@ -309,6 +310,12 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
                 title: "门状态更新",
                 body: note ? `门牌：${note}` : `当前门状态：${state}`,
               });
+            },
+            onTurnSilence: (info) => {
+              // 仅当前端正处于前台观看时才推轻呼吸痕，绝不唤醒后台客户端或发推送
+              if (sse.foregroundSubscriberCount > 0) {
+                sse.emit("turn.silence", info);
+              }
             },
             onTurnDone: (info) => sse.emit("turn.done", info),
             onTurnError: (err) => sse.emit("turn.error", err),

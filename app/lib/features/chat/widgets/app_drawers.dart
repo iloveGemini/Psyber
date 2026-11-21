@@ -172,6 +172,11 @@ class LeftArchivePanelContent extends StatelessWidget {
           ),
         ),
         Divider(height: 1, color: colors.hairline),
+        _ContextSessionFooter(
+          controller: controller,
+          isSidebar: isSidebar,
+        ),
+        Divider(height: 1, color: colors.hairline),
         Material(
           color: isSidebar ? Colors.transparent : colors.mineralCanvas,
           child: ListTile(
@@ -203,6 +208,135 @@ class LeftArchivePanelContent extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ContextSessionFooter extends StatelessWidget {
+  const _ContextSessionFooter({
+    required this.controller,
+    required this.isSidebar,
+  });
+
+  final AppController controller;
+  final bool isSidebar;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      color: isSidebar ? Colors.transparent : colors.mineralCanvas,
+      padding: const EdgeInsets.fromLTRB(16, 10, 14, 10),
+      child: ValueListenableBuilder<ContextUsageInfo?>(
+        valueListenable: controller.contextUsageNotifier,
+        builder: (context, usage, _) {
+          final ratio = (usage?.ratio ?? 0.0).clamp(0.0, 1.0);
+          final percent = (ratio * 100).round();
+          final hasUsage = usage != null && usage.usedTokens > 0;
+          final barColor = ratio >= 0.8
+              ? colors.thresholdAmber
+              : colors.accent;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    '本段对话',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: colors.inkQuiet,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (hasUsage)
+                    Text(
+                      '$percent%',
+                      style: PsyberTheme.monoStyle.copyWith(
+                        fontSize: 11,
+                        color: ratio >= 0.8
+                            ? colors.thresholdAmber
+                            : colors.inkQuiet,
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: ratio,
+                  minHeight: 3,
+                  backgroundColor: colors.hairline,
+                  valueColor: AlwaysStoppedAnimation<Color>(barColor),
+                ),
+              ),
+              const SizedBox(height: 8),
+              ValueListenableBuilder<ActiveTurnState?>(
+                valueListenable: controller.activeTurnNotifier,
+                builder: (context, activeTurn, _) => ValueListenableBuilder<bool>(
+                  valueListenable: controller.wrappingUpNotifier,
+                  builder: (context, wrappingUp, _) {
+                    final busy = wrappingUp || activeTurn != null;
+                    return OutlinedButton.icon(
+                      key: const Key('manual_wrap_up_button'),
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              try {
+                                final res = await controller.wrapUpMemorySession();
+                                if (!context.mounted || res == null) return;
+                                if (!isSidebar) {
+                                  Navigator.of(context).maybePop();
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      res.queued
+                                          ? '已开启新一段，旧对话正在后台整理'
+                                          : '已开启新一段',
+                                    ),
+                                  ),
+                                );
+                              } catch (e) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('换段失败：$e')),
+                                );
+                              }
+                            },
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: colors.inkDeep,
+                        side: BorderSide(color: colors.hairline),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 7,
+                        ),
+                        minimumSize: const Size(double.infinity, 32),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      icon: Icon(
+                        PhosphorIconsLight.bookmarkSimple,
+                        size: 14,
+                        color: busy ? colors.inkFaint : colors.inkQuiet,
+                      ),
+                      label: Text(
+                        wrappingUp ? '正在换段…' : '存记忆换段',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

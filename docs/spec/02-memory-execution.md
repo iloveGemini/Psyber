@@ -1,7 +1,7 @@
 # Spec 02 · 记忆底座、沙箱工具、C2.7 对账复核与双轨召回执行规程
 
-> **版本**：v0.7（2026-11-20，彻底收紧 §1.1–§1.2 为纯 `memory/` 单根沙箱、统一 §6.2–§6.3 C2.7 非阻塞复核不回滚口径、明确 `events.seq` 事务单调生成规则并拆分 §10 分期验收清单）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.3 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.7 · [`MEMORY.md`](../MEMORY.md) v0.7 · [`API.md`](../API.md) v0.7 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.1
+> **版本**：v0.8（2026-11-21，同步 MEMORY v0.8 / CAPABILITIES v1.4：补充 `retracted` 社交撤回与静默修对话的隔离查询口径、补全 `share.opened`/`perception.screen`/`request.decided` 通知游标与 `events.metadata.usage` 记录）
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.4 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.8 · [`MEMORY.md`](../MEMORY.md) v0.8 · [`API.md`](../API.md) v0.8 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.2
 > **负责模块**：`server/src/memory/`、`server/src/store/`、`server/src/core/media.ts`
 
 ---
@@ -82,7 +82,7 @@ PSYBER-SEALED-V1
 3. **拆封留痕边界与通知游标**：
    - AI 本人通过 Ring 1.5 独立工具 `drawer_read` / `drawer_write` 在内存中透明读写 `private/<name>.md`：**不写** `privacy.peeked` 事件；
    - 用户通过 `POST /api/v1/drawer/:id/open` 或 CLI `psyber export --include-private` 拆封：**先**在同一事务内写入 `events (role='system', kind='privacy.peeked', session_id=activeSessionId || 'system', content='用户在 ' + channel + ' 拆封了上锁抽屉「' + title + '」', metadata={ drawerId, title, channel: 'app' | 'cli' })`，**再**返回解封正文；
-   - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind = 'privacy.peeked' AND id > lastNoticedId` 组装 `<events_notice>`（例如 `系统事实：用户在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`），绝不替住户预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
+   - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind IN ('privacy.peeked', 'share.opened', 'request.decided') AND id > lastNoticedId` 组装 `<events_notice>`（例如 `系统事实：用户在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`、`系统事实：用户在 <vagueWhen> 打开阅读了你分享的「<title>」`；若用户开启了评测透明告知，则按状态每轮客观注明`系统事实：用户当前开启了召回评测检视模式`），绝不替住户预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
 
 ### 2.3 多尺度自传骨架 `<gist>` 读取与连续性拼装规程
 
@@ -324,7 +324,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 ### 5.2 单队列游标查询（Ring 1 极简版；`digested_activity_spans` 于 Ring 1.5 启用）
 
-- **Ring 1 单队列连续消费**：`daily_wrapup`（75% 异步换段触发）与 `bedtime`（每日睡眠窗触发）共享同一单调游标 `task_cursors['daily_wrapup']`，按 `seq ASC` 连续拉取 `status = 'active'` 的 `chat / wake / door_note`（显式标注门缝纸条且**绝不推进 `door_notes_read`**），按 `TASK_BUDGET = 10_000` 字分批提交推进游标；**Ring 1 暂不建 `digested_activity_spans`、不做进行中活动前沿截断**，待 Ring 1.5 接入 `ActivityPlugin` 时启用下列完整 span 过滤 SQL：
+- **Ring 1 单队列连续消费**：`daily_wrapup`（75% 自动异步换段或 Ring 1.5 手动「存记忆换段」触发）与 `bedtime`（每日睡眠窗触发）共享同一单调游标 `task_cursors['daily_wrapup']`，按 `seq ASC` 连续拉取 `status = 'active'`（Ring 1.5 对 `status = 'retracted'` 执行不对称转录：用户撤回的仅转录为`（对方撤回了一条消息）`不露原文，住户撤回的保留原话并标注`[我随后撤回了这条消息]`）的 `chat / wake / door_note`（显式标注门缝纸条且**绝不推进 `door_notes_read`**），按 `TASK_BUDGET = 10_000` 字分批提交推进游标；**Ring 1 暂不建 `digested_activity_spans`、不做进行中活动前沿截断**，待 Ring 1.5 接入 `ActivityPlugin` 时启用下列完整 span 过滤 SQL：
   ```sql
   SELECT * FROM events e
   WHERE e.status = 'active'

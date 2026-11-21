@@ -1,6 +1,6 @@
 # Psyber 记忆系统契约（MEMORY）
 
-> **版本**：v0.7（2026-11-20，补齐 §7 `card_fts` 虚拟表草案并注明 `events.seq` 事务内单调生成规则）
+> **版本**：v0.8（2026-11-21，同步 CAPABILITIES v1.4：明确 `events.status` 区分静默修对话 `deleted`/`discarded` 与双向社交撤回 `retracted`，补齐 `share.opened`/`perception.screen`/`request.decided` 事件类型、手动存记忆换段及 `events.metadata.usage` 用量落盘规范）
 > **核心理念**：记忆不是通用客观知识库，而是**为人与 AI 的真实互动服务的活代码库**。
 
 ---
@@ -150,7 +150,7 @@ source: live                      # live | import（预留外部历史迁移标�
 
 | 任务类型 | 分期 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
 | :--- | :--- | :--- | :--- | :--- |
-| **1. 换段结晶任务 (`daily_wrapup`)** | **Ring 1** | 上下文超过 **75%** 切新 `session_id` 时异步触发（绝不阻塞新会话前台发言） | 游标后的未整理对话（按 `TASK_BUDGET = 10_000` 字分批）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 当前未关闭 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入 `activities/` |
+| **1. 换段结晶任务 (`daily_wrapup`)** | **Ring 1** | 上下文超过阈值（默认 75% 或 `contextLimits.chat`）切新 `session_id` 时异步触发，或由用户随时手动触发「存记忆换段」（绝不阻塞新会话前台发言） | 游标后的未整理对话（按 `TASK_BUDGET = 10_000` 字分批）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 当前未关闭 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入 `activities/` |
 | **2. 每日睡前整理任务 (`bedtime`)** | **Ring 1** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话，再递入当日已写/改卡片摘要 + 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（Ring 1 先落 `days/` 与 `weeks/`，Ring 1.5 补 `months/`/`years/`）、按需修订 `shelf/`、`self.md`/`user.md` |
 | **3. 活动收尾任务 (`activity:<slug>`)** | Ring 1.5 | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间原始对话流 + 对应目录文件列表 + `card_style` | 更新或新建 `activities/<slug>/<topic>.md` |
 
@@ -161,7 +161,9 @@ source: live                      # live | import（预留外部历史迁移标�
 - **Ring 1 默认单轮写作 + Git 留痕**：先用真实对话验证单轮写卡的幻觉率与漏记率，不提前支付 2–3 倍模型成本与延迟。
 - **Ring 1.5 可选启用规则**：若实测确需复核，复核作为**非阻塞辅助检查**（仅核新建卡全文与修改旧卡 diff，只读不改卡），**复核调用失败或格式异常仅打告警日志，绝不回滚阶段 A 已写好的合法卡片**（彻底守住 NG-2，防止弱模型抖动拖垮整晚整理）。
 - **原子性与失败回滚**：每批写作轮正常结束后仅暂存本批触碰的 `memory/` 路径执行 `git commit`，再推进 `task_cursors`；仅当写作轮本身因模型报错/超时失败时回滚未提交磁盘改动且不推进游标。
-- 若用户在对话中 `edit`/`delete` 了尚未进入整理游标的近期消息，整理轮仅读取当前 `status='active'` 的事件；若目标消息已被历史整理轮消化，软删仅将其从后续对话上下文隐藏，不强行回滚历史 Git 提交。
+- **修对话 vs 社交撤回的记忆隔离**：
+  - 若用户在对话中 `edit` / `reroll` / `delete` 了尚未进入整理游标的近期消息，均属于**静默修对话**（绝不告知住户），整理轮仅读取当前 `status='active'` 的事件；若目标消息已被历史整理轮消化，软删仅将其从后续对话上下文隐藏，不强行回滚历史 Git 提交。
+  - 若发生**双向社交撤回**（`status='retracted'`，Ring 1.5）：① **用户撤回自己的话** → 对住户上下文与尚未整理的转录均替换为`（对方撤回了一条消息）`，不保留原文；② **住户通过 `retract_message` 撤回自己的话** → 前端时间线仅显示`对方撤回了一条消息`（隐藏正文与思考），但住户自身上下文与记忆整理仍保留原话并附注「我已将其撤回」，维持真实不对称记忆。
 
 ---
 
@@ -197,15 +199,15 @@ CREATE TABLE events (
   client_message_id TEXT UNIQUE,               -- 客户端幂等键（防多端/弱网重发）
   group_id          TEXT,                      -- 同一轮编辑/重摇共享 group_id
   version           INTEGER NOT NULL DEFAULT 1,
-  status            TEXT NOT NULL DEFAULT 'active', -- active | candidate | discarded | deleted
+  status            TEXT NOT NULL DEFAULT 'active', -- active | candidate | discarded | deleted | retracted
   role              TEXT NOT NULL,             -- user | assistant | system | task
-  kind              TEXT NOT NULL,             -- chat | door_note | wake | memory_task | activity_event | door.updated | privacy.peeked | relationship.departed
+  kind              TEXT NOT NULL,             -- chat | door_note | wake | memory_task | activity_event | door.updated | privacy.peeked | share.opened | perception.screen | request.decided | relationship.departed
   source            TEXT NOT NULL DEFAULT 'live',   -- live | import
   fonds             TEXT NOT NULL DEFAULT '',  -- 导入前世全宗标识
   activity          TEXT,                      -- 当时所处活动 slug（可选）
   content           TEXT NOT NULL,
   thinking          TEXT,                      -- 扩展思考全量文本（独立列；跨轮拼历史时剥除）
-  metadata          TEXT,                      -- JSON（attachments media hash、expressions、可回放 tool_calls/tool_results、aborted 等）
+  metadata          TEXT,                      -- JSON（attachments media hash 与可选 digest 文字摘要、expressions、可回放 tool_calls/tool_results、usage 消耗与缓存统计、aborted、urgent、retractedBy 等）
   created_at        INTEGER NOT NULL
 );
 

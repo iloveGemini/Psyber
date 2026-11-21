@@ -137,9 +137,16 @@ abstract class PsyberApiClient {
     required String content,
     List<String>? attachments,
     String? stickerId,
+    VideoClipInfo? videoClip,
   });
 
   Future<void> deleteMessage(ConnectionProfile profile, String messageId);
+
+  /// Ring 1.5：失败轮次原地无痕重试（不重复插入用户消息）。
+  Future<String?> retryTurn(ConnectionProfile profile, String turnId);
+
+  /// Ring 1.5：用户手动触发「存记忆换段」。
+  Future<WrapUpResult> wrapUpSession(ConnectionProfile profile);
 
   /// Ring 1.5：编辑末条用户消息（Ring 1 服务端返回 404 时由上层温和提示）。
   Future<TimelineItem> editMessage(
@@ -587,6 +594,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     required String content,
     List<String>? attachments,
     String? stickerId,
+    VideoClipInfo? videoClip,
   }) async {
     final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages');
     final payload = <String, dynamic>{
@@ -598,6 +606,9 @@ class HttpPsyberApiClient implements PsyberApiClient {
     }
     if (stickerId != null && stickerId.isNotEmpty) {
       payload['stickerId'] = stickerId;
+    }
+    if (videoClip != null) {
+      payload['videoClip'] = videoClip.toJson();
     }
     final json = await _requestJson(
       method: 'POST',
@@ -618,6 +629,34 @@ class HttpPsyberApiClient implements PsyberApiClient {
       uri: uri,
       bearerToken: profile.token,
     );
+  }
+
+  @override
+  Future<String?> retryTurn(ConnectionProfile profile, String turnId) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/turns/$turnId/retry',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return json['turnId'] as String?;
+  }
+
+  @override
+  Future<WrapUpResult> wrapUpSession(ConnectionProfile profile) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/wrap-up',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return WrapUpResult.fromJson(json);
   }
 
   @override

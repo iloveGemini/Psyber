@@ -11,7 +11,10 @@ import '../../../expression/expression_renderer.dart';
 import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
 import 'recall_feedback_bar.dart';
-import 'thinking_card.dart';
+import 'turn_journal_card.dart';
+import 'video_tile.dart';
+
+export 'turn_journal_card.dart' show ModelSwitchDivider, ScreenToolCard, TurnJournalCard;
 
 /// 时间分隔线（当天内跨段 > 30 分钟或跨日出现）
 class TimelineDateDivider extends StatelessWidget {
@@ -372,11 +375,19 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     final isUser = item.isUser;
     final colors = context.colors;
     final profile = widget.controller.profileNotifier.value;
+    final screenTools = item.toolSummary
+        .where((t) => t.isScreen)
+        .toList(growable: false);
+    final hasJournal = item.isAssistant &&
+        ((item.thinking?.isNotEmpty ?? false) ||
+            item.toolSummary.any((t) => !t.isScreen));
+    final hasMedia =
+        item.sticker != null || item.attachments.isNotEmpty || item.videoClip != null;
     final isPureMedia = !item.isDoorNote &&
         item.content.trim().isEmpty &&
-        (item.thinking?.isEmpty ?? true) &&
-        item.toolSummary.isEmpty &&
-        (item.sticker != null || item.attachments.isNotEmpty);
+        !hasJournal &&
+        screenTools.isEmpty &&
+        hasMedia;
     final showBubbleBox = item.isDoorNote || (isUser && !isPureMedia);
 
     final BoxDecoration? bubbleDecoration = showBubbleBox
@@ -434,36 +445,18 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                   ),
                                 ),
                               ),
-                            if (item.isAssistant && (item.thinking?.isNotEmpty ?? false))
-                              ThinkingCard(thinking: item.thinking!, isStreaming: false),
-                            if (item.toolSummary.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 6),
-                                child: Wrap(
-                                  spacing: 6,
-                                  runSpacing: 4,
-                                  children: [
-                                    for (final tool in item.toolSummary)
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 7,
-                                          vertical: 2,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: colors.mineralCanvas,
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: colors.hairline),
-                                        ),
-                                        child: Text(
-                                          tool.label.isNotEmpty ? tool.label : tool.name,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: colors.inkQuiet,
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
+                            if (hasJournal)
+                              TurnJournalCard(
+                                thinking: item.thinking ?? '',
+                                summaryTools: item.toolSummary,
+                                isStreaming: false,
+                              ),
+                            for (final st in screenTools)
+                              ScreenToolCard(
+                                label: st.label.isNotEmpty ? st.label : st.name,
+                                reason: st.reason,
+                                screenshotUrl: st.screenshotUrl,
+                                profile: profile,
                               ),
                             if (item.sticker != null)
                               Padding(
@@ -496,7 +489,17 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                         ),
                                       ),
                               ),
-                            if (item.attachments.isNotEmpty && profile != null)
+                            if (item.videoClip != null && profile != null)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: item.content.isNotEmpty ? 6 : 0,
+                                ),
+                                child: VideoTile(
+                                  videoClip: item.videoClip!,
+                                  profile: profile,
+                                ),
+                              )
+                            else if (item.attachments.isNotEmpty && profile != null)
                               Padding(
                                 padding: EdgeInsets.only(
                                   bottom: item.content.isNotEmpty ? 6 : 0,
@@ -549,7 +552,16 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                 ),
                               ),
                             if (item.content.isNotEmpty)
-                              RichMessageText(text: item.content),
+                              RichMessageText(
+                                text: item.content,
+                                baseStyle: isUser
+                                    ? null
+                                    : PsyberTheme.editorialSerif.copyWith(
+                                        fontSize: 15.5,
+                                        height: 1.66,
+                                        color: colors.inkDeep,
+                                      ),
+                              ),
                             if (item.aborted)
                               const Padding(
                                 padding: EdgeInsets.only(top: 4),
@@ -665,6 +677,11 @@ class StreamingAssistantBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final screenTools =
+        active.tools.where((t) => t.isScreen).toList(growable: false);
+    final hasJournal =
+        active.thinking.isNotEmpty || active.tools.any((t) => !t.isScreen);
+
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: PsyberTheme.readingMaxWidth),
@@ -681,58 +698,92 @@ class StreamingAssistantBubble extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (active.thinking.isNotEmpty)
-                      ThinkingCard(thinking: active.thinking, isStreaming: true),
-                    if (active.tools.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: [
-                            for (final tool in active.tools)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 3,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: colors.mineralCanvas,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: colors.hairline),
-                                ),
-                                child: Text(
-                                  '${tool.label} · ${tool.status == 'running' ? '进行中' : tool.status == 'error' ? '失败' : '完成'}',
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    color: colors.inkQuiet,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
+                    if (hasJournal)
+                      TurnJournalCard(
+                        thinking: active.thinking,
+                        progressTools: active.tools,
+                        isStreaming: true,
+                      ),
+                    for (final st in screenTools)
+                      ScreenToolCard(
+                        label: st.label,
+                        reason: st.reason,
+                        screenshotUrl: st.screenshotUrl,
+                        isRunning: st.status == 'running',
                       ),
                     if (active.text.isNotEmpty)
-                      RichMessageText(text: active.text)
+                      RichMessageText(
+                        text: active.text,
+                        baseStyle: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 15.5,
+                          height: 1.66,
+                          color: colors.inkDeep,
+                        ),
+                      )
                     else
-                      Text(
-                        '…',
-                        style: TextStyle(color: colors.inkQuiet, fontSize: 16),
+                      Row(
+                        key: const Key('streaming_replying_placeholder'),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.6,
+                              color: colors.inkQuiet,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '正在回复…',
+                            style: TextStyle(
+                              color: colors.inkQuiet,
+                              fontSize: 13.5,
+                            ),
+                          ),
+                        ],
                       ),
                     const SizedBox(height: 6),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        key: const Key('abort_turn_button'),
-                        onPressed: () => unawaited(onAbort()),
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        if (active.text.isNotEmpty)
+                          Row(
+                            key: const Key('streaming_replying_badge'),
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 10,
+                                height: 10,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.4,
+                                  color: colors.inkFaint,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '正在回复…',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: colors.inkFaint,
+                                ),
+                              ),
+                            ],
+                          )
+                        else
+                          const SizedBox.shrink(),
+                        TextButton.icon(
+                          key: const Key('abort_turn_button'),
+                          onPressed: () => unawaited(onAbort()),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          icon: const Icon(PhosphorIconsLight.stopCircle, size: 15),
+                          label: const Text('停止生成', style: TextStyle(fontSize: 12)),
                         ),
-                        icon: const Icon(PhosphorIconsLight.stopCircle, size: 15),
-                        label: const Text('停止生成', style: TextStyle(fontSize: 12)),
-                      ),
+                      ],
                     ),
                   ],
                 ),

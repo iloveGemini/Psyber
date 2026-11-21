@@ -22,39 +22,68 @@ class PendingAttachment {
   final List<int> bytes;
 }
 
+@immutable
+class PendingVideoClip {
+  const PendingVideoClip({
+    required this.durationSec,
+    required this.frameHashes,
+    required this.filename,
+    this.previewBytes = const <int>[],
+  });
+
+  final double durationSec;
+  final List<String> frameHashes;
+  final String filename;
+  final List<int> previewBytes;
+}
+
 /// 门态自适应输入台：
-/// - open / quiet：居中阅读栏内嵌输入胶囊，支持本地图片缩略图预览与贴纸；
+/// - open / quiet：居中阅读栏内嵌输入胶囊，支持本地图片/短视频缩略图预览与贴纸；
 /// - closed / cooling_off：切换为折痕纸感「门缝纸条」，不展示对方正在输入；
 /// - departed：转为纪念只读底栏并允许查阅告别信。
-/// - 桌面端支持 Enter 发送、Shift+Enter 换行（IME 输入法候选词组合态安全放行）。
+/// - 桌面端支持 Enter / ⌘Enter 发送、Shift+Enter 换行与 ⌘V 粘贴图片/文件；移动端 Enter 换行。
 class AdaptiveComposer extends StatefulWidget {
   const AdaptiveComposer({
     super.key,
     required this.door,
     required this.controller,
     required this.pendingAttachments,
+    this.pendingVideoClip,
     this.pendingSticker,
     this.profile,
     required this.uploadingImage,
     required this.sending,
+    this.isReplying = false,
+    this.isDraggingFiles = false,
     required this.onPickImage,
     required this.onOpenStickers,
     required this.onRemoveAttachment,
+    this.onRemoveVideoClip,
     this.onClearSticker,
+    this.onPasteClipboard,
+    this.onVoiceInput,
+    this.onAbort,
     required this.onSend,
   });
 
   final DoorStatus door;
   final TextEditingController controller;
   final List<PendingAttachment> pendingAttachments;
+  final PendingVideoClip? pendingVideoClip;
   final StickerView? pendingSticker;
   final ConnectionProfile? profile;
   final bool uploadingImage;
   final bool sending;
+  final bool isReplying;
+  final bool isDraggingFiles;
   final VoidCallback onPickImage;
   final VoidCallback onOpenStickers;
   final void Function(int index) onRemoveAttachment;
+  final VoidCallback? onRemoveVideoClip;
   final VoidCallback? onClearSticker;
+  final Future<bool> Function()? onPasteClipboard;
+  final VoidCallback? onVoiceInput;
+  final VoidCallback? onAbort;
   final VoidCallback onSend;
 
   @override
@@ -71,6 +100,28 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
         defaultTargetPlatform == TargetPlatform.linux;
   }
 
+  Future<void> _handleDesktopPaste() async {
+    final handler = widget.onPasteClipboard;
+    if (handler != null) {
+      final handledMedia = await handler();
+      if (handledMedia || !mounted) return;
+    }
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final pasted = data?.text;
+    if (!mounted || pasted == null || pasted.isEmpty) return;
+    final value = widget.controller.value;
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    final safeStart = start.clamp(0, value.text.length);
+    final safeEnd = end.clamp(safeStart, value.text.length);
+    final nextText = value.text.replaceRange(safeStart, safeEnd, pasted);
+    widget.controller.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: safeStart + pasted.length),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -78,6 +129,19 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
       onKeyEvent: (node, event) {
         if (!_isDesktopOrWeb) return KeyEventResult.ignored;
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+        final isPasteShortcut =
+            event.logicalKey == LogicalKeyboardKey.keyV &&
+            ((defaultTargetPlatform == TargetPlatform.macOS &&
+                    HardwareKeyboard.instance.isMetaPressed) ||
+                (defaultTargetPlatform != TargetPlatform.macOS &&
+                    HardwareKeyboard.instance.isControlPressed)) &&
+            !HardwareKeyboard.instance.isAltPressed;
+        if (isPasteShortcut && widget.onPasteClipboard != null) {
+          unawaited(_handleDesktopPaste());
+          return KeyEventResult.handled;
+        }
+
         final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
             event.logicalKey == LogicalKeyboardKey.numpadEnter;
         if (!isEnter) return KeyEventResult.ignored;
@@ -86,6 +150,15 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
         final composing = widget.controller.value.composing;
         if (composing.isValid && !composing.isCollapsed) {
           return KeyEventResult.ignored;
+        }
+        final isPrimarySendCombo =
+            HardwareKeyboard.instance.isMetaPressed ||
+            HardwareKeyboard.instance.isControlPressed;
+        if (isPrimarySendCombo) {
+          if (!widget.sending) {
+            widget.onSend();
+          }
+          return KeyEventResult.handled;
         }
         if (HardwareKeyboard.instance.isShiftPressed) {
           return KeyEventResult.ignored;
@@ -224,13 +297,37 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                     color: isDoorNote ? colors.slipPaper : colors.letterSurface,
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: isDoorNote ? colors.hairlineWarm : colors.hairline,
+                      color: widget.isDraggingFiles
+                          ? colors.accentBorder
+                          : (isDoorNote ? colors.hairlineWarm : colors.hairline),
+                      width: widget.isDraggingFiles ? 1.5 : 1,
                     ),
                   ),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      if (widget.isDraggingFiles)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+                          child: Row(
+                            children: [
+                              Icon(
+                                PhosphorIconsLight.paperclip,
+                                size: 14,
+                                color: colors.accent,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '松手添加到待发区（图片或短视频）',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: colors.inkQuiet,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       if (isDoorNote) ...[
                         Padding(
                           padding: const EdgeInsets.fromLTRB(14, 9, 14, 6),
@@ -258,6 +355,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                         ),
                       ],
                       if (widget.pendingAttachments.isNotEmpty ||
+                          widget.pendingVideoClip != null ||
                           widget.pendingSticker != null)
                         Padding(
                           padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
@@ -272,6 +370,12 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                   profile: widget.profile,
                                   onRemove: widget.onClearSticker ?? () {},
                                 ),
+                              if (widget.pendingVideoClip != null)
+                                _PendingVideoChip(
+                                  key: const Key('pending_video_chip'),
+                                  clip: widget.pendingVideoClip!,
+                                  onRemove: widget.onRemoveVideoClip ?? () {},
+                                ),
                               for (var i = 0; i < widget.pendingAttachments.length; i++)
                                 _PendingThumbChip(
                                   key: Key('pending_attachment_$i'),
@@ -282,35 +386,56 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                           ),
                         ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(6, 6, 8, 6),
+                        padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
                         child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             IconButton(
                               key: const Key('pick_image_button'),
                               tooltip: '选择图片',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 30,
+                                height: 30,
+                              ),
+                              style: IconButton.styleFrom(
+                                minimumSize: const Size(30, 30),
+                                fixedSize: const Size(30, 30),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
                               onPressed: (widget.sending || widget.uploadingImage)
                                   ? null
                                   : widget.onPickImage,
                               icon: widget.uploadingImage
                                   ? const SizedBox(
-                                      width: 18,
-                                      height: 18,
+                                      width: 16,
+                                      height: 16,
                                       child: CircularProgressIndicator(strokeWidth: 2),
                                     )
                                   : Icon(
                                       PhosphorIconsLight.image,
-                                      size: 20,
+                                      size: 18,
                                       color: colors.inkQuiet,
                                     ),
                             ),
+                            const SizedBox(width: 2),
                             IconButton(
                               key: const Key('open_stickers_button'),
                               tooltip: '发送贴纸',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 30,
+                                height: 30,
+                              ),
+                              style: IconButton.styleFrom(
+                                minimumSize: const Size(30, 30),
+                                fixedSize: const Size(30, 30),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
                               onPressed: widget.sending ? null : widget.onOpenStickers,
                               icon: Icon(
                                 PhosphorIconsLight.smiley,
-                                size: 20,
+                                size: 18,
                                 color: colors.inkQuiet,
                               ),
                             ),
@@ -321,6 +446,14 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                 controller: widget.controller,
                                 minLines: 1,
                                 maxLines: 5,
+                                textAlignVertical: TextAlignVertical.center,
+                                style: TextStyle(
+                                  fontSize: 14.5,
+                                  height: 1.35,
+                                  leadingDistribution:
+                                      TextLeadingDistribution.even,
+                                  color: colors.inkDeep,
+                                ),
                                 textInputAction: _isDesktopOrWeb
                                     ? TextInputAction.newline
                                     : TextInputAction.send,
@@ -336,71 +469,133 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                   focusedBorder: InputBorder.none,
                                   contentPadding: const EdgeInsets.symmetric(
                                     horizontal: 8,
-                                    vertical: 10,
+                                    vertical: 5,
                                   ),
                                   isDense: true,
                                 ),
                               ),
                             ),
                             const SizedBox(width: 6),
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 2),
-                              child: ValueListenableBuilder<TextEditingValue>(
-                                valueListenable: widget.controller,
-                                builder: (context, textValue, _) {
-                                  final hasDraft = textValue.text.trim().isNotEmpty ||
-                                      widget.pendingAttachments.isNotEmpty ||
-                                      widget.pendingSticker != null;
-                                  final Color btnBg;
-                                  final Color btnBorder;
-                                  final Color btnText;
-                                  if (isDoorNote) {
-                                    btnBg = hasDraft
-                                        ? colors.thresholdAmberSoft
-                                        : Colors.transparent;
-                                    btnBorder = hasDraft
-                                        ? colors.thresholdAmber
-                                        : colors.hairlineWarm;
-                                    btnText = colors.thresholdAmber;
-                                  } else {
-                                    btnBg = hasDraft
-                                        ? colors.accentSoft
-                                        : Colors.transparent;
-                                    btnBorder = hasDraft
-                                        ? colors.accentBorder
-                                        : colors.hairline;
-                                    btnText = hasDraft ? colors.inkDeep : colors.inkQuiet;
-                                  }
+                            ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: widget.controller,
+                              builder: (context, textValue, _) {
+                                final hasDraft = textValue.text.trim().isNotEmpty ||
+                                    widget.pendingAttachments.isNotEmpty ||
+                                    widget.pendingVideoClip != null ||
+                                    widget.pendingSticker != null;
 
-                                  return FilledButton(
-                                    key: const Key('chat_send_button'),
-                                    onPressed: widget.sending ? null : widget.onSend,
-                                    style: FilledButton.styleFrom(
-                                      backgroundColor: btnBg,
-                                      foregroundColor: btnText,
-                                      elevation: 0,
-                                      side: BorderSide(color: btnBorder),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 14,
-                                        vertical: 8,
+                                if (widget.isReplying) {
+                                  return Tooltip(
+                                    message: '停止生成',
+                                    child: IconButton(
+                                      key: const Key('chat_stop_button'),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints.tightFor(
+                                        width: 30,
+                                        height: 30,
                                       ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(9),
+                                      style: IconButton.styleFrom(
+                                        minimumSize: const Size(30, 30),
+                                        fixedSize: const Size(30, 30),
+                                        backgroundColor: colors.accent,
+                                        foregroundColor: colors.onAccent,
+                                        shape: const CircleBorder(),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
                                       ),
-                                      minimumSize: const Size(58, 34),
-                                    ),
-                                    child: Text(
-                                      isDoorNote ? '塞纸条' : '发送',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight:
-                                            hasDraft ? FontWeight.w500 : FontWeight.w400,
-                                        color: btnText,
+                                      onPressed: widget.onAbort,
+                                      icon: const Icon(
+                                        PhosphorIconsFill.stop,
+                                        size: 12,
                                       ),
                                     ),
                                   );
-                                },
-                              ),
+                                }
+
+                                if (hasDraft) {
+                                  final Color btnBg = isDoorNote
+                                      ? colors.thresholdAmberSoft
+                                      : colors.accent;
+                                  final Color btnFg = isDoorNote
+                                      ? colors.thresholdAmber
+                                      : colors.onAccent;
+                                  final BorderSide? btnSide = isDoorNote
+                                      ? BorderSide(color: colors.thresholdAmber)
+                                      : null;
+
+                                  return Tooltip(
+                                    message: isDoorNote ? '塞纸条' : '发送',
+                                    child: IconButton(
+                                      key: const Key('chat_send_button'),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints.tightFor(
+                                        width: 30,
+                                        height: 30,
+                                      ),
+                                      style: IconButton.styleFrom(
+                                        minimumSize: const Size(30, 30),
+                                        fixedSize: const Size(30, 30),
+                                        backgroundColor: btnBg,
+                                        foregroundColor: btnFg,
+                                        side: btnSide,
+                                        shape: const CircleBorder(),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                      onPressed:
+                                          widget.sending ? null : widget.onSend,
+                                      icon: widget.sending
+                                          ? SizedBox(
+                                              width: 13,
+                                              height: 13,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: btnFg,
+                                              ),
+                                            )
+                                          : const Icon(
+                                              PhosphorIconsLight.arrowUp,
+                                              size: 16,
+                                            ),
+                                    ),
+                                  );
+                                }
+
+                                return Tooltip(
+                                  message: '语音输入',
+                                  child: IconButton(
+                                    key: const Key('chat_voice_button'),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 30,
+                                      height: 30,
+                                    ),
+                                    style: IconButton.styleFrom(
+                                      minimumSize: const Size(30, 30),
+                                      fixedSize: const Size(30, 30),
+                                      backgroundColor: Colors.transparent,
+                                      foregroundColor: isDoorNote
+                                          ? colors.thresholdAmber
+                                          : colors.inkQuiet,
+                                      side: BorderSide(
+                                        color: isDoorNote
+                                            ? colors.hairlineWarm
+                                            : colors.hairline,
+                                      ),
+                                      shape: const CircleBorder(),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    onPressed: widget.sending
+                                        ? null
+                                        : widget.onVoiceInput,
+                                    icon: const Icon(
+                                      PhosphorIconsLight.microphone,
+                                      size: 16,
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
                           ],
                         ),
@@ -484,6 +679,104 @@ class _PendingStickerChip extends StatelessWidget {
           const SizedBox(width: 4),
           InkWell(
             key: const Key('clear_pending_sticker'),
+            onTap: onRemove,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(PhosphorIconsLight.x, size: 14, color: colors.inkQuiet),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PendingVideoChip extends StatelessWidget {
+  const _PendingVideoChip({
+    super.key,
+    required this.clip,
+    required this.onRemove,
+  });
+
+  final PendingVideoClip clip;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final durationLabel = clip.durationSec > 0
+        ? '${clip.durationSec.toStringAsFixed(clip.durationSec >= 10 ? 0 : 1)}s'
+        : '${clip.frameHashes.length} 帧';
+    return Container(
+      padding: const EdgeInsets.fromLTRB(4, 4, 6, 4),
+      decoration: BoxDecoration(
+        color: colors.mineralCanvas,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: clip.previewBytes.isNotEmpty
+                ? Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Image.memory(
+                        Uint8List.fromList(clip.previewBytes),
+                        width: 34,
+                        height: 34,
+                        fit: BoxFit.cover,
+                      ),
+                      Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          PhosphorIconsFill.play,
+                          size: 10,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  )
+                : Container(
+                    width: 34,
+                    height: 34,
+                    color: colors.accentSoft,
+                    child: Icon(
+                      PhosphorIconsLight.filmStrip,
+                      size: 18,
+                      color: colors.inkQuiet,
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 140),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  clip.filename,
+                  style: TextStyle(fontSize: 12, color: colors.inkDeep),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  '视频 · $durationLabel',
+                  style: TextStyle(fontSize: 10.5, color: colors.inkQuiet),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 4),
+          InkWell(
             onTap: onRemove,
             borderRadius: BorderRadius.circular(10),
             child: Padding(

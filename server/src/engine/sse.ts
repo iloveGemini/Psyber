@@ -4,11 +4,16 @@ export type Ring1SseEventName =
   | "door.updated"
   | "turn.start"
   | "turn.thinking"
+  | "turn.tool"
   | "turn.expression"
   | "turn.text"
   | "turn.done"
   | "turn.error"
+  | "turn.silence"
+  | "turn.model_switched"
   | "ping";
+
+export type SseEventName = Ring1SseEventName;
 
 export interface SseFrame {
   event: Ring1SseEventName;

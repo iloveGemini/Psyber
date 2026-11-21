@@ -310,17 +310,28 @@ class ToolSummaryItem {
     required this.name,
     required this.label,
     required this.ok,
+    this.kind = 'general',
+    this.screenshotUrl,
+    this.reason,
   });
 
   final String name;
   final String label;
   final bool ok;
+  final String kind;
+  final String? screenshotUrl;
+  final String? reason;
+
+  bool get isScreen => kind == 'screen' || name == 'look_at_screen';
 
   factory ToolSummaryItem.fromJson(Map<String, dynamic> json) {
     return ToolSummaryItem(
       name: json['name'] as String? ?? '',
       label: json['label'] as String? ?? '',
       ok: json['ok'] != false,
+      kind: json['kind'] as String? ?? 'general',
+      screenshotUrl: json['screenshotUrl'] as String?,
+      reason: json['reason'] as String?,
     );
   }
 }
@@ -332,12 +343,20 @@ class ToolProgressItem {
     required this.name,
     required this.label,
     required this.status,
+    this.kind = 'general',
+    this.screenshotUrl,
+    this.reason,
   });
 
   final String callId;
   final String name;
   final String label;
   final String status;
+  final String kind;
+  final String? screenshotUrl;
+  final String? reason;
+
+  bool get isScreen => kind == 'screen' || name == 'look_at_screen';
 
   factory ToolProgressItem.fromJson(Map<String, dynamic> json) {
     return ToolProgressItem(
@@ -345,6 +364,109 @@ class ToolProgressItem {
       name: json['name'] as String? ?? '',
       label: json['label'] as String? ?? (json['name'] as String? ?? ''),
       status: json['status'] as String? ?? 'running',
+      kind: json['kind'] as String? ?? 'general',
+      screenshotUrl: json['screenshotUrl'] as String?,
+      reason: json['reason'] as String?,
+    );
+  }
+}
+
+@immutable
+class VideoClipInfo {
+  const VideoClipInfo({
+    required this.durationSec,
+    required this.frameHashes,
+  });
+
+  final double durationSec;
+  final List<String> frameHashes;
+
+  factory VideoClipInfo.fromJson(Map<String, dynamic> json) {
+    final rawHashes = json['frameHashes'];
+    final hashes = <String>[];
+    if (rawHashes is List<dynamic>) {
+      for (final h in rawHashes) {
+        if (h is String && h.isNotEmpty) hashes.add(h);
+      }
+    }
+    return VideoClipInfo(
+      durationSec: (json['durationSec'] as num?)?.toDouble() ?? 0.0,
+      frameHashes: hashes,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'durationSec': durationSec,
+        'frameHashes': frameHashes,
+      };
+}
+
+@immutable
+class ContextUsageInfo {
+  const ContextUsageInfo({
+    required this.usedTokens,
+    required this.limitTokens,
+    required this.ratio,
+  });
+
+  final int usedTokens;
+  final int limitTokens;
+  final double ratio;
+
+  factory ContextUsageInfo.fromJson(Map<String, dynamic> json) {
+    return ContextUsageInfo(
+      usedTokens: (json['usedTokens'] as num?)?.toInt() ?? 0,
+      limitTokens: (json['limitTokens'] as num?)?.toInt() ?? 150000,
+      ratio: ((json['ratio'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
+    );
+  }
+}
+
+@immutable
+class TurnFailureState {
+  const TurnFailureState({
+    required this.code,
+    required this.message,
+    required this.retryable,
+    this.turnId,
+  });
+
+  final String? turnId;
+  final String code;
+  final String message;
+  final bool retryable;
+}
+
+@immutable
+class TurnSilenceNotice {
+  const TurnSilenceNotice({
+    required this.turnId,
+    required this.ownTime,
+    required this.createdAt,
+  });
+
+  final String turnId;
+  final bool ownTime;
+  final int createdAt;
+}
+
+@immutable
+class WrapUpResult {
+  const WrapUpResult({
+    required this.oldSessionId,
+    required this.newSessionId,
+    required this.queued,
+  });
+
+  final String oldSessionId;
+  final String newSessionId;
+  final bool queued;
+
+  factory WrapUpResult.fromJson(Map<String, dynamic> json) {
+    return WrapUpResult(
+      oldSessionId: json['oldSessionId'] as String? ?? '',
+      newSessionId: json['newSessionId'] as String? ?? '',
+      queued: json['queued'] == true,
     );
   }
 }
@@ -370,6 +492,8 @@ class TimelineItem {
     this.sticker,
     this.expressions = const <ExpressionPayload>[],
     this.toolSummary = const <ToolSummaryItem>[],
+    this.model,
+    this.videoClip,
     this.recallCount,
     this.aborted = false,
   });
@@ -391,6 +515,8 @@ class TimelineItem {
   final StickerView? sticker;
   final List<ExpressionPayload> expressions;
   final List<ToolSummaryItem> toolSummary;
+  final String? model;
+  final VideoClipInfo? videoClip;
   final int? recallCount;
   final bool aborted;
   final int createdAt;
@@ -399,6 +525,7 @@ class TimelineItem {
   bool get isAssistant => role == 'assistant';
   bool get isDoorNote => kind == 'door_note';
   bool get isMemoryTask => kind == 'memory_task';
+  bool get isSilence => kind == 'silence';
   bool get isSystemNotice =>
       role == 'system' ||
       kind == 'door.updated' ||
@@ -440,6 +567,8 @@ class TimelineItem {
       }
     }
     final rawRecall = json['recallCount'] ?? metaMap['recallCount'];
+    final rawModel = json['model'] ?? metaMap['model'];
+    final rawVideoClip = json['videoClip'] ?? metaMap['videoClip'];
     return TimelineItem(
       id: json['id'] as String? ?? '',
       seq: (json['seq'] as num?)?.toInt() ?? 0,
@@ -460,6 +589,10 @@ class TimelineItem {
           : null,
       expressions: expressions,
       toolSummary: toolSummary,
+      model: rawModel is String && rawModel.isNotEmpty ? rawModel : null,
+      videoClip: rawVideoClip is Map<String, dynamic>
+          ? VideoClipInfo.fromJson(rawVideoClip)
+          : null,
       recallCount: rawRecall is num ? rawRecall.toInt() : null,
       aborted: json['aborted'] == true || metaMap['aborted'] == true,
       createdAt: (json['createdAt'] as num?)?.toInt() ?? 0,
@@ -474,12 +607,14 @@ class HistoryPage {
     required this.hasMore,
     required this.latestEventSeq,
     this.nextBefore,
+    this.contextUsage,
   });
 
   final List<TimelineItem> items;
   final bool hasMore;
   final String? nextBefore;
   final int latestEventSeq;
+  final ContextUsageInfo? contextUsage;
 
   factory HistoryPage.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'];
@@ -491,11 +626,15 @@ class HistoryPage {
         }
       }
     }
+    final rawUsage = json['contextUsage'];
     return HistoryPage(
       items: items,
       hasMore: json['hasMore'] == true,
       nextBefore: json['nextBefore'] as String?,
       latestEventSeq: (json['latestEventSeq'] as num?)?.toInt() ?? 0,
+      contextUsage: rawUsage is Map<String, dynamic>
+          ? ContextUsageInfo.fromJson(rawUsage)
+          : null,
     );
   }
 }

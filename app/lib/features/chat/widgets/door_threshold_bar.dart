@@ -21,6 +21,7 @@ class DoorThresholdBar extends StatefulWidget {
     required this.onOpenRightDrawer,
     this.onOpenSettings,
     this.activeActivity,
+    this.isReplying = false,
     this.isWide = false,
     this.sidebarOpen = false,
     this.rightButtonKey,
@@ -33,6 +34,7 @@ class DoorThresholdBar extends StatefulWidget {
   final VoidCallback onOpenRightDrawer;
   final VoidCallback? onOpenSettings;
   final ActivitySessionView? activeActivity;
+  final bool isReplying;
   final bool isWide;
   final bool sidebarOpen;
   final GlobalKey? rightButtonKey;
@@ -252,23 +254,44 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Container(
-                                          width: 6,
-                                          height: 6,
-                                          decoration: BoxDecoration(
-                                            color: statusMeta.dotColor,
-                                            shape: BoxShape.circle,
+                                        if (widget.isReplying) ...[
+                                          SizedBox(
+                                            key: const Key('door_replying_indicator'),
+                                            width: 8,
+                                            height: 8,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 1.4,
+                                              color: colors.statusSuccess,
+                                            ),
                                           ),
-                                        ),
-                                        const SizedBox(width: 5),
-                                        Text(
-                                          statusMeta.label,
-                                          style: TextStyle(
-                                            fontSize: 11.5,
-                                            fontWeight: FontWeight.w400,
-                                            color: statusMeta.textColor,
+                                          const SizedBox(width: 5),
+                                          Text(
+                                            '正在回复…',
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.w500,
+                                              color: colors.inkDeep,
+                                            ),
                                           ),
-                                        ),
+                                        ] else ...[
+                                          Container(
+                                            width: 6,
+                                            height: 6,
+                                            decoration: BoxDecoration(
+                                              color: statusMeta.dotColor,
+                                              shape: BoxShape.circle,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 5),
+                                          Text(
+                                            statusMeta.label,
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.w400,
+                                              color: statusMeta.textColor,
+                                            ),
+                                          ),
+                                        ],
                                       ],
                                     ),
                                   ),

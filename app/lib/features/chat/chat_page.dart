@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
+import '../../../core/media/desktop_media.dart';
 import '../../../core/media/image_picker.dart';
 import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
@@ -16,6 +17,8 @@ import '../settings/settings_panel.dart';
 import 'widgets/adaptive_composer.dart';
 import 'widgets/app_drawers.dart';
 import 'widgets/door_threshold_bar.dart';
+import 'widgets/failure_line.dart';
+import 'widgets/silence_line.dart';
 import 'widgets/sticker_picker_sheet.dart';
 import 'widgets/timeline_items.dart';
 
@@ -44,6 +47,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
   final List<PendingAttachment> _pendingAttachments = <PendingAttachment>[];
+  PendingVideoClip? _pendingVideoClip;
   StickerView? _pendingSticker;
 
   bool _sending = false;
@@ -52,6 +56,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _showDesktopSidebar = true;
   bool _showDesktopSettings = false;
   bool _showScrollToBottom = false;
+  bool _isDraggingFiles = false;
+  String _lastSavedDraft = '';
 
   @override
   void initState() {
@@ -59,6 +65,36 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     widget.controller.expressionNotifier.addListener(_onExpression);
     _scrollController.addListener(_onScroll);
+    _inputController.addListener(_onDraftChanged);
+    unawaited(_restoreDraft());
+    DesktopMediaBridge.listenDropEvents(
+      onDragStateChanged: (active) {
+        if (!mounted || active == _isDraggingFiles) return;
+        setState(() => _isDraggingFiles = active);
+      },
+      onFilesDropped: (paths) {
+        if (!mounted) return;
+        setState(() => _isDraggingFiles = false);
+        unawaited(_handleDesktopPaths(paths));
+      },
+    );
+  }
+
+  Future<void> _restoreDraft() async {
+    final draft = await widget.controller.loadDraft();
+    if (!mounted || draft.isEmpty || _inputController.text.isNotEmpty) return;
+    _lastSavedDraft = draft;
+    _inputController.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+  }
+
+  void _onDraftChanged() {
+    final text = _inputController.text;
+    if (text == _lastSavedDraft) return;
+    _lastSavedDraft = text;
+    unawaited(widget.controller.saveDraft(text));
   }
 
   void _onScroll() {
@@ -93,6 +129,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.expressionNotifier.removeListener(_onExpression);
     _scrollController.removeListener(_onScroll);
+    _inputController.removeListener(_onDraftChanged);
+    DesktopMediaBridge.clearDropEvents();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -100,23 +138,39 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   Future<void> _send() async {
     final text = _inputController.text.trim();
-    if ((text.isEmpty && _pendingAttachments.isEmpty && _pendingSticker == null) ||
+    if ((text.isEmpty &&
+            _pendingAttachments.isEmpty &&
+            _pendingVideoClip == null &&
+            _pendingSticker == null) ||
         _sending) {
       return;
     }
     setState(() => _sending = true);
     try {
-      final attachmentHashes =
-          _pendingAttachments.map((a) => a.hash).toList(growable: false);
+      final frameHashes = _pendingVideoClip?.frameHashes ?? const <String>[];
+      final attachmentHashes = <String>[
+        ..._pendingAttachments.map((a) => a.hash),
+        ...frameHashes,
+      ];
+      final videoClip = _pendingVideoClip == null
+          ? null
+          : VideoClipInfo(
+              durationSec: _pendingVideoClip!.durationSec,
+              frameHashes: _pendingVideoClip!.frameHashes,
+            );
       await widget.controller.sendMessage(
         text,
         attachments: attachmentHashes.isEmpty ? null : attachmentHashes,
         stickerId: _pendingSticker?.id,
+        videoClip: videoClip,
       );
+      _lastSavedDraft = '';
       _inputController.clear();
+      unawaited(widget.controller.saveDraft(''));
       if (mounted) {
         setState(() {
           _pendingAttachments.clear();
+          _pendingVideoClip = null;
           _pendingSticker = null;
         });
       }
@@ -130,6 +184,106 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _handlePickedOrDroppedFile(PickedImage picked) async {
+    if (picked.isVideo) {
+      final path = picked.localPath;
+      if (path == null || path.isEmpty || !DesktopMediaBridge.isSupported) {
+        widget.controller.turnErrorNotifier.value =
+            '当前平台暂不支持自动抽帧短视频，请优先发送截图或图片';
+        return;
+      }
+      final clip = await DesktopMediaBridge.extractVideoFrames(path);
+      if (clip == null || clip.frames.isEmpty) {
+        widget.controller.turnErrorNotifier.value =
+            '短视频读取失败，请确认格式为 mp4 / mov / m4v';
+        return;
+      }
+      final frameHashes = <String>[];
+      for (var i = 0; i < clip.frames.length; i++) {
+        final uploaded = await widget.controller.uploadImage(
+          bytes: clip.frames[i],
+          filename: 'video_frame_${i + 1}.jpg',
+          mimeType: 'image/jpeg',
+        );
+        if (uploaded != null) {
+          frameHashes.add(uploaded.hash);
+        }
+      }
+      if (!mounted || frameHashes.isEmpty) return;
+      setState(() {
+        _pendingVideoClip = PendingVideoClip(
+          durationSec: clip.durationSec,
+          frameHashes: frameHashes,
+          filename: clip.filename,
+          previewBytes: clip.frames.first,
+        );
+      });
+      return;
+    }
+
+    final uploaded = await widget.controller.uploadImage(
+      bytes: picked.bytes,
+      filename: picked.filename,
+      mimeType: picked.mimeType,
+    );
+    if (uploaded == null || !mounted) return;
+    setState(() {
+      _pendingAttachments.add(
+        PendingAttachment(
+          hash: uploaded.hash,
+          filename: picked.filename,
+          bytes: picked.bytes,
+        ),
+      );
+    });
+  }
+
+  Future<void> _handleDesktopPaths(List<String> paths) async {
+    if (_uploadingImage || paths.isEmpty) return;
+    setState(() => _uploadingImage = true);
+    try {
+      for (final path in paths) {
+        final picked = await loadPickedFileFromPath(path);
+        if (picked == null || !mounted) continue;
+        await _handlePickedOrDroppedFile(picked);
+      }
+    } on ApiException catch (e) {
+      widget.controller.turnErrorNotifier.value = e.message;
+    } catch (_) {
+      widget.controller.turnErrorNotifier.value = '媒体文件上传失败，请稍后重试';
+    } finally {
+      if (mounted) setState(() => _uploadingImage = false);
+    }
+  }
+
+  Future<bool> _handleDesktopPaste() async {
+    final clip = await DesktopMediaBridge.readClipboardMedia();
+    if (clip == null) return false;
+    if (clip.image != null) {
+      if (!_uploadingImage) {
+        setState(() => _uploadingImage = true);
+        try {
+          await _handlePickedOrDroppedFile(clip.image!);
+        } on ApiException catch (e) {
+          widget.controller.turnErrorNotifier.value = e.message;
+        } catch (_) {
+          widget.controller.turnErrorNotifier.value = '剪贴板图片上传失败，请稍后重试';
+        } finally {
+          if (mounted) setState(() => _uploadingImage = false);
+        }
+      }
+      return true;
+    }
+    final mediaPaths = clip.filePaths
+        .where((p) => isImageFilename(p) || isVideoFilename(p))
+        .toList(growable: false);
+    if (mediaPaths.isNotEmpty) {
+      await _handleDesktopPaths(mediaPaths);
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _pickAndUploadImage() async {
     if (_uploadingImage) return;
     setState(() => _uploadingImage = true);
@@ -137,21 +291,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final picker = widget.imagePicker ?? defaultPlatformImagePicker;
       final picked = await picker();
       if (picked == null || !mounted) return;
-      final uploaded = await widget.controller.uploadImage(
-        bytes: picked.bytes,
-        filename: picked.filename,
-        mimeType: picked.mimeType,
-      );
-      if (uploaded == null || !mounted) return;
-      setState(() {
-        _pendingAttachments.add(
-          PendingAttachment(
-            hash: uploaded.hash,
-            filename: picked.filename,
-            bytes: picked.bytes,
-          ),
-        );
-      });
+      await _handlePickedOrDroppedFile(picked);
     } on ApiException catch (e) {
       widget.controller.turnErrorNotifier.value = e.message;
     } catch (_) {
@@ -217,6 +357,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  String? _previousAssistantModel(List<TimelineItem> items, int beforeIndex) {
+    for (var i = beforeIndex - 1; i >= 0; i--) {
+      final prev = items[i];
+      if (prev.isAssistant &&
+          !prev.isSilence &&
+          !prev.isMemoryTask &&
+          !prev.isSystemNotice &&
+          prev.model != null &&
+          prev.model!.isNotEmpty) {
+        return prev.model;
+      }
+    }
+    return null;
   }
 
   bool _shouldShowDateDivider(List<TimelineItem> items, int index) {
@@ -307,37 +462,42 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                           builder: (context, settings, _) =>
                               ValueListenableBuilder<ActivitySessionView?>(
                             valueListenable: widget.controller.activeActivityNotifier,
-                            builder: (context, activity, _) => DoorThresholdBar(
-                              door: door,
-                              showReconnectingHint: showHint,
-                              settings: settings,
-                              activeActivity: activity,
-                              isWide: isWide,
-                              sidebarOpen: isWide && _showDesktopSidebar,
-                              rightButtonKey: _rightActivityAnchorKey,
-                              onOpenLeftDrawer: () {
-                                if (isWide) {
-                                  setState(
-                                    () => _showDesktopSidebar = !_showDesktopSidebar,
-                                  );
-                                } else {
-                                  _scaffoldKey.currentState?.openDrawer();
-                                }
-                              },
-                              onOpenRightDrawer: () {
-                                if (isWide) {
-                                  unawaited(
-                                    showActivityPopover(
-                                      context,
-                                      anchorKey: _rightActivityAnchorKey,
-                                      controller: widget.controller,
-                                    ),
-                                  );
-                                } else {
-                                  _scaffoldKey.currentState?.openEndDrawer();
-                                }
-                              },
-                              onOpenSettings: _toggleSettings,
+                            builder: (context, activity, _) =>
+                                ValueListenableBuilder<ActiveTurnState?>(
+                              valueListenable: widget.controller.activeTurnNotifier,
+                              builder: (context, activeTurn, _) => DoorThresholdBar(
+                                door: door,
+                                showReconnectingHint: showHint,
+                                settings: settings,
+                                activeActivity: activity,
+                                isReplying: activeTurn != null,
+                                isWide: isWide,
+                                sidebarOpen: isWide && _showDesktopSidebar,
+                                rightButtonKey: _rightActivityAnchorKey,
+                                onOpenLeftDrawer: () {
+                                  if (isWide) {
+                                    setState(
+                                      () => _showDesktopSidebar = !_showDesktopSidebar,
+                                    );
+                                  } else {
+                                    _scaffoldKey.currentState?.openDrawer();
+                                  }
+                                },
+                                onOpenRightDrawer: () {
+                                  if (isWide) {
+                                    unawaited(
+                                      showActivityPopover(
+                                        context,
+                                        anchorKey: _rightActivityAnchorKey,
+                                        controller: widget.controller,
+                                      ),
+                                    );
+                                  } else {
+                                    _scaffoldKey.currentState?.openEndDrawer();
+                                  }
+                                },
+                                onOpenSettings: _toggleSettings,
+                              ),
                             ),
                           ),
                         ),
@@ -453,30 +613,145 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                 return ValueListenableBuilder<ActiveTurnState?>(
                                                   valueListenable:
                                                       widget.controller.activeTurnNotifier,
-                                                  builder: (context, active, _) {
-                                                    if (active == null) {
-                                                      if (items.isEmpty) {
-                                                        return Padding(
-                                                          padding: const EdgeInsets.only(top: 96),
-                                                          child: _EmptyRoomState(door: door),
-                                                        );
-                                                      }
-                                                      return const SizedBox.shrink();
-                                                    }
-                                                    return StreamingAssistantBubble(
-                                                      active: active,
-                                                      onAbort: widget.controller.abortActiveTurn,
-                                                    );
-                                                  },
+                                                  builder: (context, active, _) =>
+                                                      ValueListenableBuilder<TurnFailureState?>(
+                                                    valueListenable: widget
+                                                        .controller
+                                                        .turnFailureNotifier,
+                                                    builder: (context, failure, _) =>
+                                                        ValueListenableBuilder<TurnSilenceNotice?>(
+                                                      valueListenable: widget
+                                                          .controller
+                                                          .turnSilenceNotifier,
+                                                      builder: (context, silence, _) =>
+                                                          ValueListenableBuilder<String?>(
+                                                        valueListenable: widget
+                                                            .controller
+                                                            .pendingModelSwitchNotifier,
+                                                        builder: (context, pendingModel, _) {
+                                                          final prevModel =
+                                                              _previousAssistantModel(
+                                                            items,
+                                                            items.length,
+                                                          );
+                                                          if (active != null) {
+                                                            final showPendingSwitch =
+                                                                pendingModel != null &&
+                                                                pendingModel.isNotEmpty &&
+                                                                prevModel != pendingModel;
+                                                            final bubble =
+                                                                StreamingAssistantBubble(
+                                                              active: active,
+                                                              onAbort: widget
+                                                                  .controller
+                                                                  .abortActiveTurn,
+                                                            );
+                                                            if (!showPendingSwitch) {
+                                                              return bubble;
+                                                            }
+                                                            return Column(
+                                                              mainAxisSize:
+                                                                  MainAxisSize.min,
+                                                              children: [
+                                                                ModelSwitchDivider(
+                                                                  model: pendingModel,
+                                                                ),
+                                                                bubble,
+                                                              ],
+                                                            );
+                                                          }
+
+                                                          if (items.isEmpty &&
+                                                              failure == null &&
+                                                              silence == null) {
+                                                            return Padding(
+                                                              padding:
+                                                                  const EdgeInsets.only(
+                                                                top: 96,
+                                                              ),
+                                                              child: _EmptyRoomState(
+                                                                door: door,
+                                                              ),
+                                                            );
+                                                          }
+                                                          if (failure == null &&
+                                                              silence == null) {
+                                                            return const SizedBox
+                                                                .shrink();
+                                                          }
+                                                          return Column(
+                                                            mainAxisSize:
+                                                                MainAxisSize.min,
+                                                            children: [
+                                                              if (silence != null)
+                                                                SilenceLine(
+                                                                  key: Key(
+                                                                    'turn_silence_${silence.turnId}',
+                                                                  ),
+                                                                  seed: silence.turnId,
+                                                                  ownTime:
+                                                                      silence.ownTime,
+                                                                ),
+                                                              if (failure != null)
+                                                                ValueListenableBuilder<bool>(
+                                                                  valueListenable: widget
+                                                                      .controller
+                                                                      .retryingTurnNotifier,
+                                                                  builder: (
+                                                                    context,
+                                                                    retrying,
+                                                                    _,
+                                                                  ) =>
+                                                                      FailureLine(
+                                                                    failure: failure,
+                                                                    retrying: retrying,
+                                                                    onRetry: widget
+                                                                        .controller
+                                                                        .retryFailedTurn,
+                                                                    onDismiss: () {
+                                                                      widget
+                                                                          .controller
+                                                                          .turnFailureNotifier
+                                                                          .value = null;
+                                                                    },
+                                                                  ),
+                                                                ),
+                                                            ],
+                                                          );
+                                                        },
+                                                      ),
+                                                    ),
+                                                  ),
                                                 );
                                               }
                                               final item = items[msgIndex];
                                               final showDivider =
                                                   _shouldShowDateDivider(items, msgIndex);
+                                              final prevModel =
+                                                  _previousAssistantModel(
+                                                items,
+                                                msgIndex,
+                                              );
+                                              final showModelSwitch =
+                                                  item.isAssistant &&
+                                                  !item.isSilence &&
+                                                  !item.isMemoryTask &&
+                                                  !item.isSystemNotice &&
+                                                  item.model != null &&
+                                                  item.model!.isNotEmpty &&
+                                                  prevModel != null &&
+                                                  prevModel != item.model;
 
                                               Widget entry;
                                               if (item.isMemoryTask) {
                                                 entry = MemoryTaskRow(item: item);
+                                              } else if (item.isSilence) {
+                                                entry = SilenceLine(
+                                                  key: Key('silence_item_${item.id}'),
+                                                  seed: item.id,
+                                                  ownTime: item.kind == 'wake' ||
+                                                      item.kind == 'silence',
+                                                );
                                               } else if (item.isSystemNotice) {
                                                 entry = SystemNoticeRow(item: item);
                                               } else {
@@ -489,11 +764,20 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                 );
                                               }
 
-                                              if (!showDivider) return entry;
+                                              if (!showDivider && !showModelSwitch) {
+                                                return entry;
+                                              }
                                               return Column(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
-                                                  TimelineDateDivider(epochMs: item.createdAt),
+                                                  if (showDivider)
+                                                    TimelineDateDivider(
+                                                      epochMs: item.createdAt,
+                                                    ),
+                                                  if (showModelSwitch)
+                                                    ModelSwitchDivider(
+                                                      model: item.model!,
+                                                    ),
                                                   entry,
                                                 ],
                                               );
@@ -552,23 +836,48 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                         ),
                         ValueListenableBuilder<DoorStatus>(
                           valueListenable: widget.controller.doorNotifier,
-                          builder: (context, door, _) => AdaptiveComposer(
-                            door: door,
-                            controller: _inputController,
-                            pendingAttachments: _pendingAttachments,
-                            pendingSticker: _pendingSticker,
-                            profile: widget.controller.profileNotifier.value,
-                            uploadingImage: _uploadingImage,
-                            sending: _sending,
-                            onPickImage: _pickAndUploadImage,
-                            onOpenStickers: _openStickerSheet,
-                            onRemoveAttachment: (idx) {
-                              setState(() => _pendingAttachments.removeAt(idx));
-                            },
-                            onClearSticker: () {
-                              setState(() => _pendingSticker = null);
-                            },
-                            onSend: _send,
+                          builder: (context, door, _) =>
+                              ValueListenableBuilder<ActiveTurnState?>(
+                            valueListenable: widget.controller.activeTurnNotifier,
+                            builder: (context, activeTurn, _) => AdaptiveComposer(
+                              door: door,
+                              controller: _inputController,
+                              pendingAttachments: _pendingAttachments,
+                              pendingVideoClip: _pendingVideoClip,
+                              pendingSticker: _pendingSticker,
+                              profile: widget.controller.profileNotifier.value,
+                              uploadingImage: _uploadingImage,
+                              sending: _sending,
+                              isReplying: activeTurn != null,
+                              isDraggingFiles: _isDraggingFiles,
+                              onPickImage: _pickAndUploadImage,
+                              onOpenStickers: _openStickerSheet,
+                              onRemoveAttachment: (idx) {
+                                setState(() => _pendingAttachments.removeAt(idx));
+                              },
+                              onRemoveVideoClip: () {
+                                setState(() => _pendingVideoClip = null);
+                              },
+                              onClearSticker: () {
+                                setState(() => _pendingSticker = null);
+                              },
+                              onPasteClipboard: DesktopMediaBridge.isSupported
+                                  ? _handleDesktopPaste
+                                  : null,
+                              onVoiceInput: () {
+                                ScaffoldMessenger.of(context)
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(
+                                    const SnackBar(
+                                      content: Text('语音输入即将支持'),
+                                      duration: Duration(seconds: 2),
+                                    ),
+                                  );
+                              },
+                              onAbort: () =>
+                                  unawaited(widget.controller.abortActiveTurn()),
+                              onSend: _send,
+                            ),
                           ),
                         ),
                       ],

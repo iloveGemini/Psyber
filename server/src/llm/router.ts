@@ -229,6 +229,14 @@ export class DynamicChatModel implements ChatModelClient {
     return this.cached?.client.contextWindow ?? 200_000;
   }
 
+  get modelId(): string | undefined {
+    const slotRef =
+      this.slot === "memory_task"
+        ? (this.deps.getConfig().llm?.slots?.memory_task ?? this.deps.getConfig().llm?.slots?.chat)
+        : this.deps.getConfig().llm?.slots?.chat;
+    return this.cached?.client.modelId ?? slotRef?.model;
+  }
+
   async *stream(request: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
     const creds = await loadCredentials(this.deps.dataDir);
     const resolved = resolveByokSlot(this.deps.getConfig(), creds, this.slot);

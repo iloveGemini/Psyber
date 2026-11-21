@@ -151,6 +151,40 @@ export class EventStore {
     return row ? mapRow(row) : null;
   }
 
+  /** 查找指定 turnId 对应的活跃用户消息（供原地无痕重试使用） */
+  findUserEventByTurnId(turnId: string): StoredEvent | null {
+    const row = this.db
+      .query(
+        `SELECT * FROM events
+         WHERE turn_id = ? AND role = 'user' AND status = 'active'
+         ORDER BY seq DESC
+         LIMIT 1`,
+      )
+      .get(turnId) as EventRow | null;
+    return row ? mapRow(row) : null;
+  }
+
+  /** 判断指定 turnId 或用户消息 ID 是否已经成功落盘过活跃助手回复 */
+  hasAssistantReplyForTurn(turnId: string, userEventId?: string): boolean {
+    const row = userEventId
+      ? this.db
+          .query(
+            `SELECT 1 FROM events
+             WHERE role = 'assistant' AND status = 'active'
+               AND (turn_id = ? OR json_extract(metadata, '$.inReplyTo') = ?)
+             LIMIT 1`,
+          )
+          .get(turnId, userEventId)
+      : this.db
+          .query(
+            `SELECT 1 FROM events
+             WHERE turn_id = ? AND role = 'assistant' AND status = 'active'
+             LIMIT 1`,
+          )
+          .get(turnId);
+    return row !== null;
+  }
+
   /**
    * 按 seq DESC 截取 limit 条活跃事件后翻转为 seq ASC（旧→新）返回，供聊天时间线分页。
    */

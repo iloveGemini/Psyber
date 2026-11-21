@@ -9,6 +9,7 @@ import 'package:psyber_app/core/models/models.dart';
 import 'package:psyber_app/core/network/api_client.dart';
 import 'package:psyber_app/core/state/app_controller.dart';
 import 'package:psyber_app/core/storage/session_storage.dart';
+import 'package:psyber_app/features/chat/widgets/timeline_items.dart';
 import 'package:psyber_app/features/settings/settings_panel.dart';
 import 'package:psyber_app/main.dart';
 
@@ -63,6 +64,8 @@ class FakePsyberApiClient implements PsyberApiClient {
   int historyFetchCount = 0;
   int revokeCount = 0;
   String? lastRevokedDeviceId;
+  final List<String> retriedTurnIds = <String>[];
+  int wrapUpCallCount = 0;
 
   StreamController<SseEventFrame>? _streamController;
 
@@ -260,11 +263,13 @@ class FakePsyberApiClient implements PsyberApiClient {
     required String content,
     List<String>? attachments,
     String? stickerId,
+    VideoClipInfo? videoClip,
   }) async {
     sentPayloads.add({
       'content': content,
       'attachments': attachments,
       'stickerId': stickerId,
+      'videoClip': videoClip?.toJson(),
     });
     final isClosed = door.state.isDoorNoteMode;
     final nextSeq = (history.isEmpty ? 0 : history.last.seq) + 1;
@@ -288,6 +293,7 @@ class FakePsyberApiClient implements PsyberApiClient {
       content: content,
       attachments: attachments ?? const <String>[],
       sticker: matchedSticker,
+      videoClip: videoClip,
       createdAt: 1795046400000 + nextSeq * 1000,
     );
     history.add(msg);
@@ -295,6 +301,22 @@ class FakePsyberApiClient implements PsyberApiClient {
       message: msg,
       deliveredAs: isClosed ? 'door_note' : 'chat',
       turnId: msg.turnId,
+    );
+  }
+
+  @override
+  Future<String> retryTurn(ConnectionProfile profile, String turnId) async {
+    retriedTurnIds.add(turnId);
+    return 'turn_retry_${retriedTurnIds.length}';
+  }
+
+  @override
+  Future<WrapUpResult> wrapUpSession(ConnectionProfile profile) async {
+    wrapUpCallCount += 1;
+    return WrapUpResult(
+      oldSessionId: 'sess_1',
+      newSessionId: 'sess_${wrapUpCallCount + 1}',
+      queued: true,
     );
   }
 
@@ -477,7 +499,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('chat_input_field')), findsOneWidget);
-    expect(find.text('发送'), findsOneWidget);
+    expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
+    expect(find.byKey(const Key('chat_send_button')), findsNothing);
 
     api.door = const DoorStatus(
       state: DoorState.closed,
@@ -494,13 +517,16 @@ void main() {
 
     expect(find.text('门关着'), findsOneWidget);
     expect(find.text('先歇会儿'), findsOneWidget);
-    expect(find.text('塞纸条'), findsOneWidget);
+    expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('door_threshold_toggle')));
     await tester.pumpAndSettle();
     expect(find.textContaining('门牌便签：先歇会儿'), findsOneWidget);
 
     await tester.enterText(find.byKey(const Key('chat_input_field')), '晚点再聊，放门口啦');
+    await tester.pump();
+    expect(find.byKey(const Key('chat_send_button')), findsOneWidget);
+    expect(find.byKey(const Key('chat_voice_button')), findsNothing);
     await tester.tap(find.byKey(const Key('chat_send_button')));
     await tester.pumpAndSettle();
 
@@ -508,7 +534,7 @@ void main() {
     expect(find.text('晚点再聊，放门口啦'), findsOneWidget);
   });
 
-  testWidgets('流式 thinking 默认折叠、turn.tool 进度与中止生成', (tester) async {
+  testWidgets('流式 thinking 默认折叠、turn.tool 进度与中止生成（含门楣回复指示与输入台三态按钮）', (tester) async {
     final api = FakePsyberApiClient();
     final storage = MemorySessionStorage(
       const ConnectionProfile(
@@ -529,7 +555,32 @@ void main() {
     await tester.pumpWidget(PsyberApp(controller: controller));
     await tester.pumpAndSettle();
 
+    // 初始空输入：显示语音输入按钮，且左侧图标与右侧按钮垂直居中对齐
+    expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
+    expect(find.byKey(const Key('chat_send_button')), findsNothing);
+    expect(find.byKey(const Key('chat_stop_button')), findsNothing);
+    final imgCenterY = tester.getCenter(find.byKey(const Key('pick_image_button'))).dy;
+    final stickerCenterY = tester.getCenter(find.byKey(const Key('open_stickers_button'))).dy;
+    final voiceCenterY = tester.getCenter(find.byKey(const Key('chat_voice_button'))).dy;
+    expect((imgCenterY - stickerCenterY).abs(), lessThanOrEqualTo(0.5));
+    expect((imgCenterY - voiceCenterY).abs(), lessThanOrEqualTo(0.5));
+
+    // 有输入时切换为发送箭头，清空后恢复语音输入
+    await tester.enterText(find.byKey(const Key('chat_input_field')), 'hello');
+    await tester.pump();
+    expect(find.byKey(const Key('chat_send_button')), findsOneWidget);
+    expect(find.byKey(const Key('chat_voice_button')), findsNothing);
+    await tester.enterText(find.byKey(const Key('chat_input_field')), '');
+    await tester.pump();
+    expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
+
+    // AI 开始回复（未出字前）：门楣、气泡与输入台均明确显示正在回复 / 停止按钮
     api.emitSse('turn.start', {'turnId': 'turn_live', 'mode': 'chat'});
+    await tester.pump();
+    expect(find.byKey(const Key('door_replying_indicator')), findsOneWidget);
+    expect(find.byKey(const Key('streaming_replying_placeholder')), findsOneWidget);
+    expect(find.byKey(const Key('chat_stop_button')), findsOneWidget);
+
     api.emitSse('turn.thinking', {'turnId': 'turn_live', 'delta': '先确认对方刚刚提到的事情'});
     api.emitSse('turn.tool', {
       'turnId': 'turn_live',
@@ -550,14 +601,17 @@ void main() {
     expect(find.text('思考中…'), findsOneWidget);
     expect(find.text('翻看日记 · 进行中'), findsOneWidget);
     expect(find.text('先确认对方刚刚提到的事情'), findsNothing);
+    expect(find.byKey(const Key('streaming_replying_badge')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('thinking_toggle')));
     await tester.pump();
     expect(find.text('先确认对方刚刚提到的事情'), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('abort_turn_button')));
+    await tester.tap(find.byKey(const Key('chat_stop_button')));
     await tester.pump();
     expect(api.abortedTurnIds, ['turn_live']);
+    expect(find.byKey(const Key('chat_stop_button')), findsNothing);
+    expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
   });
 
   testWidgets('召回评测浮条默认关闭，开启后懒加载并可提交标注；切后台静默重连不弹红条', (tester) async {
@@ -1068,6 +1122,259 @@ void main() {
       expect(find.text('Psyber'), findsOneWidget);
       expect(find.text('门开着'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('turn.error 渲染内联 FailureLine 并原地重试，turn.silence 渲染 SilenceLine', (
+    tester,
+  ) async {
+    final api = FakePsyberApiClient()
+      ..history = [
+        const TimelineItem(
+          id: 'ev_1',
+          seq: 1,
+          sessionId: 'sess_1',
+          turnId: 'turn_1',
+          role: 'user',
+          kind: 'chat',
+          content: '今天风很大',
+          createdAt: 1795046401000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    api.emitSse('turn.error', {
+      'turnId': 'turn_1',
+      'code': 'PROVIDER_ERROR',
+      'message': '上游模型服务暂时超时',
+      'retryable': true,
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('failure_line')), findsOneWidget);
+    expect(find.text('上一轮中断 · 模型服务暂时没有响应'), findsOneWidget);
+    expect(find.text('今天风很大'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('retry_failed_turn_button')));
+    await tester.pumpAndSettle();
+
+    expect(api.retriedTurnIds, ['turn_1']);
+    expect(find.text('今天风很大'), findsOneWidget);
+    expect(find.byKey(const Key('failure_line')), findsNothing);
+
+    api.emitSse('turn.silence', {'turnId': 'turn_2', 'ownTime': false});
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('silence_line')), findsOneWidget);
+    expect(find.byKey(const Key('failure_line')), findsNothing);
+  });
+
+  testWidgets('TurnJournalCard 聚合思考与非隐私工具，看屏独立展示，换模型显示分割线', (
+    tester,
+  ) async {
+    final api = FakePsyberApiClient()
+      ..history = [
+        const TimelineItem(
+          id: 'ev_1',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'chat',
+          content: '我记得你上次说喜欢乌龙茶。',
+          model: 'claude-sonnet',
+          thinking: '先翻翻之前提到的口味',
+          toolSummary: [
+            ToolSummaryItem(name: 'recall_memory', label: '翻看记忆库', ok: true, kind: 'memory'),
+            ToolSummaryItem(name: 'look_at_screen', label: '看一眼屏幕', ok: true, kind: 'screen'),
+          ],
+          createdAt: 1795046401000,
+        ),
+        const TimelineItem(
+          id: 'ev_2',
+          seq: 2,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'chat',
+          content: '现在切换过来继续聊。',
+          model: 'gpt-4o',
+          createdAt: 1795046402000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TurnJournalCard), findsOneWidget);
+    expect(find.byType(ScreenToolCard), findsOneWidget);
+    expect(find.byKey(const Key('model_switch_gpt-4o')), findsOneWidget);
+    expect(find.text('思索 · 翻看记忆库'), findsOneWidget);
+    expect(find.text('看一眼屏幕'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('thinking_toggle')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('thinking_body')), findsOneWidget);
+    expect(find.textContaining('先翻翻之前提到的口味'), findsOneWidget);
+    expect(find.textContaining('翻看记忆库'), findsWidgets);
+  });
+
+  testWidgets('草稿自动保存并恢复，且短视频消息渲染 VideoTile', (tester) async {
+    final api = FakePsyberApiClient()
+      ..history = [
+        const TimelineItem(
+          id: 'ev_1',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'user',
+          kind: 'chat',
+          content: '给你看一小段窗外雨景',
+          videoClip: VideoClipInfo(durationSec: 6.0, frameHashes: ['h1', 'h2']),
+          createdAt: 1795046401000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+
+    final c1 = AppController(api: api, storage: storage);
+    await c1.initialize();
+    await tester.pumpWidget(PsyberApp(controller: c1));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('video_tile_card')), findsOneWidget);
+    expect(find.text('0:06'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('chat_input_field')), '还没说完的一半');
+    await tester.pump();
+    expect(await storage.loadDraft(), '还没说完的一半');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.closeStream();
+    c1.dispose();
+
+    final c2 = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      c2.dispose();
+    });
+    await c2.initialize();
+    await tester.pumpWidget(PsyberApp(controller: c2));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byKey(const Key('chat_input_field')));
+    expect(field.controller?.text, '还没说完的一半');
+  });
+
+  testWidgets(
+    '移动端 Enter 不直接发送而是换行',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'iPhone',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(const Key('chat_input_field')), '第一行');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(api.sentPayloads, isEmpty);
+    },
+  );
+
+  testWidgets(
+    '桌面端 Enter 发送且侧边栏支持手动存记忆换段',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(const Key('chat_input_field')), '桌面端直接回车发出');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(api.sentPayloads, hasLength(1));
+      expect(api.sentPayloads.single['content'], '桌面端直接回车发出');
+
+      await tester.tap(find.byKey(const Key('manual_wrap_up_button')));
+      await tester.pumpAndSettle();
+
+      expect(api.wrapUpCallCount, 1);
+      expect(find.text('已开启新一段，旧对话正在后台整理'), findsOneWidget);
     },
   );
 }

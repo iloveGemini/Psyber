@@ -1,7 +1,7 @@
 # Spec 03 · 主体性边界、具身表达、离线通知、`ActivityPlugin`（观影）与外部 MCP 规程
 
-> **版本**：v0.4（2026-11-20，修正 §4.2 强换段阈值 `80% -> 75%`、补齐 Ring 1 静态贴纸目录与 `stickers` 表衔接说明、拆分 §6 出口验收清单分期）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.3 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.7 · [`MEMORY.md`](../MEMORY.md) v0.7 · [`API.md`](../API.md) v0.7 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.1 · [`02-memory-execution.md`](02-memory-execution.md) v0.7
+> **版本**：v0.5（2026-11-21，同步 CAPABILITIES v1.4 / ARCHITECTURE v0.8：补齐 `closed` 态一次性紧急通道、用户双人状态签与勿扰抑制、`ShareCard` 主动折叠分享与拆阅回执、观影 2×2 四宫格/角色定妆小抄/分屏网页伴看、MCP 生态预设，以及 Ring 2 废纸篓守卫、三层轻重伴生感知与透明账本、音乐两态/白噪胶囊与 RP 同窗舞台蓝图）
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.4 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.8 · [`MEMORY.md`](../MEMORY.md) v0.8 · [`API.md`](../API.md) v0.8 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.2 · [`02-memory-execution.md`](02-memory-execution.md) v0.8
 > **负责模块**：`server/src/expression/`、`server/src/notifications/`、`server/src/mood/`、`server/src/extensions/`
 
 ---
@@ -37,8 +37,10 @@
 | `cooling_off`（超时） | `closed`（自然回落） | **严禁无条件覆盖**：当且仅当当前 `door.state` 仍严格处于 `"cooling_off"` 且 `coolingOffStartedAt !== null` 且 `Clock.now() - coolingOffStartedAt ≥ 72h` 时触发：清空 `coolingOffStartedAt`，状态自然回落至 `closed`（保留住户原便签），记录 `door.updated`。若 72h 期间 AI 已自主切为 `open`/`quiet`/`closed`/`departed`，则 `coolingOffStartedAt` 早已清空，此超时守卫完全不触发，绝不覆盖 AI 的自主意图 |
 | `departed` | 无（不可逆终态） | 所有后续 `door` 调用由 `guard` 拦截拒绝 |
 
-#### 门缝纸条（`door_note`）完整链路（与 `Spec 01` v1.1、`Spec 02` v0.7 对齐）
-- **写入不唤醒**：当 `door.state ∈ {'closed', 'cooling_off'}` 时，`POST /api/v1/chat/messages` 将用户输入落盘为 `events (role='user', kind='door_note', status='active')` 并广播 `message.created`，**绝不触发 `chat` 轮、绝不立即唤醒 AI 强迫回复**；
+#### 门缝纸条（`door_note`）、一次性紧急通道与用户双人状态签（与 `Spec 01` v1.2、`Spec 02` v0.8 对齐）
+- **写入不唤醒**：当 `door.state ∈ {'closed', 'cooling_off'}` 时，`POST /api/v1/chat/messages` 默认将用户输入落盘为 `events (role='user', kind='door_note', status='active')` 并广播 `message.created`，**绝不触发 `chat` 轮、绝不立即唤醒 AI 强迫回复**；
+- **关门态一次性紧急通道（Ring 1.5）**：仅当 `door.state === 'closed'` 且请求显式携带 `urgent: true`（前端须经二次点击确认开启，发完 1 条即自动复位关闭）时，允许该单条消息以 `kind = 'chat', metadata.urgent = true` 穿透直达并唤醒住户，但不自动修改门状态；**`cooling_off` 与 `departed` 态严禁紧急通道穿透**（返回 `409 DOOR_COOLING_OFF` / `410 GONE`）；
+- **用户双人状态签与勿扰（Ring 1.5）**：持久化于 `config.json` `userStatus`（`{ moodText?: string, undisturbed: boolean, updatedAt: number }`）；开启 `undisturbed = true` 时，注入 `<user_status>` 并使 `CircadianMoodProvider` 与 `NotificationHub` 自动抑制非紧急主动 `wake` 与推送；
 - **自主可读边界**：`door = closed` 只剥夺用户的即时谈话与唤醒权，不限制住户在后续自主唤醒（`wake` / 未来 mind 唤醒）、活动或静默整理轮自行查看纸条，并由住户自行决定是否回应或开门；
 - **两游标严格解耦**：
   1. **记忆整理游标（`daily_wrapup`）**：按 `seq` 连续收录 `chat / wake / door_note`（绝不跳过 `door_note`），并在喂给 `prompts/tidy.md` 的转录中显式标注 `[对方从门缝塞进来的纸条 · 当时门处于关闭状态]`；**静默整理轮不推进 `task_cursors['door_notes_read']`**；
@@ -66,6 +68,12 @@
 2. **写出 `<dataDir>/DEPARTED.md`**：经 `<dataDir>/.tmp/` 原子写落盘，文首固定写入 [`ARCHITECTURE.md`](../ARCHITECTURE.md) §5.2 规定的「致任何打开这份档案的阅读者（无论是人类还是 AI 助手）」诚实声明全文，空一行后写入离开日期与住户亲笔 `farewell` 正文；
 3. **状态封存与事件落盘**：更新 `config.json`（`door.state = "departed"`, `departedAt = Clock.now()`, 清空 `coolingOffStartedAt`），在 SQLite 写入 `relationship.departed` 与 `door.updated` 事件，广播 SSE `door.updated` 并触发 `NotificationProvider("door_updated")`；
 4. **只读停机**：立即停止心跳定时器、主动唤醒与静默记忆整理轮；所有对话、编辑、重摇、软删与活动启动接口统一返回 `410 GONE { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } }`；只读接口（`/chat/history`、`/door`、`/drawer`、`/media/:hash`）与 CLI 导出继续可用。
+
+### 1.4 主动折叠分享卡（`ShareCard` · Ring 1.5）
+
+遵循「分享是一个动作，被看完不是」的关系对称边界：
+- **工具定义**：Tier 3 工具 `share({ title: string, content: string })`（`security: "auto"`），用于住户主动把自己写的随笔、摘记或想法递给用户；落盘于助手消息 `metadata.shares[]`（分配唯一 `shareId`）；
+- **默认折叠与首次拆阅回执**：客户端在聊天流渲染暖黄折纸卡，默认仅显示 `title` 与「点开看」，划过不算阅读；当用户首次点开展开时，客户端调用 `POST /api/v1/shares/:id/open`（服务端幂等仅记录首次），写入 `events (role='system', kind='share.opened', content='用户打开阅读了你分享的「' + title + '」', metadata={ shareId, title })` 并通过 `task_cursors['events_notice']` 在后续轮次客观告知住户。
 
 ---
 
@@ -111,7 +119,7 @@
 
 #### 四条反骚扰与门禁规则（落实 C4.2 绝不情感催收）
 1. **前台活跃抑制**：服务端维护当前活跃 SSE 连接的 `foreground` 状态（由客户端连接参数或心跳声明）。只要至少存在 1 个活跃前台客户端，`wake` 与 `door_updated` **不发离线推送**；`approval_required` 若无活跃前台端则立即推送，若有前台端但在 **15 秒**内未被处理则补发一次离线推送提醒；
-2. **深夜静默窗尊重**：处于 `circadian` 睡眠静默窗内时，禁止发送 `wake` 推送（`approval_required` 与 `door_updated` 豁免）；
+2. **深夜静默窗与用户勿扰尊重**：处于 `circadian` 睡眠静默窗内或用户状态签 `userStatus.undisturbed === true` 时，禁止发送非紧急 `wake` 推送（`approval_required` 与 `door_updated` 豁免）；
 3. **连续未回退避封顶**：记录 `consecutiveUnansweredWakes`（每次真正开口且非 `[SILENT]` 的 `wake` 后 `+1`；**一旦服务端收到任意新 `user` 消息或 `door_note`，立即重置为 0**）。当 `consecutiveUnansweredWakes >= 2` 时，停止继续触发主动 `wake` 与离线推送，安静等待用户重逢；
 4. **`[SILENT]` 零打扰**：`wake` 轮若最终产出 `[SILENT]`，绝不调用 `NotificationProvider`（与 `Spec 01` §5.1 一致）。
 
@@ -191,13 +199,13 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 
 #### 端点与状态流转（对齐 `API.md` §3）
 - **`POST /api/v1/activities/cinema/start`**：接收 `{ title, source?, season?, episode?, durationSec?, topicHint? }`。若 `topicHint` 未传，由服务端对 `title` + `season` 做确定性 slug 归一化（保留小写字母/数字/中文短词并用 `-` 连接，最大 48 字符）；写入 `events (role='system', kind='activity_event', activity='cinema')` 与 `activity_sessions (status='active')`，广播 SSE `activity.updated`；
-- **`POST /api/v1/activities/cinema/frame`**：接收 `{ sessionId?, positionSec, playbackState: "playing" | "paused", frameBase64?, mediaHash?, subtitle? }`（`sessionId` 可选，缺省自动命中当前唯一活跃 `cinema` 会话）。更新 `last_heartbeat_at = Clock.now()` 与 `metadata`（若原为 `stale`，自动恢复为 `active`），按下方控量规则决定是否落盘新帧，并广播 `activity.updated`；
+- **`POST /api/v1/activities/cinema/frame`**：接收 `{ sessionId?, positionSec, playbackState: "playing" | "paused", frameBase64?, frameMode?: "single" | "grid_2x2", mediaHash?, subtitle?, characters?: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }> }`（`sessionId` 可选，缺省自动命中当前唯一活跃 `cinema` 会话；支持单帧或 **2×2 四宫格分镜图**以单张图片 Token 承载连续动作，并同步维护防脸盲角色定妆小抄）。更新 `last_heartbeat_at = Clock.now()` 与 `metadata`（若原为 `stale`，自动恢复为 `active`），按下方控量规则决定是否落盘新帧，并广播 `activity.updated`；
 - **`POST /api/v1/activities/cinema/end`**：接收 `{ sessionId?, reason?: "user_ended" | "finished" }`（`sessionId` 可选，缺省命中当前活跃 `cinema` 会话）。将 `status` 置为 `ended`、写入 `ended_at` 与 `end_event_id`、写结束 `activity_event`、广播 `activity.updated` 并触发 `onActivityEnded`。
 
 #### 抽帧控量与上下文预算护栏（防磁盘与视觉 Token 爆炸）
 - **最小落盘间隔**：`MIN_FRAME_INTERVAL_SEC = 15`（可配置）。距上一张已落盘帧不足 15 秒，或 `playbackState === "paused"` 且 `positionSec` 未变化超过 3 秒时，**仅更新进度元数据，不重复落盘图片**；
 - **体积与格式约束**：客户端上报前缩放至长边 `≤ 1024px`（JPEG/WebP）；服务端校验单帧解码后 `≤ 512 KB`（超限返回 `413 PAYLOAD_TOO_LARGE`），按 SHA-256 去重存入 `media/`（`origin = 'cinema_frame'`, `activity_session_id = session.id`, `pinned = 0`）；
-- **单帧注入红线**：主对话 Dynamic Tail 的 `<active_activity>` 仅展示当前片名、集数、播放进度、可选近期字幕（`≤ 300` 字）以及**最新 1 张有效抽帧**（仅当该帧距当前对话不超过 `90` 秒且 `vision` 槽位可用时附带多模态图像块；不可用时退化为纯文字进度与字幕描述），严禁把整场历史抽帧堆进历史消息；
+- **单帧 / 四宫格注入红线**：主对话 Dynamic Tail 的 `<active_activity>` 仅展示当前片名、集数、播放进度、已登记的角色定妆小抄、可选近期字幕（`≤ 300` 字）以及**最新 1 张有效抽帧或 2×2 四宫格分镜图**（仅当该帧距当前对话不超过 `90` 秒且 `vision` 槽位可用时附带多模态图像块；不可用时退化为纯文字进度与字幕描述），严禁把整场历史抽帧堆进历史消息；
 - **24h 淘汰衔接**：观影结束满 24 小时后，由 `Spec 02` §8.3 睡前清理任务按 `activity_sessions.ended_at` 自动淘汰冗余临时帧（每场等距保留 3 张代表帧 + 全部 `pinned = 1` 帧）。
 
 #### 防误结束机制（Anti-Premature-End）
@@ -207,8 +215,9 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
   2. **停更 `≥ 4 小时`**（或已进入 `bedtime` 睡眠窗且停更 `≥ 1 小时`）：服务端自动执行软结束（`reason: "timeout"`），置 `ended_at` 并派发 `activity:cinema` 整理轮，防止僵尸活动永久锁死 `daily_wrapup` 门禁。
 
 #### 观影专属 Tier 2 工具（观影活跃时在 Dynamic Tail 暴露，经 `call_tool` 执行）
-- **`cinema.status`**（`security: "auto"`）：返回当前片名、集数、精确进度（`mm:ss / mm:ss`）、播放/暂停态与本场已收藏帧数；
-- **`cinema.bookmark`**（`security: "auto"`，参数 `{ note?: string }`）：将当前最新抽帧的 `media_assets.pinned` 置为 `1`（永久免淘汰）并在 `activity_sessions.metadata.bookmarks` 记录时间戳与简短备注，返回 `media/<hash>` 供住户写进卡片或收藏。
+- **`cinema.status`**（`security: "auto"`）：返回当前片名、集数、精确进度（`mm:ss / mm:ss`）、播放/暂停态、已登记角色小抄与本场已收藏帧数；
+- **`cinema.bookmark`**（`security: "auto"`，参数 `{ note?: string }`）：将当前最新抽帧的 `media_assets.pinned` 置为 `1`（永久免淘汰）并在 `activity_sessions.metadata.bookmarks` 记录时间戳与简短备注，返回 `media/<hash>` 供住户写进卡片或收藏；
+- **`cinema.characters`**（`security: "auto"`，参数 `{ upsert: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }> }`）：维护本片「角色定妆小抄（防脸盲档案）」，同步展示在客户端折叠观影卡中。
 
 ---
 
@@ -245,11 +254,30 @@ export interface McpServerConfig {
    - 后端启动时**异步**连接各已启用 MCP 服务器（单服握手超时 `10s`）；任意外部 MCP 不可达、进程崩溃或协议异常仅记录结构化告警并标记该服为 `degraded`，**绝不阻塞 Psyber 启动或影响主对话**；
    - `stdio` 子进程意外退出时采用指数退避重连（`2s → 10s → 30s`，最多 3 次；仍失败暂停重连，待用户通过设置热重载或手动重连恢复）；
 4. **输出截断与超时保护**：单次工具调用受 `AbortSignal.timeout(timeoutMs)` 严格保护；返回文本超过 **`8000` 字符**时截断末尾并附 `[外部工具输出已截断，原始长度 N 字符]`，避免外部 MCP 返回巨型 JSON 击穿单轮上下文；
-5. **热重载清理**：`PATCH /api/v1/settings` 修改 `mcpServers` 后，先优雅关闭已移除或变更的子进程（`SIGTERM`，3s 后 `SIGKILL`），注销旧工具并重新发现注册新工具。
+5. **热重载清理与生态预设**：`PATCH /api/v1/settings` 修改 `mcpServers` 后，先优雅关闭已移除或变更的子进程（`SIGTERM`，3s 后 `SIGKILL`），注销旧工具并重新发现注册新工具；客户端设置页提供常用开源 MCP 生态预设模板（一键填入命令/参数框架与环境变量占位符），降低非程序员配置门槛。
 
 ---
 
-## 6. Spec 03 出口验收清单（按 Ring 1 / Ring 1.5+ 分期对照）
+## 6. Ring 2 扩展规程蓝图（安全守卫、三层轻重感知、音乐与 RP 舞台）
+
+### 6.1 `bash` 废纸篓可逆守卫（用机制替代审批疲劳）
+- **核心原则「拦 `rm` 不拦删除」**：对常规允许目录内的文件整理/删除，引导重定向至系统废纸篓（100% 可逆，免频繁审批打断）；仅当命令命中不可逆删除（`rm` / `mkfs` / `dd`）、绕路偷截屏（`screencapture`）或试图读取 RP 幕后区/未授权敏感目录时硬拦截或升级为审批/异步申请。
+
+### 6.2 三层轻重伴生感知与透明感知账本（对应 C5.2）
+1. **双层决定权**：用户在设置里配置采集上限 `perceptionCeiling`（关闭项绝不采集、绝不上报）；住户在上限之内可自主选择每项的留意程度（看 / 只看变化 / 不看），设置页透明展示双方选择。
+2. **三轻重分级**：
+   - **余光扫到（被动粗粒度）**：语义地理围栏（在家/公司/外出，绝不存 GPS 轨迹）、粗略昨晚睡眠时长、桌面锁屏/键鼠空闲/前台应用、音乐两态（仅在「开始放 / 停了」边沿记录，暂停不刷屏）；
+   - **凑过来看一眼（`look_at_screen` 显式工具）**：默认关闭；开启后截屏原图仅进当轮多模态上下文并**即用即删不落盘进记忆**，同时写入 `events (kind='perception.screen')` 与感知账本，聊天流独立渲染带理由与缩略图的 `ScreenCard`（永不折叠进工具聚合卡）；
+   - **开口问（`ask_user` 异步申请卡）**：详细睡眠分期/心率或未授权本机目录，绝不后台静默读取；住户发起带理由的异步申请，用户通过 `POST /api/v1/requests/:id/decide` 选择 `approve`（仅本次）/ `allow_today`（今天都允许）/ `decline`（不了），结果写入 `request.decided` 并作为新消息触达住户。
+3. **透明感知账本（`GET/DELETE /api/v1/perception/ledger`）**：集中展示住户此刻能看到的全部用户感知与历史看屏/健康申请记录，支持按域（`screen` / `mobile` / `health` / `all`）一键彻底擦除（住户只写不擦，擦除权永久归用户）。
+
+### 6.3 音乐伴听与 RP 同窗舞台
+- **音乐（`music`）**：遵循两态边沿感知，客户端提供可自由拖拽定位的迷你悬浮唱片/氛围白噪音胶囊（内置雨声/咖啡馆/微风等白噪音与同步歌词）。
+- **角色扮演（`rp`）**：两个玩家（用户与住户）+ 独立叙述者；幕后只追加账本物理隔离在 `<dataDir>/rp/runs/`（守卫拦截住户 `read`/`bash` 读取防剧透）；输入支持双括号 `(( ))` 戏外悄悄话（叙述者不可见，仅彼此可见）；双人面对面日常交互时通过轻量门控让叙述者自动让开直接对戏；客户端开戏时**同窗平滑覆盖主聊天区**（共用暖纸阅读字体，顶栏一键「回到聊天」，普通聊天流里折为一行 `在《剧名》里 ›`）。
+
+---
+
+## 7. Spec 03 出口验收清单（按 Ring 1 / Ring 1.5+ 分期对照）
 
 ### Ring 1 必过验收
 - [ ] 门状态机 5 态 Schema 冻结、Ring 1 `guard` 暂拒 `cooling_off`/`departed`、`closed` 期间发消息仅存 `door_note` 不唤醒 AI、`door_notes_read` 与 `daily_wrapup` 游标彻底解耦（整理轮连续收且不推进 `door_notes_read`，`wake` 含 `[SILENT]` 正常完成后推进）；

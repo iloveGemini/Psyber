@@ -21,16 +21,24 @@ export function hashBearerToken(token: string): string {
 }
 
 function toTimelineItem(ev: StoredEvent, events: EventStore) {
-  const stickerId =
-    ev.metadata && typeof ev.metadata.stickerId === "string" ? ev.metadata.stickerId : null;
+  const meta = ev.metadata ?? {};
+  const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : null;
   const stickerRec = stickerId ? events.getSticker(stickerId) : null;
-  const recallCount =
-    ev.metadata && typeof ev.metadata.recallCount === "number" ? ev.metadata.recallCount : undefined;
+  const recallCount = typeof meta.recallCount === "number" ? meta.recallCount : undefined;
+  const toolSummary = Array.isArray(meta.toolSummary) ? meta.toolSummary : undefined;
+  const model = typeof meta.model === "string" ? meta.model : undefined;
+  const usage = meta.usage && typeof meta.usage === "object" ? meta.usage : undefined;
+  const videoClip =
+    meta.videoClip && typeof meta.videoClip === "object" ? meta.videoClip : undefined;
 
   return {
     ...ev,
     versionCount: 1,
     ...(recallCount !== undefined ? { recallCount } : {}),
+    ...(toolSummary !== undefined ? { toolSummary } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(usage !== undefined ? { usage } : {}),
+    ...(videoClip !== undefined ? { videoClip } : {}),
     ...(stickerRec
       ? {
           sticker: {
@@ -75,6 +83,54 @@ export interface AppDeps {
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const activeAborts = new Map<string, AbortController>();
+  const retryOrigins = new Map<string, { userEventId: string; activityHint?: string }>();
+
+  const dispatchChatTurn = (opts: {
+    turnId: string;
+    userEvent: StoredEvent;
+    stickerId?: string;
+    attachments?: string[];
+    videoClip?: { durationSec: number; frameHashes: string[] };
+    activityHint?: string;
+  }) => {
+    if (!deps.engine) return;
+    const ac = new AbortController();
+    const activeTurnId = opts.turnId;
+    activeAborts.set(activeTurnId, ac);
+    void deps.engine
+      .runTurn({
+        mode: "chat",
+        userText: opts.userEvent.content,
+        userEventId: opts.userEvent.id,
+        stickerId: opts.stickerId,
+        attachments: opts.attachments,
+        videoClip: opts.videoClip,
+        activityHint: opts.activityHint,
+        turnId: activeTurnId,
+        signal: ac.signal,
+        callbacks: {
+          onTurnStart: (info) => deps.sse?.emit("turn.start", info),
+          onThinkingDelta: (delta) =>
+            deps.sse?.emit("turn.thinking", { turnId: activeTurnId, delta }),
+          onToolProgress: (info) => deps.sse?.emit("turn.tool", { ...info }),
+          onTextDelta: (delta) => deps.sse?.emit("turn.text", { turnId: activeTurnId, delta }),
+          onExpression: (payload) =>
+            deps.sse?.emit("turn.expression", { turnId: activeTurnId, ...payload }),
+          onDoorUpdated: (state, note) =>
+            deps.sse?.emit("door.updated", { state, note, updatedAt: deps.clock.now() }),
+          onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
+          onTurnSilence: (info) => deps.sse?.emit("turn.silence", info),
+          onTurnDone: (info) => {
+            retryOrigins.delete(activeTurnId);
+            deps.sse?.emit("turn.done", info);
+          },
+          onTurnError: (err) => deps.sse?.emit("turn.error", err),
+        },
+      })
+      .finally(() => {
+        activeAborts.delete(activeTurnId);
+      });
+  };
 
   // 非阻塞探活（免鉴权、不扫磁盘、不调外部网络）
   app.get("/api/v1/health", (c) => {
@@ -132,9 +188,11 @@ export function createApp(deps: AppDeps): Hono {
       beforeId,
       limit: Number.isFinite(limit) ? limit : 50,
     });
+    const contextUsage = deps.engine?.getContextUsage();
     return c.json({
       ...page,
       items: page.items.map((ev) => toTimelineItem(ev, deps.events)),
+      ...(contextUsage ? { contextUsage } : {}),
     });
   });
 
@@ -145,6 +203,7 @@ export function createApp(deps: AppDeps): Hono {
       activityHint?: string;
       attachments?: unknown;
       stickerId?: string;
+      videoClip?: unknown;
     };
     try {
       body = await c.req.json();
@@ -167,6 +226,22 @@ export function createApp(deps: AppDeps): Hono {
     const hasAttachments = attachments.length > 0;
     const stickerId = typeof body.stickerId === "string" ? body.stickerId.trim() : "";
     const hasSticker = stickerId.length > 0;
+
+    let videoClip: { durationSec: number; frameHashes: string[] } | undefined;
+    if (body.videoClip && typeof body.videoClip === "object" && !Array.isArray(body.videoClip)) {
+      const vc = body.videoClip as { durationSec?: unknown; frameHashes?: unknown };
+      if (
+        typeof vc.durationSec === "number" &&
+        Number.isFinite(vc.durationSec) &&
+        Array.isArray(vc.frameHashes) &&
+        vc.frameHashes.every((h) => typeof h === "string" && h.trim().length > 0)
+      ) {
+        videoClip = {
+          durationSec: vc.durationSec,
+          frameHashes: vc.frameHashes as string[],
+        };
+      }
+    }
 
     if (!content.trim() && !hasAttachments && !hasSticker) {
       return c.json(
@@ -191,6 +266,7 @@ export function createApp(deps: AppDeps): Hono {
     const metadata: Record<string, unknown> = {};
     if (hasAttachments) metadata.attachments = attachments;
     if (hasSticker) metadata.stickerId = stickerId;
+    if (videoClip) metadata.videoClip = videoClip;
 
     const { event, deduplicated } = deps.events.append({
       sessionId: deps.getActiveSessionId(),
@@ -209,33 +285,16 @@ export function createApp(deps: AppDeps): Hono {
       deps.onUserMessagePersisted?.();
       deps.sse?.emit("message.created", { message: timelineItem });
       if (!isClosed && deps.engine && event.turnId) {
-        const ac = new AbortController();
-        const activeTurnId = event.turnId;
-        activeAborts.set(activeTurnId, ac);
-        void deps.engine
-          .runTurn({
-            mode: "chat",
-            userText: event.content,
-            userEventId: event.id,
-            stickerId: hasSticker ? stickerId : undefined,
-            attachments: hasAttachments ? attachments : undefined,
-            activityHint: typeof body.activityHint === "string" ? body.activityHint : undefined,
-            turnId: activeTurnId,
-            signal: ac.signal,
-            callbacks: {
-              onTurnStart: (info) => deps.sse?.emit("turn.start", info),
-              onThinkingDelta: (delta) => deps.sse?.emit("turn.thinking", { turnId: activeTurnId, delta }),
-              onTextDelta: (delta) => deps.sse?.emit("turn.text", { turnId: activeTurnId, delta }),
-              onExpression: (payload) => deps.sse?.emit("turn.expression", { turnId: activeTurnId, ...payload }),
-              onDoorUpdated: (state, note) =>
-                deps.sse?.emit("door.updated", { state, note, updatedAt: deps.clock.now() }),
-              onTurnDone: (info) => deps.sse?.emit("turn.done", info),
-              onTurnError: (err) => deps.sse?.emit("turn.error", err),
-            },
-          })
-          .finally(() => {
-            activeAborts.delete(activeTurnId);
-          });
+        const activityHint = typeof body.activityHint === "string" ? body.activityHint : undefined;
+        retryOrigins.set(event.turnId, { userEventId: event.id, activityHint });
+        dispatchChatTurn({
+          turnId: event.turnId,
+          userEvent: event,
+          stickerId: hasSticker ? stickerId : undefined,
+          attachments: hasAttachments ? attachments : undefined,
+          videoClip,
+          activityHint,
+        });
       }
     }
 
@@ -247,6 +306,102 @@ export function createApp(deps: AppDeps): Hono {
       },
       202,
     );
+  });
+
+  app.post("/api/v1/chat/wrap-up", async (c) => {
+    const cfg = deps.getConfig();
+    if ((cfg.door.state as string) === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (!deps.engine) {
+      return c.json({ error: { code: "ENGINE_UNAVAILABLE", message: "对话引擎尚未就绪" } }, 503);
+    }
+    const { oldSessionId, newSessionId } = await deps.engine.manualRollover();
+    return c.json({ oldSessionId, newSessionId, queued: true }, 202);
+  });
+
+  app.post("/api/v1/turns/:turnId/retry", (c) => {
+    const turnId = c.req.param("turnId");
+    if (!VALID_ULID_OR_ID_RE.test(turnId)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法 turnId" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    if ((cfg.door.state as string) === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (cfg.door.state === "closed" || (cfg.door.state as string) === "cooling_off") {
+      return c.json(
+        { error: { code: "DOOR_CLOSED", message: "门正关着，暂不唤醒对方" } },
+        409,
+      );
+    }
+    if (activeAborts.has(turnId) || deps.events.hasAssistantReplyForTurn(turnId)) {
+      return c.json(
+        { error: { code: "TURN_NOT_RETRYABLE", message: "该轮对话已完成或正在生成中" } },
+        409,
+      );
+    }
+
+    const mapped = retryOrigins.get(turnId);
+    const origUser = mapped
+      ? deps.events.getById(mapped.userEventId)
+      : deps.events.findUserEventByTurnId(turnId);
+    if (!origUser || origUser.status !== "active" || origUser.role !== "user") {
+      return c.json(
+        { error: { code: "TURN_NOT_RETRYABLE", message: "找不到可重试的失败轮次" } },
+        409,
+      );
+    }
+    if (
+      deps.events.hasAssistantReplyForTurn(origUser.turnId ?? turnId, origUser.id)
+    ) {
+      return c.json(
+        { error: { code: "TURN_NOT_RETRYABLE", message: "该轮对话已完成，无需重试" } },
+        409,
+      );
+    }
+
+    const newTurnId = ulid(deps.clock.now());
+    const meta = origUser.metadata ?? {};
+    const attachments = Array.isArray(meta.attachments)
+      ? (meta.attachments.filter((x): x is string => typeof x === "string"))
+      : undefined;
+    const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : undefined;
+    const rawVc = meta.videoClip;
+    const videoClip =
+      rawVc &&
+      typeof rawVc === "object" &&
+      !Array.isArray(rawVc) &&
+      typeof (rawVc as { durationSec?: unknown }).durationSec === "number" &&
+      Array.isArray((rawVc as { frameHashes?: unknown }).frameHashes)
+        ? {
+            durationSec: (rawVc as { durationSec: number }).durationSec,
+            frameHashes: (rawVc as { frameHashes: string[] }).frameHashes,
+          }
+        : undefined;
+
+    retryOrigins.set(newTurnId, {
+      userEventId: origUser.id,
+      activityHint: mapped?.activityHint ?? origUser.activity ?? undefined,
+    });
+    retryOrigins.delete(turnId);
+
+    dispatchChatTurn({
+      turnId: newTurnId,
+      userEvent: origUser,
+      stickerId,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      videoClip,
+      activityHint: mapped?.activityHint ?? origUser.activity ?? undefined,
+    });
+
+    return c.json({ turnId: newTurnId, retriedFromTurnId: turnId }, 202);
   });
 
   app.delete("/api/v1/chat/messages/:id", (c) => {

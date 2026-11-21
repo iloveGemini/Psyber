@@ -62,7 +62,15 @@ export type ChatStreamChunk =
   | { type: "thinking_delta"; delta: string; signature?: string }
   | { type: "text_delta"; delta: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      estimatedCostUsd?: number;
+    }
   | { type: "error"; code: LlmErrorCode; message: string; retryable: boolean };
 
 export interface ChatStreamRequest {
@@ -80,6 +88,7 @@ export interface ChatStreamRequest {
  */
 export interface ChatModelClient {
   readonly contextWindow: number;
+  readonly modelId?: string;
   stream(request: ChatStreamRequest): AsyncIterable<ChatStreamChunk>;
 }
 
@@ -172,6 +181,7 @@ function toPiAiMessages(messages: ChatMessage[], model: Model<Api>): Message[] {
  */
 export class PiAiChatClient implements ChatModelClient {
   readonly contextWindow: number;
+  readonly modelId: string;
 
   constructor(
     private readonly models: Models,
@@ -179,6 +189,7 @@ export class PiAiChatClient implements ChatModelClient {
     private readonly apiKey?: string,
   ) {
     this.contextWindow = model.contextWindow || 200_000;
+    this.modelId = model.id;
   }
 
   async *stream(request: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
@@ -230,6 +241,9 @@ export class PiAiChatClient implements ChatModelClient {
           inputTokens: u.input,
           outputTokens: u.output,
           totalTokens: u.totalTokens,
+          cacheReadTokens: u.cacheRead,
+          cacheWriteTokens: u.cacheWrite,
+          estimatedCostUsd: u.cost?.total,
         };
       } else if (ev.type === "error") {
         if (ev.reason === "aborted") return;

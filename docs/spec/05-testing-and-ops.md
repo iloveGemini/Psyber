@@ -1,7 +1,7 @@
 # Spec 05 · 测试矩阵、虚拟时钟、SQLite 灾备与运维编排规程
 
 > **版本**：v0.4（2026-11-20，修正 T03/T11/T12 套件断言对齐非阻塞复核与 75% 异步换段、拆分 §6 出口验收清单分期）
-> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.3 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.7 · [`MEMORY.md`](../MEMORY.md) v0.7 · [`API.md`](../API.md) v0.7 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.1 · [`02-memory-execution.md`](02-memory-execution.md) v0.7 · [`03-boundaries-expression-activities.md`](03-boundaries-expression-activities.md) v0.4 · [`04-api-and-flutter.md`](04-api-and-flutter.md) v0.4
+> **上游契约**：[`CAPABILITIES.md`](../CAPABILITIES.md) v1.4 · [`ARCHITECTURE.md`](../ARCHITECTURE.md) v0.8 · [`MEMORY.md`](../MEMORY.md) v0.8 · [`API.md`](../API.md) v0.8 · [`01-engine-tools-prompts.md`](01-engine-tools-prompts.md) v1.2 · [`02-memory-execution.md`](02-memory-execution.md) v0.8 · [`03-boundaries-expression-activities.md`](03-boundaries-expression-activities.md) v0.5 · [`04-api-and-flutter.md`](04-api-and-flutter.md) v0.5
 > **负责模块**：`server/src/core/`（`clock.ts`, `backup.ts`, `boot.ts`）、`server/tests/`、`server/src/cli/`
 
 ---
