@@ -120,6 +120,10 @@ class AppController {
   final ValueNotifier<PsyberPalette?> paletteNotifier =
       ValueNotifier<PsyberPalette?>(null);
 
+  /// Ring 1.5/2 同步高风险工具待审批状态（多端同步销除）。
+  final ValueNotifier<PendingToolApproval?> pendingApprovalNotifier =
+      ValueNotifier<PendingToolApproval?>(null);
+
   void setThemeMode(ThemeMode mode) {
     paletteNotifier.value = null;
     themeModeNotifier.value = mode;
@@ -295,6 +299,7 @@ class AppController {
     pendingModelSwitchNotifier.value = null;
     settingsNotifier.value = null;
     activeActivityNotifier.value = null;
+    pendingApprovalNotifier.value = null;
     _hasLoadedOlder = false;
     _hasMoreHistory = false;
     _nextBeforeId = null;
@@ -692,6 +697,49 @@ class AppController {
     return url;
   }
 
+  Future<List<McpPresetView>> loadMcpPresets() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return const <McpPresetView>[];
+    return _api.getMcpPresets(profile);
+  }
+
+  Future<McpServerView?> reconnectMcpServer(String serverId) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    final updated = await _api.reconnectMcpServer(profile, serverId);
+    if (!_disposed) {
+      await loadSettings();
+    }
+    return updated;
+  }
+
+  Future<void> respondToApproval({
+    required String decision,
+    String scope = 'once',
+  }) async {
+    final profile = profileNotifier.value;
+    final pending = pendingApprovalNotifier.value;
+    if (profile == null || pending == null) return;
+    pendingApprovalNotifier.value = null;
+    try {
+      await _api.resolveToolApproval(
+        profile,
+        turnId: pending.turnId,
+        approvalId: pending.approvalId,
+        decision: decision,
+        scope: scope,
+      );
+    } on ApiException catch (e) {
+      if (e.code != 'APPROVAL_ALREADY_RESOLVED' && !_disposed) {
+        turnErrorNotifier.value = e.message;
+      }
+    } catch (_) {
+      if (!_disposed) {
+        turnErrorNotifier.value = '审批提交失败，请检查网络连接';
+      }
+    }
+  }
+
   Future<void> abortActiveTurn() async {
     final profile = profileNotifier.value;
     final active = activeTurnNotifier.value;
@@ -896,6 +944,15 @@ class AppController {
           pendingModelSwitchNotifier.value = nextModel;
         }
         return;
+      case 'turn.approval_required':
+        pendingApprovalNotifier.value = PendingToolApproval.fromJson(frame.data);
+        return;
+      case 'turn.approval_resolved':
+        final resolvedId = frame.data['approvalId'] as String?;
+        if (pendingApprovalNotifier.value?.approvalId == resolvedId) {
+          pendingApprovalNotifier.value = null;
+        }
+        return;
       case 'turn.done':
         final rawUsage = frame.data['contextUsage'];
         if (rawUsage is Map<String, dynamic>) {
@@ -903,6 +960,7 @@ class AppController {
         }
         turnFailureNotifier.value = null;
         pendingModelSwitchNotifier.value = null;
+        pendingApprovalNotifier.value = null;
         activeTurnNotifier.value = null;
         // 补齐最新落盘的助手消息与门状态（确保 recallCount 与持久化 ID 精确一致）
         unawaited(refreshSnapshot());
@@ -1052,5 +1110,6 @@ class AppController {
     recallEvalModeNotifier.dispose();
     themeModeNotifier.dispose();
     paletteNotifier.dispose();
+    pendingApprovalNotifier.dispose();
   }
 }

@@ -13,6 +13,8 @@ export type Ring1SseEventName =
   | "turn.error"
   | "turn.silence"
   | "turn.model_switched"
+  | "turn.approval_required"
+  | "turn.approval_resolved"
   | "ping";
 
 export type SseEventName = Ring1SseEventName;

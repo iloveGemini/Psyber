@@ -839,6 +839,126 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                             ],
                           ),
                         ),
+                        ValueListenableBuilder<PendingToolApproval?>(
+                          valueListenable: widget.controller.pendingApprovalNotifier,
+                          builder: (context, pending, _) {
+                            if (pending == null) return const SizedBox.shrink();
+                            return Container(
+                              key: const Key('tool_approval_card'),
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: colors.accentSoft,
+                                border: Border(top: BorderSide(color: colors.accentBorder)),
+                              ),
+                              child: Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: PsyberTheme.readingMaxWidth,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            PhosphorIconsLight.shieldCheck,
+                                            size: 16,
+                                            color: colors.inkDeep,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: Text(
+                                              '外部工具调用确认 · ${pending.toolName}',
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: colors.inkDeep,
+                                              ),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      if (pending.summary.isNotEmpty) ...[
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          pending.summary,
+                                          style: TextStyle(fontSize: 12, color: colors.inkQuiet),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                      const SizedBox(height: 8),
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 6,
+                                        children: [
+                                          FilledButton(
+                                            key: const Key('approval_allow_once_button'),
+                                            onPressed: () => unawaited(
+                                              widget.controller.respondToApproval(
+                                                decision: 'allow',
+                                                scope: 'once',
+                                              ),
+                                            ),
+                                            style: FilledButton.styleFrom(
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 12,
+                                                vertical: 6,
+                                              ),
+                                              minimumSize: Size.zero,
+                                            ),
+                                            child: const Text('仅本次允许', style: TextStyle(fontSize: 12)),
+                                          ),
+                                          OutlinedButton(
+                                            key: const Key('approval_allow_session_button'),
+                                            onPressed: () => unawaited(
+                                              widget.controller.respondToApproval(
+                                                decision: 'allow',
+                                                scope: 'session',
+                                              ),
+                                            ),
+                                            style: OutlinedButton.styleFrom(
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 12,
+                                                vertical: 6,
+                                              ),
+                                              minimumSize: Size.zero,
+                                            ),
+                                            child: const Text('本会话允许', style: TextStyle(fontSize: 12)),
+                                          ),
+                                          TextButton(
+                                            key: const Key('approval_deny_button'),
+                                            onPressed: () => unawaited(
+                                              widget.controller.respondToApproval(
+                                                decision: 'deny',
+                                              ),
+                                            ),
+                                            style: TextButton.styleFrom(
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 6,
+                                              ),
+                                              minimumSize: Size.zero,
+                                            ),
+                                            child: Text(
+                                              '拒绝',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: colors.dangerInk,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
                         ValueListenableBuilder<DoorStatus>(
                           valueListenable: widget.controller.doorNotifier,
                           builder: (context, door, _) =>

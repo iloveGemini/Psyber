@@ -573,6 +573,193 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     }
   }
 
+  Future<void> _openMcpEditorDialog({McpPresetView? preset}) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _McpEditorDialog(
+        controller: widget.controller,
+        preset: preset,
+      ),
+    );
+  }
+
+  Future<void> _openMcpPresetPicker() async {
+    final presets = await widget.controller.loadMcpPresets();
+    if (!mounted) return;
+    final picked = await showDialog<McpPresetView>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: PsyberTheme.letterSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: PsyberTheme.hairline),
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '选择 MCP 生态预设',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 10),
+                if (presets.isEmpty)
+                  const Text(
+                    '当前服务端未返回预设模板，可改用「自定义添加」。',
+                    style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
+                  )
+                else
+                  for (final p in presets)
+                    ListTile(
+                      key: Key('mcp_preset_${p.id}'),
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                      title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
+                      subtitle: Text(
+                        p.description,
+                        style: const TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
+                      ),
+                      onTap: () => Navigator.of(ctx).pop(p),
+                    ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (picked != null && mounted) {
+      await _openMcpEditorDialog(preset: picked);
+    }
+  }
+
+  Widget _buildMcpServersSection(BuildContext context, SettingsSnapshot? snap) {
+    final colors = context.colors;
+    final servers = snap?.mcpServers ?? const <McpServerView>[];
+    return _SurfaceBox(
+      child: Padding(
+        key: const Key('mcp_servers_section'),
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (servers.isEmpty)
+              Text(
+                '尚未挂载外部 MCP 服务。所有外部工具仅通过 Tier 3 按需检索，不影响主对话缓存。',
+                style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.45),
+              )
+            else
+              for (var i = 0; i < servers.length; i++) ...[
+                if (i > 0) const Divider(height: 14),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                servers[i].id,
+                                style: PsyberTheme.monoStyle.copyWith(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: colors.inkDeep,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: servers[i].status == 'connected'
+                                      ? colors.celadonWash
+                                      : colors.mineralCanvas,
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: colors.hairline),
+                                ),
+                                child: Text(
+                                  servers[i].status == 'connected'
+                                      ? '已连接 · ${servers[i].toolCount} 工具'
+                                      : (servers[i].status == 'disabled' ? '已停用' : '降级'),
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: servers[i].status == 'connected'
+                                        ? colors.statusSuccess
+                                        : colors.inkQuiet,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${servers[i].transport} · ${servers[i].trustLevel == 'auto' ? '自动放行' : '需审批'}'
+                            '${servers[i].lastError != null ? ' · ${servers[i].lastError}' : ''}',
+                            style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      key: Key('mcp_reconnect_${servers[i].id}'),
+                      icon: Icon(PhosphorIconsLight.arrowClockwise, size: 16, color: colors.inkQuiet),
+                      tooltip: '重连',
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      padding: EdgeInsets.zero,
+                      onPressed: () => unawaited(widget.controller.reconnectMcpServer(servers[i].id)),
+                    ),
+                    IconButton(
+                      key: Key('mcp_delete_${servers[i].id}'),
+                      icon: const Icon(PhosphorIconsLight.trash, size: 16, color: PsyberTheme.dangerInk),
+                      tooltip: '移除',
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      padding: EdgeInsets.zero,
+                      onPressed: () => unawaited(
+                        widget.controller.patchSettings({
+                          'mcpServers': [
+                            for (final s in servers)
+                              if (s.id != servers[i].id) s.toConfigJson(),
+                          ],
+                        }),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const Key('mcp_add_preset_button'),
+                    onPressed: () => unawaited(_openMcpPresetPicker()),
+                    icon: const Icon(PhosphorIconsLight.plugsConnected, size: 15),
+                    label: const Text('从预设添加', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const Key('mcp_add_custom_button'),
+                    onPressed: () => unawaited(_openMcpEditorDialog()),
+                    icon: const Icon(PhosphorIconsLight.plus, size: 15),
+                    label: const Text('自定义添加', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildThemeModeSelector(BuildContext context) {
     final colors = context.colors;
     return ValueListenableBuilder<ThemeMode>(
@@ -1271,6 +1458,9 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                   ),
                   const SizedBox(height: 10),
                   _buildThemeModeSelector(context),
+                  const SizedBox(height: 18),
+                  const _SectionLabel('外部工具扩展（MCP）'),
+                  _buildMcpServersSection(context, snap),
                 ],
               );
             },
@@ -1562,6 +1752,263 @@ class _UsageMetricTile extends StatelessWidget {
           const SizedBox(height: 2),
           Text(sub, style: TextStyle(fontSize: 10.5, color: colors.inkQuiet)),
         ],
+      ),
+    );
+  }
+}
+
+class _McpEditorDialog extends StatefulWidget {
+  const _McpEditorDialog({
+    required this.controller,
+    this.preset,
+  });
+
+  final AppController controller;
+  final McpPresetView? preset;
+
+  @override
+  State<_McpEditorDialog> createState() => _McpEditorDialogState();
+}
+
+class _McpEditorDialogState extends State<_McpEditorDialog> {
+  late final TextEditingController _idCtrl;
+  late final TextEditingController _descCtrl;
+  late final TextEditingController _cmdCtrl;
+  late final TextEditingController _argsCtrl;
+  late final TextEditingController _urlCtrl;
+  late final TextEditingController _secretValCtrl;
+  late String _transport;
+  late String _trustLevel;
+  late final String _secretKey;
+  String? _errText;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final preset = widget.preset;
+    _idCtrl = TextEditingController(text: preset?.id ?? '');
+    _descCtrl = TextEditingController(text: preset?.description ?? '');
+    _cmdCtrl = TextEditingController(text: preset?.command ?? '');
+    _argsCtrl = TextEditingController(text: (preset?.args ?? const <String>[]).join(' '));
+    _urlCtrl = TextEditingController(text: preset?.url ?? '');
+    _secretValCtrl = TextEditingController();
+    _transport = preset?.transport ?? 'stdio';
+    _trustLevel = preset?.trustLevel ?? 'confirm';
+    _secretKey = preset != null && preset.secretKeys.isNotEmpty ? preset.secretKeys.first : '';
+  }
+
+  @override
+  void dispose() {
+    _idCtrl.dispose();
+    _descCtrl.dispose();
+    _cmdCtrl.dispose();
+    _argsCtrl.dispose();
+    _urlCtrl.dispose();
+    _secretValCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final id = _idCtrl.text.trim();
+    if (id.isEmpty) {
+      setState(() => _errText = '请填写服务器 ID');
+      return;
+    }
+    if (_transport == 'stdio' && _cmdCtrl.text.trim().isEmpty) {
+      setState(() => _errText = 'stdio 模式请填写启动命令');
+      return;
+    }
+    if (_transport == 'streamable_http' && _urlCtrl.text.trim().isEmpty) {
+      setState(() => _errText = 'HTTP 模式请填写端点 URL');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _errText = null;
+    });
+    try {
+      final preset = widget.preset;
+      final existing =
+          widget.controller.settingsNotifier.value?.mcpServers ?? const <McpServerView>[];
+      final nextList = [
+        for (final s in existing)
+          if (s.id != id) s.toConfigJson(),
+        {
+          'id': id,
+          'enabled': true,
+          'transport': _transport,
+          if (_descCtrl.text.trim().isNotEmpty) 'description': _descCtrl.text.trim(),
+          if (_transport == 'stdio') 'command': _cmdCtrl.text.trim(),
+          if (_transport == 'stdio' && _argsCtrl.text.trim().isNotEmpty)
+            'args': _argsCtrl.text.trim().split(RegExp(r'\s+')),
+          if (preset != null && preset.env.isNotEmpty) 'env': preset.env,
+          if (_transport == 'streamable_http') 'url': _urlCtrl.text.trim(),
+          if (preset != null && preset.headers.isNotEmpty) 'headers': preset.headers,
+          'trustLevel': _trustLevel,
+        },
+      ];
+      final patch = <String, dynamic>{'mcpServers': nextList};
+      if (_secretKey.isNotEmpty && _secretValCtrl.text.trim().isNotEmpty) {
+        patch['mcpSecrets'] = {_secretKey: _secretValCtrl.text.trim()};
+      }
+      await widget.controller.patchSettings(patch);
+      if (mounted) Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _errText = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _errText = '保存失败，请检查网络连接';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preset = widget.preset;
+    return Dialog(
+      backgroundColor: PsyberTheme.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: PsyberTheme.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                preset != null ? '接入预设：${preset.label}' : '添加外部 MCP 服务器',
+                style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '工具强制归入 Tier 3 按需搜索池，默认需审批确认，密钥仅写入 0600 凭证文件。',
+                style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('mcp_id_field'),
+                controller: _idCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: '服务器 ID（小写字母/数字/-）',
+                  hintText: '例如 fetch / tavily',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _descCtrl,
+                decoration: const InputDecoration(labelText: '一句话说明（可选）'),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: _transport,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: '传输方式'),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'stdio',
+                    child: Text('本地子进程 (stdio)', overflow: TextOverflow.ellipsis),
+                  ),
+                  DropdownMenuItem(
+                    value: 'streamable_http',
+                    child: Text('远程 HTTP (streamable_http)', overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _transport = v);
+                },
+              ),
+              const SizedBox(height: 10),
+              if (_transport == 'stdio') ...[
+                TextField(
+                  key: const Key('mcp_command_field'),
+                  controller: _cmdCtrl,
+                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                  decoration: const InputDecoration(labelText: '启动命令', hintText: 'uvx / npx'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _argsCtrl,
+                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                  decoration: const InputDecoration(labelText: '启动参数（空格分隔）'),
+                ),
+              ] else ...[
+                TextField(
+                  key: const Key('mcp_url_field'),
+                  controller: _urlCtrl,
+                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                  decoration: const InputDecoration(
+                    labelText: 'MCP 端点 URL',
+                    hintText: 'https://.../mcp/',
+                  ),
+                ),
+              ],
+              if (_secretKey.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                TextField(
+                  key: const Key('mcp_secret_field'),
+                  controller: _secretValCtrl,
+                  obscureText: true,
+                  style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                  decoration: InputDecoration(
+                    labelText: '凭证密钥 ($_secretKey)',
+                    hintText: '仅存 credentials.json，不入 config.json',
+                  ),
+                ),
+              ],
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: _trustLevel,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: '调用审批策略'),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'confirm',
+                    child: Text('每次调用确认（推荐）', overflow: TextOverflow.ellipsis),
+                  ),
+                  DropdownMenuItem(
+                    value: 'auto',
+                    child: Text('自动放行（仅限信任的只读服务）', overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _trustLevel = v);
+                },
+              ),
+              if (_errText != null) ...[
+                const SizedBox(height: 8),
+                Text(_errText!, style: const TextStyle(fontSize: 12, color: PsyberTheme.dangerInk)),
+              ],
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    key: const Key('mcp_save_button'),
+                    onPressed: _saving ? null : () => unawaited(_save()),
+                    child: Text(_saving ? '保存中…' : '保存并热加载'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

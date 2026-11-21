@@ -6,12 +6,14 @@ import {
   saveConfig,
   type CircadianConfig,
   type LlmConfig,
+  type McpServerConfig,
   type NotificationsConfig,
   type PsyberConfig,
   type RecallConfig,
 } from "../core/config.ts";
 import { loadCredentials, saveCredentials, type StoredCredentials } from "../core/credentials.ts";
 import { MAX_MEDIA_UPLOAD_BYTES, MediaStore } from "../core/media.ts";
+import { MCP_PRESETS, validateMcpServers, type McpManager } from "../extensions/mcp.ts";
 import {
   discoverProviderModels,
   resolveEffectiveThinkingLevel,
@@ -32,7 +34,7 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
-function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials) {
+function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials, mcp?: McpManager) {
   const providers: Record<
     string,
     { kind: string; authMode: string; baseUrl?: string; authStatus: "configured" | "unset" }
@@ -47,6 +49,24 @@ function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials) {
       };
     }
   }
+
+  const mcpServers = mcp
+    ? mcp.getStatusList()
+    : (cfg.mcpServers ?? []).map((s) => ({
+        id: s.id,
+        enabled: s.enabled,
+        transport: s.transport,
+        ...(s.description ? { description: s.description } : {}),
+        ...(s.command ? { command: s.command } : {}),
+        ...(s.args ? { args: s.args } : {}),
+        ...(s.url ? { url: s.url } : {}),
+        trustLevel: s.trustLevel ?? "confirm",
+        ...(s.autoAllowTools ? { autoAllowTools: s.autoAllowTools } : {}),
+        timeoutMs: s.timeoutMs ?? 30_000,
+        status: s.enabled ? "degraded" : "disabled",
+        toolCount: 0,
+        tools: [],
+      }));
 
   const effectiveLevel = resolveEffectiveThinkingLevel(cfg);
   return {
@@ -78,6 +98,7 @@ function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials) {
     circadian: cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG,
     notifications: cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG,
     recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
+    mcpServers,
     devices: (cfg.auth?.devices ?? []).map((d) => ({
       deviceId: d.deviceId,
       deviceName: d.deviceName,
@@ -183,7 +204,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     const named = deps.dataDir
       ? await getGenesisNamedStatus(deps.dataDir, deps.clock.now(), cfg.timezone)
       : false;
-    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
+    const creds: StoredCredentials = deps.dataDir
+      ? await loadCredentials(deps.dataDir)
+      : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
     const chatProvider = cfg.llm?.slots?.chat?.provider;
     const hasChatProvider = Boolean(chatProvider && creds.apiKeys[chatProvider]);
     const circadian = cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG;
@@ -336,8 +359,10 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
   // 脱敏设置读写（绝不返回任何明文令牌或密钥）
   app.get("/api/v1/settings", async (c) => {
-    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
-    return c.json(sanitizeSettings(deps.getConfig(), creds));
+    const creds = deps.dataDir
+      ? await loadCredentials(deps.dataDir)
+      : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
+    return c.json(sanitizeSettings(deps.getConfig(), creds, deps.mcp));
   });
 
   app.patch("/api/v1/settings", async (c) => {
@@ -348,6 +373,8 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       recall?: Partial<RecallConfig>;
       llm?: Partial<LlmConfig>;
       credentials?: Record<string, { apiKey?: string }>;
+      mcpServers?: McpServerConfig[];
+      mcpSecrets?: Record<string, string>;
       revokeDeviceIds?: string[];
       recallEvalNoticeResident?: boolean;
     };
@@ -368,6 +395,14 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (body.notifications && typeof body.notifications === "object") {
       const err = validateNotificationsPatch(body.notifications);
       if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
+    }
+    let validatedMcpServers: McpServerConfig[] | null = null;
+    if (body.mcpServers !== undefined) {
+      const checked = validateMcpServers(body.mcpServers);
+      if (!checked.ok) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: checked.error } }, 400);
+      }
+      validatedMcpServers = checked.servers;
     }
 
     const cfg = deps.getConfig();
@@ -417,6 +452,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         ...(mergedLimits ? { contextLimits: mergedLimits } : {}),
       };
     }
+    if (validatedMcpServers !== null) {
+      cfg.mcpServers = validatedMcpServers;
+    }
     if (Array.isArray(body.revokeDeviceIds) && body.revokeDeviceIds.length > 0) {
       const toRevoke = new Set(
         body.revokeDeviceIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0),
@@ -424,22 +462,56 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       cfg.auth.devices = (cfg.auth.devices ?? []).filter((d) => !toRevoke.has(d.deviceId));
     }
 
-    let creds: StoredCredentials = { apiKeys: {}, channelTokens: {} };
+    let creds: StoredCredentials = { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
     if (deps.dataDir) {
       creds = await loadCredentials(deps.dataDir);
+      let credsChanged = false;
       if (body.credentials && typeof body.credentials === "object") {
         for (const [provider, entry] of Object.entries(body.credentials)) {
           if (entry && typeof entry.apiKey === "string" && entry.apiKey.trim()) {
             creds.apiKeys[provider] = entry.apiKey.trim();
+            credsChanged = true;
           }
         }
+      }
+      if (body.mcpSecrets && typeof body.mcpSecrets === "object") {
+        creds.mcpSecrets ??= {};
+        for (const [key, value] of Object.entries(body.mcpSecrets)) {
+          if (typeof value === "string" && value.trim()) {
+            creds.mcpSecrets[key.trim()] = value.trim();
+            credsChanged = true;
+          }
+        }
+      }
+      if (credsChanged) {
         await saveCredentials(deps.dataDir, creds);
       }
       await saveConfig(deps.dataDir, cfg);
     }
 
+    if (validatedMcpServers !== null && deps.mcp) {
+      await deps.mcp.reload(validatedMcpServers);
+    }
+
     deps.onSettingsUpdated?.();
-    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds) });
+    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps.mcp) });
+  });
+
+  // Ring 1.5 外部 MCP 生态预设与单服手动重连
+  app.get("/api/v1/mcp/presets", (c) => {
+    return c.json({ presets: MCP_PRESETS });
+  });
+
+  app.post("/api/v1/mcp/:id/reconnect", async (c) => {
+    const id = c.req.param("id");
+    if (!deps.mcp) {
+      return c.json({ error: { code: "MCP_UNAVAILABLE", message: "外部 MCP 管理器未就绪" } }, 503);
+    }
+    const status = await deps.mcp.reconnect(id);
+    if (!status) {
+      return c.json({ error: { code: "NOT_FOUND", message: `未找到 MCP 服务器: ${id}` } }, 404);
+    }
+    return c.json({ ok: true, server: status });
   });
 
   // Ring 1.5 用户双人状态签（手动心绪短句 + 勿扰开关，勿扰开启时抑制非紧急主动 wake）
@@ -497,7 +569,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
   // Ring 1.5 模型自动发现与一键连通测试
   app.get("/api/v1/llm/models", async (c) => {
     const provider = c.req.query("provider")?.trim() || undefined;
-    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
+    const creds: StoredCredentials = deps.dataDir
+      ? await loadCredentials(deps.dataDir)
+      : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
     const models = await discoverProviderModels(deps.getConfig(), creds, provider, deps.fetchImpl);
     return c.json({ models });
   });
@@ -514,7 +588,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (!providerId || !modelId) {
       return c.json({ error: { code: "INVALID_REQUEST", message: "缺少 provider 或 model" } }, 400);
     }
-    const creds = deps.dataDir ? await loadCredentials(deps.dataDir) : { apiKeys: {}, channelTokens: {} };
+    const creds: StoredCredentials = deps.dataDir
+      ? await loadCredentials(deps.dataDir)
+      : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
     const result = await testModelConnection({
       config: deps.getConfig(),
       creds,

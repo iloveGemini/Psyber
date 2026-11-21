@@ -235,6 +235,21 @@ abstract class PsyberApiClient {
     required String mimeType,
   });
 
+  /// Ring 1.5：读取内置外部 MCP 生态预设清单。
+  Future<List<McpPresetView>> getMcpPresets(ConnectionProfile profile);
+
+  /// Ring 1.5：手动重连单个外部 MCP 服务器。
+  Future<McpServerView?> reconnectMcpServer(ConnectionProfile profile, String serverId);
+
+  /// Ring 1.5/2：响应同步高风险工具审批卡。
+  Future<void> resolveToolApproval(
+    ConnectionProfile profile, {
+    required String turnId,
+    required String approvalId,
+    required String decision,
+    String scope = 'once',
+  });
+
   /// 打开 SSE 实时事件流；调用方取消订阅时自动断开底层连接。
   Stream<SseEventFrame> openEventStream(
     ConnectionProfile profile, {
@@ -1027,6 +1042,69 @@ class HttpPsyberApiClient implements PsyberApiClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  @override
+  Future<List<McpPresetView>> getMcpPresets(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/mcp/presets');
+    try {
+      final json = await _requestJson(
+        method: 'GET',
+        uri: uri,
+        bearerToken: profile.token,
+      );
+      final raw = json['presets'];
+      if (raw is! List<dynamic>) return const <McpPresetView>[];
+      return raw
+          .whereType<Map<String, dynamic>>()
+          .map(McpPresetView.fromJson)
+          .toList(growable: false);
+    } on ApiException catch (e) {
+      if (e.isEndpointUnavailable) return const <McpPresetView>[];
+      rethrow;
+    }
+  }
+
+  @override
+  Future<McpServerView?> reconnectMcpServer(
+    ConnectionProfile profile,
+    String serverId,
+  ) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/mcp/$serverId/reconnect',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+      timeout: const Duration(seconds: 15),
+    );
+    final raw = json['server'];
+    return raw is Map<String, dynamic> ? McpServerView.fromJson(raw) : null;
+  }
+
+  @override
+  Future<void> resolveToolApproval(
+    ConnectionProfile profile, {
+    required String turnId,
+    required String approvalId,
+    required String decision,
+    String scope = 'once',
+  }) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/turns/$turnId/approval',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {
+        'approvalId': approvalId,
+        'decision': decision,
+        'scope': scope,
+      },
+    );
   }
 
   @override

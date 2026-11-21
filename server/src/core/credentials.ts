@@ -6,11 +6,14 @@ export interface StoredCredentials {
   apiKeys: Record<string, string>;
   /** 通用 Webhook 等离线通道引用的 Bearer Token（按 credentialKey 索引） */
   channelTokens: Record<string, string>;
+  /** 外部 MCP 服务器通过 ${cred:<key>} 引用的敏感密钥（仅存 0600 权限的 credentials.json） */
+  mcpSecrets?: Record<string, string>;
 }
 
 const EMPTY_CREDENTIALS: StoredCredentials = {
   apiKeys: {},
   channelTokens: {},
+  mcpSecrets: {},
 };
 
 /**
@@ -27,10 +30,14 @@ export async function loadCredentials(dataDir: string): Promise<StoredCredential
         parsed.channelTokens && typeof parsed.channelTokens === "object"
           ? { ...parsed.channelTokens }
           : {},
+      mcpSecrets:
+        parsed.mcpSecrets && typeof parsed.mcpSecrets === "object"
+          ? { ...parsed.mcpSecrets }
+          : {},
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { apiKeys: {}, channelTokens: {} };
+      return { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
     }
     throw new Error(`无法读取凭证文件 ${credPath}: ${(err as Error).message}`);
   }
@@ -48,6 +55,7 @@ export async function saveCredentials(dataDir: string, creds: StoredCredentials)
     {
       apiKeys: creds.apiKeys ?? EMPTY_CREDENTIALS.apiKeys,
       channelTokens: creds.channelTokens ?? EMPTY_CREDENTIALS.channelTokens,
+      mcpSecrets: creds.mcpSecrets ?? EMPTY_CREDENTIALS.mcpSecrets,
     },
     null,
     2,

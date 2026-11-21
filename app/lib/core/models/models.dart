@@ -924,6 +924,7 @@ class SettingsSnapshot {
     this.webhookEnabled = false,
     this.webhookUrl = '',
     this.devices = const <PairedDeviceView>[],
+    this.mcpServers = const <McpServerView>[],
     this.recallEvalNoticeResident = false,
   });
 
@@ -942,6 +943,7 @@ class SettingsSnapshot {
   final bool webhookEnabled;
   final String webhookUrl;
   final List<PairedDeviceView> devices;
+  final List<McpServerView> mcpServers;
   final bool recallEvalNoticeResident;
 
   factory SettingsSnapshot.fromJson(Map<String, dynamic> json) {
@@ -1037,7 +1039,172 @@ class SettingsSnapshot {
       webhookEnabled: webhookMap['enabled'] == true,
       webhookUrl: webhookMap['url'] as String? ?? '',
       devices: devices,
+      mcpServers: (json['mcpServers'] is List<dynamic>)
+          ? (json['mcpServers'] as List<dynamic>)
+              .whereType<Map<String, dynamic>>()
+              .map(McpServerView.fromJson)
+              .toList(growable: false)
+          : const <McpServerView>[],
       recallEvalNoticeResident: json['recallEvalNoticeResident'] == true,
+    );
+  }
+}
+
+@immutable
+class McpServerView {
+  const McpServerView({
+    required this.id,
+    required this.enabled,
+    required this.transport,
+    this.description,
+    this.command,
+    this.args = const <String>[],
+    this.url,
+    this.trustLevel = 'confirm',
+    this.timeoutMs = 30000,
+    this.status = 'disabled',
+    this.toolCount = 0,
+    this.tools = const <String>[],
+    this.lastError,
+  });
+
+  final String id;
+  final bool enabled;
+  final String transport;
+  final String? description;
+  final String? command;
+  final List<String> args;
+  final String? url;
+  final String trustLevel;
+  final int timeoutMs;
+  final String status;
+  final int toolCount;
+  final List<String> tools;
+  final String? lastError;
+
+  factory McpServerView.fromJson(Map<String, dynamic> json) {
+    final rawArgs = json['args'];
+    final rawTools = json['tools'];
+    return McpServerView(
+      id: json['id'] as String? ?? '',
+      enabled: json['enabled'] != false,
+      transport: json['transport'] as String? ?? 'stdio',
+      description: json['description'] as String?,
+      command: json['command'] as String?,
+      args: rawArgs is List<dynamic>
+          ? rawArgs.whereType<String>().toList(growable: false)
+          : const <String>[],
+      url: json['url'] as String?,
+      trustLevel: json['trustLevel'] as String? ?? 'confirm',
+      timeoutMs: (json['timeoutMs'] as num?)?.toInt() ?? 30000,
+      status: json['status'] as String? ?? 'disabled',
+      toolCount: (json['toolCount'] as num?)?.toInt() ?? 0,
+      tools: rawTools is List<dynamic>
+          ? rawTools.whereType<String>().toList(growable: false)
+          : const <String>[],
+      lastError: json['lastError'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toConfigJson({bool? overrideEnabled, String? overrideTrustLevel}) => {
+        'id': id,
+        'enabled': overrideEnabled ?? enabled,
+        'transport': transport,
+        if (description != null && description!.isNotEmpty) 'description': description,
+        if (command != null && command!.isNotEmpty) 'command': command,
+        if (args.isNotEmpty) 'args': args,
+        if (url != null && url!.isNotEmpty) 'url': url,
+        'trustLevel': overrideTrustLevel ?? trustLevel,
+        'timeoutMs': timeoutMs,
+      };
+}
+
+@immutable
+class McpPresetView {
+  const McpPresetView({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.transport,
+    this.command,
+    this.args = const <String>[],
+    this.env = const <String, String>{},
+    this.url,
+    this.headers = const <String, String>{},
+    this.trustLevel = 'confirm',
+    this.secretKeys = const <String>[],
+  });
+
+  final String id;
+  final String label;
+  final String description;
+  final String transport;
+  final String? command;
+  final List<String> args;
+  final Map<String, String> env;
+  final String? url;
+  final Map<String, String> headers;
+  final String trustLevel;
+  final List<String> secretKeys;
+
+  factory McpPresetView.fromJson(Map<String, dynamic> json) {
+    Map<String, String> parseMap(Object? raw) {
+      if (raw is! Map<String, dynamic>) return const <String, String>{};
+      return {
+        for (final e in raw.entries)
+          if (e.value is String) e.key: e.value as String,
+      };
+    }
+
+    final rawArgs = json['args'];
+    final rawSecrets = json['secretKeys'];
+    return McpPresetView(
+      id: json['id'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      transport: json['transport'] as String? ?? 'stdio',
+      command: json['command'] as String?,
+      args: rawArgs is List<dynamic>
+          ? rawArgs.whereType<String>().toList(growable: false)
+          : const <String>[],
+      env: parseMap(json['env']),
+      url: json['url'] as String?,
+      headers: parseMap(json['headers']),
+      trustLevel: json['trustLevel'] as String? ?? 'confirm',
+      secretKeys: rawSecrets is List<dynamic>
+          ? rawSecrets.whereType<String>().toList(growable: false)
+          : const <String>[],
+    );
+  }
+}
+
+@immutable
+class PendingToolApproval {
+  const PendingToolApproval({
+    required this.approvalId,
+    required this.turnId,
+    required this.toolName,
+    required this.summary,
+    this.arguments = const <String, dynamic>{},
+    this.expiresAt = 0,
+  });
+
+  final String approvalId;
+  final String turnId;
+  final String toolName;
+  final String summary;
+  final Map<String, dynamic> arguments;
+  final int expiresAt;
+
+  factory PendingToolApproval.fromJson(Map<String, dynamic> json) {
+    final rawArgs = json['arguments'];
+    return PendingToolApproval(
+      approvalId: json['approvalId'] as String? ?? '',
+      turnId: json['turnId'] as String? ?? '',
+      toolName: json['toolName'] as String? ?? '',
+      summary: json['summary'] as String? ?? '',
+      arguments: rawArgs is Map<String, dynamic> ? rawArgs : const <String, dynamic>{},
+      expiresAt: (json['expiresAt'] as num?)?.toInt() ?? 0,
     );
   }
 }

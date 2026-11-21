@@ -96,6 +96,19 @@ class FakePsyberApiClient implements PsyberApiClient {
   );
   final List<String> uploadedAvatars = <String>[];
   int llmTestCount = 0;
+  final List<String> reconnectedMcpIds = <String>[];
+  final List<Map<String, Object?>> resolvedApprovals = <Map<String, Object?>>[];
+  List<McpPresetView> mcpPresets = const [
+    McpPresetView(
+      id: 'fetch',
+      label: '网页抓取 (Fetch)',
+      description: '按需抓取公开网页正文',
+      transport: 'stdio',
+      command: 'uvx',
+      args: ['mcp-server-fetch'],
+      trustLevel: 'confirm',
+    ),
+  ];
 
   StreamController<SseEventFrame>? _streamController;
 
@@ -195,6 +208,40 @@ class FakePsyberApiClient implements PsyberApiClient {
         devices: settings.devices,
       );
     }
+    final rawMcp = patch['mcpServers'];
+    if (rawMcp is List<dynamic>) {
+      final nextMcp = rawMcp
+          .whereType<Map<String, dynamic>>()
+          .map(
+            (m) => McpServerView(
+              id: m['id'] as String? ?? '',
+              enabled: m['enabled'] != false,
+              transport: m['transport'] as String? ?? 'stdio',
+              description: m['description'] as String?,
+              command: m['command'] as String?,
+              url: m['url'] as String?,
+              trustLevel: m['trustLevel'] as String? ?? 'confirm',
+              status: m['enabled'] == false ? 'disabled' : 'connected',
+              toolCount: m['enabled'] == false ? 0 : 2,
+            ),
+          )
+          .toList(growable: false);
+      settings = SettingsSnapshot(
+        timezone: settings.timezone,
+        providers: settings.providers,
+        chatSlot: settings.chatSlot,
+        thinkingEnabled: settings.thinkingEnabled,
+        thinkingLevel: settings.thinkingLevel,
+        userAvatarUrl: settings.userAvatarUrl,
+        residentAvatarUrl: settings.residentAvatarUrl,
+        circadian: settings.circadian,
+        desktopNotifyEnabled: settings.desktopNotifyEnabled,
+        webhookEnabled: settings.webhookEnabled,
+        webhookUrl: settings.webhookUrl,
+        devices: settings.devices,
+        mcpServers: nextMcp,
+      );
+    }
     final revokeIds = patch['revokeDeviceIds'];
     if (revokeIds is List<dynamic> && revokeIds.isNotEmpty) {
       revokeCount += 1;
@@ -211,6 +258,7 @@ class FakePsyberApiClient implements PsyberApiClient {
         devices: settings.devices
             .where((d) => !revokeIds.contains(d.deviceId))
             .toList(growable: false),
+        mcpServers: settings.mcpServers,
       );
     }
     return settings;
@@ -570,6 +618,34 @@ class FakePsyberApiClient implements PsyberApiClient {
       devices: settings.devices,
     );
     return url;
+  }
+
+  @override
+  Future<List<McpPresetView>> getMcpPresets(ConnectionProfile profile) async => mcpPresets;
+
+  @override
+  Future<McpServerView?> reconnectMcpServer(ConnectionProfile profile, String serverId) async {
+    reconnectedMcpIds.add(serverId);
+    for (final s in settings.mcpServers) {
+      if (s.id == serverId) return s;
+    }
+    return null;
+  }
+
+  @override
+  Future<void> resolveToolApproval(
+    ConnectionProfile profile, {
+    required String turnId,
+    required String approvalId,
+    required String decision,
+    String scope = 'once',
+  }) async {
+    resolvedApprovals.add({
+      'turnId': turnId,
+      'approvalId': approvalId,
+      'decision': decision,
+      'scope': scope,
+    });
   }
 
   @override
@@ -1788,6 +1864,84 @@ void main() {
       await tester.tap(find.byKey(const Key('palette_autumnLatte')));
       await tester.pumpAndSettle();
       expect(controller.paletteNotifier.value, PsyberPalette.autumnLatte);
+    },
+  );
+
+  testWidgets(
+    '外部 MCP 预设添加、重连与同步高风险工具审批确认卡',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-1',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final controller = AppController(api: api, storage: storage);
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      // 1. 收到 turn.approval_required 时展示同步审批卡，点击允许后调用审批接口并收起卡片
+      api.emitSse('turn.approval_required', {
+        'approvalId': 'apr_1',
+        'turnId': 'turn_mcp_1',
+        'toolName': 'mcp.fetch.get',
+        'summary': '抓取公开网页正文',
+        'arguments': {'url': 'https://example.com'},
+        'expiresAt': 1795046999000,
+      });
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('tool_approval_card')), findsOneWidget);
+      expect(find.textContaining('mcp.fetch.get'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('approval_allow_once_button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('tool_approval_card')), findsNothing);
+      expect(api.resolvedApprovals.length, 1);
+      expect(api.resolvedApprovals.first['decision'], 'allow');
+
+      // 2. 在设置页通过预设添加外部 MCP 服务器并验证重连按钮
+      await tester.tap(find.byKey(const Key('settings_button')));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('mcp_add_preset_button')),
+        240,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.ensureVisible(find.byKey(const Key('mcp_add_preset_button')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('mcp_add_preset_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('mcp_preset_fetch')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('mcp_save_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('mcp_save_button')));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.byKey(const Key('mcp_reconnect_fetch')));
+      await tester.pumpAndSettle();
+      expect(find.text('fetch'), findsOneWidget);
+      expect(find.text('已连接 · 2 工具'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('mcp_reconnect_fetch')));
+      await tester.pumpAndSettle();
+      expect(api.reconnectedMcpIds, ['fetch']);
     },
   );
 }

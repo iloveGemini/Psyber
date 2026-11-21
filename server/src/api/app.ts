@@ -7,6 +7,7 @@ import type { MediaStore } from "../core/media.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
+import type { McpManager } from "../extensions/mcp.ts";
 import type { ChatModelClient } from "../llm/client.ts";
 import type { ResolvedByokSlot } from "../llm/router.ts";
 import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
@@ -92,6 +93,9 @@ export interface AppDeps {
   engine?: DirectEngine;
   pairing?: PairingManager;
   media?: MediaStore;
+  mcp?: McpManager;
+  /** 同步高风险工具审批超时（毫秒，默认 120_000） */
+  approvalTimeoutMs?: number;
   /** 用户新消息（chat / door_note）落盘时回调，用于立即重置 consecutiveUnansweredWakes = 0 */
   onUserMessagePersisted?: () => void;
   /** 设置变更（PATCH /api/v1/settings）后回调，用于热更新作息心跳定时器 */
@@ -116,6 +120,16 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const activeAborts = new Map<string, AbortController>();
   const retryOrigins = new Map<string, { userEventId: string; activityHint?: string }>();
+  const sessionApprovedTools = new Set<string>();
+  const pendingApprovals = new Map<
+    string,
+    {
+      turnId: string;
+      toolName: string;
+      resolve: (res: { decision: "allow" | "deny"; scope?: "once" | "session"; reason?: string }) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   const dispatchChatTurn = (opts: {
     turnId: string;
@@ -177,6 +191,57 @@ export function createApp(deps: AppDeps): Hono {
             }
           },
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
+          onRequestApproval: (req) => {
+            if (sessionApprovedTools.has(req.toolName)) {
+              return Promise.resolve({ decision: "allow", scope: "session" });
+            }
+            const approvalId = ulid(deps.clock.now());
+            const timeoutMs = deps.approvalTimeoutMs ?? 120_000;
+            const expiresAt = deps.clock.now() + timeoutMs;
+            return new Promise((resolve) => {
+              const finish = (res: {
+                decision: "allow" | "deny";
+                scope?: "once" | "session";
+                reason?: string;
+              }) => {
+                const entry = pendingApprovals.get(approvalId);
+                if (!entry) return;
+                clearTimeout(entry.timer);
+                pendingApprovals.delete(approvalId);
+                resolve(res);
+              };
+              const timer = setTimeout(() => {
+                deps.sse?.emit("turn.approval_resolved", {
+                  approvalId,
+                  turnId: req.turnId,
+                  decision: "deny",
+                  reason: "审批超时未响应",
+                });
+                finish({ decision: "deny", reason: "工具调用审批超时（120s），已自动拒绝" });
+              }, timeoutMs);
+              pendingApprovals.set(approvalId, {
+                turnId: req.turnId,
+                toolName: req.toolName,
+                resolve: finish,
+                timer,
+              });
+              ac.signal.addEventListener(
+                "abort",
+                () => {
+                  finish({ decision: "deny", reason: "当前轮次已中止" });
+                },
+                { once: true },
+              );
+              deps.sse?.emit("turn.approval_required", {
+                approvalId,
+                turnId: req.turnId,
+                toolName: req.toolName,
+                summary: req.summary,
+                arguments: req.arguments,
+                expiresAt,
+              });
+            });
+          },
           onTurnSilence: (info) => deps.sse?.emit("turn.silence", info),
           onTurnDone: (info) => {
             retryOrigins.delete(activeTurnId);
@@ -780,6 +845,46 @@ export function createApp(deps: AppDeps): Hono {
       updatedAt: opened.updatedAt,
       peekedEventId: opened.peekedEventId,
     });
+  });
+
+  app.post("/api/v1/turns/:turnId/approval", async (c) => {
+    const turnId = c.req.param("turnId");
+    if (!VALID_ULID_OR_ID_RE.test(turnId)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法 turnId" } }, 400);
+    }
+    let body: { approvalId?: string; decision?: string; scope?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const approvalId = typeof body.approvalId === "string" ? body.approvalId.trim() : "";
+    const decision = body.decision === "allow" || body.decision === "deny" ? body.decision : null;
+    const scope = body.scope === "session" ? "session" : "once";
+    if (!approvalId || !decision) {
+      return c.json(
+        { error: { code: "INVALID_APPROVAL", message: "缺少合法 approvalId 或 decision(allow/deny)" } },
+        400,
+      );
+    }
+    const entry = pendingApprovals.get(approvalId);
+    if (!entry || entry.turnId !== turnId) {
+      return c.json(
+        { error: { code: "APPROVAL_ALREADY_RESOLVED", message: "该审批已处理或已超时" } },
+        409,
+      );
+    }
+    if (decision === "allow" && scope === "session") {
+      sessionApprovedTools.add(entry.toolName);
+    }
+    deps.sse?.emit("turn.approval_resolved", {
+      approvalId,
+      turnId,
+      decision,
+      scope,
+    });
+    entry.resolve({ decision, scope });
+    return c.json({ ok: true, approvalId, decision });
   });
 
   app.post("/api/v1/turns/:turnId/abort", (c) => {

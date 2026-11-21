@@ -31,6 +31,7 @@ import {
   type TidyTaskType,
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
+import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import type { ChatModelClient } from "./llm/client.ts";
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
@@ -72,6 +73,12 @@ export interface BootOptions {
   fetchImpl?: typeof fetch;
   /** 可注入模型探测工厂，供 /api/v1/llm/test 离线测试 */
   llmTestClientFactory?: (resolved: ResolvedByokSlot) => ChatModelClient;
+  /** 可注入外部 MCP 客户端工厂与超时配置，供离线单测验证 */
+  mcpClientFactory?: McpManagerDeps["clientFactory"];
+  mcpHandshakeTimeoutMs?: number;
+  mcpReconnectDelaysMs?: number[];
+  /** 同步工具审批超时（毫秒，默认 120_000） */
+  approvalTimeoutMs?: number;
   /** 是否启动后台定时心跳（生产默认 true，单测可传 false 后手动调用 tickHeartbeat） */
   startHeartbeatTimer?: boolean;
 }
@@ -86,6 +93,7 @@ export interface PsyberRuntime {
   memoryIndex: MemoryIndex;
   drawer: DrawerStore;
   media: MediaStore;
+  mcp: McpManager;
   pairing: PairingManager;
   sse: SseHub;
   notifications: NotificationHub;
@@ -147,6 +155,17 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     saveConfig: (cfg) => saveConfig(dataDir, cfg),
     drawer,
   });
+
+  // Stage 7b: 异步非阻塞挂载外部 MCP 桥接（强制 Tier 3，单服宕机绝不阻塞启动）
+  const mcp = new McpManager({
+    registry,
+    loadCredentials: () => loadCredentials(dataDir),
+    fetchImpl: opts.fetchImpl,
+    handshakeTimeoutMs: opts.mcpHandshakeTimeoutMs,
+    reconnectDelaysMs: opts.mcpReconnectDelaysMs,
+    clientFactory: opts.mcpClientFactory,
+  });
+  mcp.connectAllAsync(config.mcpServers ?? []);
 
   const sse = new SseHub();
   const notifications = new NotificationHub({
@@ -380,6 +399,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     engine,
     pairing,
     media,
+    mcp,
+    approvalTimeoutMs: opts.approvalTimeoutMs,
     onUserMessagePersisted: () => {
       consecutiveUnansweredWakes = 0;
     },
@@ -402,6 +423,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
+    await mcp.stop();
     await waitForIdle();
     db.close();
   };
@@ -416,6 +438,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     memoryIndex,
     drawer,
     media,
+    mcp,
     pairing,
     sse,
     notifications,

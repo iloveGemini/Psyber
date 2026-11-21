@@ -127,6 +127,31 @@ export interface AvatarsConfig {
   residentHash?: string;
 }
 
+export type McpTransport = "stdio" | "streamable_http";
+export type McpTrustLevel = "confirm" | "auto";
+
+/**
+ * 外部 MCP 服务器配置（落盘于 <dataDir>/config.json 的 mcpServers 节点）。
+ * 敏感令牌绝不明文写入，统一通过 "${cred:<key>}" 引用 credentials.json。
+ */
+export interface McpServerConfig {
+  id: string;
+  enabled: boolean;
+  transport: McpTransport;
+  description?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  trustLevel?: McpTrustLevel;
+  autoAllowTools?: string[];
+  includeTools?: string[];
+  excludeTools?: string[];
+  timeoutMs?: number;
+}
+
 /**
  * 单住户实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
@@ -172,6 +197,8 @@ export interface PsyberConfig {
   avatars?: AvatarsConfig;
   /** LLM 槽位与 Provider 非敏感配置（明文 API Key 存 credentials.json） */
   llm?: LlmConfig;
+  /** 外部 MCP 服务器清单（Tier 3 工具池，敏感令牌经 ${cred:<key>} 引用 credentials.json） */
+  mcpServers?: McpServerConfig[];
   /** 是否已完成初生引导 */
   genesisCompleted?: boolean;
 }
@@ -336,6 +363,7 @@ export async function loadOrCreateConfig(
         }
       : undefined,
     llm: cfg.llm,
+    mcpServers: Array.isArray(cfg.mcpServers) ? cfg.mcpServers : [],
     genesisCompleted: Boolean(cfg.genesisCompleted),
   };
 }

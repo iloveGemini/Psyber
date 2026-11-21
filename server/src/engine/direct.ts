@@ -26,6 +26,8 @@ import { renderCircadianState } from "../mood/circadian.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
 import type {
   ExpressionPayload,
+  ToolApprovalRequest,
+  ToolApprovalResult,
   ToolExecutionContext,
   ToolRegistry,
 } from "../tools/registry.ts";
@@ -70,6 +72,7 @@ export interface TurnStreamCallbacks {
   onMessageRetracted?: (event: StoredEvent) => void;
   onAssistantPersisted?: (event: StoredEvent) => void;
   onModelSwitched?: (info: { turnId: string; model: string; reason?: string }) => void;
+  onRequestApproval?: (req: ToolApprovalRequest) => Promise<ToolApprovalResult>;
   onTurnSilence?: (info: { turnId: string; ownTime: boolean }) => void;
   onTurnDone?: (info: {
     turnId: string;
@@ -118,7 +121,16 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
 
 export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
   const table = mode === "wake" ? WAKE_TOOL_LABELS : CHAT_TOOL_LABELS;
-  return table[toolName] ?? toolName;
+  if (table[toolName]) return table[toolName]!;
+  if (toolName.startsWith("mcp.")) {
+    const parts = toolName.split(".");
+    const serverId = parts[1] ?? "mcp";
+    const shortName = parts.slice(2).join(".") || toolName;
+    return mode === "wake"
+      ? `趁你不在，调用了外部工具 ${serverId}/${shortName}`
+      : `调用了外部工具 ${serverId}/${shortName}`;
+  }
+  return toolName;
 }
 
 export interface RunTurnResult {
@@ -657,9 +669,11 @@ export class DirectEngine {
       expressionCount: 0,
       expressions: [],
       shares: [],
+      signal: opts.signal,
       onExpression: (p) => opts.callbacks?.onExpression?.(p),
       onDoorUpdated: (s, n) => opts.callbacks?.onDoorUpdated?.(s, n),
       onMessageRetracted: (ev) => opts.callbacks?.onMessageRetracted?.(ev),
+      requestApproval: opts.callbacks?.onRequestApproval,
     };
 
     // wake 模式在前 16 字符确认非 [SILENT]（或产生实质工具调用）前暂缓广播

@@ -6,7 +6,20 @@ import type { StoredEvent } from "../store/events.ts";
 export type { ExpressionPayload };
 
 export type ToolTier = 1 | 2 | 3;
-export type ToolSecurityLevel = "auto" | "guarded";
+export type ToolSecurityLevel = "auto" | "guarded" | "confirm";
+
+export interface ToolApprovalRequest {
+  turnId: string;
+  toolName: string;
+  summary: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolApprovalResult {
+  decision: "allow" | "deny";
+  scope?: "once" | "session";
+  reason?: string;
+}
 
 /** 通用工具定义（由 tools/ 导出供 llm/ 消费，保持单向依赖不反向导入 llm/） */
 export interface ToolDefinition {
@@ -31,9 +44,11 @@ export interface ToolExecutionContext {
   expressionCount: number;
   expressions: ExpressionPayload[];
   shares?: ShareCardRecord[];
+  signal?: AbortSignal;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
   onMessageRetracted?: (event: StoredEvent) => void;
+  requestApproval?: (req: ToolApprovalRequest) => Promise<ToolApprovalResult>;
 }
 
 export interface RegisteredTool {
@@ -60,6 +75,21 @@ export class ToolRegistry {
 
   register(tool: RegisteredTool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  unregisterByPrefix(prefix: string): number {
+    let removed = 0;
+    for (const key of Array.from(this.tools.keys())) {
+      if (key.startsWith(prefix)) {
+        this.tools.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   get(name: string): RegisteredTool | undefined {
@@ -125,6 +155,26 @@ export class ToolRegistry {
       const verdict = await tool.guard(args, ctx);
       if (!verdict.ok) {
         return { ok: false, output: verdict.reason };
+      }
+    }
+    if (tool.security === "confirm") {
+      if (!ctx.requestApproval) {
+        return {
+          ok: false,
+          output: `工具 "${name}" 需要用户确认审批，当前非交互轮次已保守拦截`,
+        };
+      }
+      const approval = await ctx.requestApproval({
+        turnId: ctx.turnId,
+        toolName: name,
+        summary: `${tool.description || name}`,
+        arguments: args,
+      });
+      if (approval.decision !== "allow") {
+        return {
+          ok: false,
+          output: approval.reason || `用户拒绝了工具 "${name}" 的本次调用`,
+        };
       }
     }
     return tool.execute(args, ctx);
