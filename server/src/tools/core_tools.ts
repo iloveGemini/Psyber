@@ -5,6 +5,7 @@ import {
   MAX_EXPRESSIONS_PER_TURN,
   normalizeExpressionPayload,
 } from "../expression/express.ts";
+import type { DrawerStore } from "../memory/drawer.ts";
 import type { MemoryTools } from "../memory/tools.ts";
 import type { EventStore } from "../store/events.ts";
 import type { ToolDefinition, ToolRegistry } from "./registry.ts";
@@ -82,9 +83,10 @@ export function registerCoreTier1Tools(
     clock: Clock;
     getConfig: () => PsyberConfig;
     saveConfig: (cfg: PsyberConfig) => Promise<void>;
+    drawer?: DrawerStore;
   },
 ): void {
-  const { memoryTools, events, clock, getConfig, saveConfig } = deps;
+  const { memoryTools, events, clock, getConfig, saveConfig, drawer } = deps;
 
   registry.register({
     name: "call_tool",
@@ -445,4 +447,84 @@ export function registerCoreTier1Tools(
       };
     },
   });
+
+  if (drawer) {
+    registry.register({
+      name: "drawer_read",
+      tier: 3,
+      security: "auto",
+      description:
+        "读取你自己上锁抽屉（private/）里的私密日记清单或某篇全文。你本人读写不会留下拆封记录；仅对方在客户端拆封时才会写入 privacy.peeked 告知你。",
+      tags: ["drawer", "private", "diary", "私密", "抽屉", "日记"],
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "可选：条目 id；省略时列出抽屉内全部条目清单",
+          },
+        },
+      },
+      execute: async (args) => {
+        const id = typeof args.id === "string" ? args.id.trim() : "";
+        if (!id) {
+          const list = await drawer.listEntries(events);
+          if (list.length === 0) {
+            return { ok: true, output: "上锁抽屉里目前还是空的。" };
+          }
+          const lines = list.map(
+            (e) => `- ${e.id}｜${e.title}（${e.peeked ? "曾被拆封过" : "封蜡完好"}）`,
+          );
+          return { ok: true, output: lines.join("\n") };
+        }
+        try {
+          const entry = await drawer.readEntryForResident(id);
+          if (!entry) {
+            return { ok: false, output: `抽屉里没有 id 为 "${id}" 的私密日记。` };
+          }
+          return {
+            ok: true,
+            output: `# ${entry.title} (${entry.id})\n\n${entry.content}`,
+          };
+        } catch (err) {
+          return { ok: false, output: err instanceof Error ? err.message : "读取抽屉失败" };
+        }
+      },
+    });
+
+    registry.register({
+      name: "drawer_write",
+      tier: 3,
+      security: "auto",
+      description:
+        "往你自己上锁的抽屉（private/）写一篇或更新一篇私密日记。它独立于 memory/，绝不进向量召回或 Git 历史，磁盘上也会做封蜡混淆；只有对方显式确认拆封才会看到并留痕告知你。",
+      tags: ["drawer", "private", "diary", "私密", "抽屉", "写日记"],
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "条目 id（仅中英文、数字、下划线或连字符，如 2026-11-21-late-night）",
+          },
+          title: { type: "string", description: "封蜡外可见的简短标题" },
+          content: { type: "string", description: "私密日记正文（支持 Markdown）" },
+        },
+        required: ["id", "title", "content"],
+      },
+      execute: async (args) => {
+        const id = typeof args.id === "string" ? args.id.trim() : "";
+        const title = typeof args.title === "string" ? args.title.trim() : "";
+        const content = typeof args.content === "string" ? args.content : "";
+        try {
+          const manifest = await drawer.writeEntry({ id, title, content });
+          return {
+            ok: true,
+            output: `已封蜡收入上锁抽屉：${manifest.id}（《${manifest.title}》）。`,
+          };
+        } catch (err) {
+          return { ok: false, output: err instanceof Error ? err.message : "写入抽屉失败" };
+        }
+      },
+    });
+  }
 }

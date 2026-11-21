@@ -33,6 +33,7 @@ import {
 import { syncStaticStickers } from "./expression/stickers.ts";
 import type { ChatModelClient } from "./llm/client.ts";
 import { DynamicChatModel } from "./llm/router.ts";
+import { DrawerStore } from "./memory/drawer.ts";
 import { MemoryIndex } from "./memory/index.ts";
 import { MemoryTools, isAllowedWritePath } from "./memory/tools.ts";
 import {
@@ -81,6 +82,7 @@ export interface PsyberRuntime {
   db: Database;
   events: EventStore;
   memoryIndex: MemoryIndex;
+  drawer: DrawerStore;
   media: MediaStore;
   pairing: PairingManager;
   sse: SseHub;
@@ -131,6 +133,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   // Stage 7: 装配事件仓、媒体仓、配对管理器、记忆工具、SSE 与离线通知中心
   const events = new EventStore(db, clock);
   const media = new MediaStore(db, dataDir);
+  const drawer = new DrawerStore(dataDir, () => config.instanceId, clock);
   const pairing = new PairingManager(clock);
   const memoryTools = new MemoryTools(dataDir, memoryIndex, clock);
   const registry = new ToolRegistry();
@@ -140,6 +143,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     clock,
     getConfig: () => config,
     saveConfig: (cfg) => saveConfig(dataDir, cfg),
+    drawer,
   });
 
   const sse = new SseHub();
@@ -369,6 +373,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     dataDir,
     db,
     memoryIndex,
+    drawer,
     sse,
     engine,
     pairing,
@@ -405,6 +410,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     db,
     events,
     memoryIndex,
+    drawer,
     media,
     pairing,
     sse,

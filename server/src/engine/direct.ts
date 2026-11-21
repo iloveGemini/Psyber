@@ -67,6 +67,7 @@ export interface TurnStreamCallbacks {
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
   onMessageRetracted?: (event: StoredEvent) => void;
+  onAssistantPersisted?: (event: StoredEvent) => void;
   onModelSwitched?: (info: { turnId: string; model: string; reason?: string }) => void;
   onTurnSilence?: (info: { turnId: string; ownTime: boolean }) => void;
   onTurnDone?: (info: {
@@ -94,6 +95,8 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   look_at_screen: "看了一眼你的屏幕",
   retract_message: "撤回了一条消息",
   share: "递出了一张分享卡",
+  drawer_read: "翻看了上锁抽屉",
+  drawer_write: "往抽屉里封存了一篇日记",
 };
 
 const WAKE_TOOL_LABELS: Record<string, string> = {
@@ -108,6 +111,8 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
   look_at_screen: "看了一眼你的屏幕",
   retract_message: "撤回了一条消息",
   share: "留了一张分享卡",
+  drawer_read: "趁你不在，翻看了上锁抽屉",
+  drawer_write: "趁你不在，往抽屉里封存了一篇日记",
 };
 
 export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
@@ -300,7 +305,7 @@ export class DirectEngine {
   }
 
   /** 构造 Segment 2：跨轮历史回放（换段首条注入 <gist> + 近 6 轮过渡，剥除历史 thinking） */
-  private buildHistoryMessages(excludeEventId?: string): ChatMessage[] {
+  private buildHistoryMessages(excludeEventId?: string, beforeSeq?: number): ChatMessage[] {
     const history: ChatMessage[] = [];
     if (this.rolloverGistAnchor) {
       history.push({
@@ -317,6 +322,7 @@ export class DirectEngine {
     for (const ev of page.items) {
       if (ev.sessionId !== this.sessionId) continue;
       if (excludeEventId && ev.id === excludeEventId) continue;
+      if (beforeSeq !== undefined && ev.seq >= beforeSeq) continue;
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
         // 双向社交撤回不对称性：用户撤回后，住户上下文只见占位看不到原文
         const content =
@@ -351,7 +357,12 @@ export class DirectEngine {
     urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
-  }): Promise<{ content: ChatUserContent; injectedDoorNoteMaxId: string | null; recallCount: number }> {
+  }): Promise<{
+    content: ChatUserContent;
+    injectedDoorNoteMaxId: string | null;
+    injectedNoticeMaxId: string | null;
+    recallCount: number;
+  }> {
     const cfg = this.deps.getConfig();
     const nowMs = this.deps.clock.now();
     const tz = this.deps.clock.timeZone;
@@ -398,6 +409,26 @@ export class DirectEngine {
         return `《${s.title}》（${vagueWhen(s.createdAt, nowMs, tz)}分享；${readStatus}）`;
       });
       ctxBlocks.push(`<shared_items>我最近分享给对方的：${shareParts.join("；")}</shared_items>`);
+    }
+
+    // Spec 02 §2.2：按 events_notice 游标注入未消费的系统事实（privacy.peeked / share.opened / request.decided）
+    let injectedNoticeMaxId: string | null = null;
+    const unnoticedEvents = this.deps.events.listUnnoticedEvents(20);
+    if (unnoticedEvents.length > 0) {
+      injectedNoticeMaxId = unnoticedEvents[unnoticedEvents.length - 1]!.id;
+      const noticeLines = unnoticedEvents.map((ev) => {
+        const when = vagueWhen(ev.createdAt, nowMs, tz);
+        const meta = ev.metadata ?? {};
+        const title = typeof meta.title === "string" ? meta.title : "";
+        if (ev.kind === "privacy.peeked") {
+          return `- 系统事实：用户在${when}拆封查看了上锁抽屉中的「${title || ev.content}」`;
+        }
+        if (ev.kind === "share.opened") {
+          return `- 系统事实：用户在${when}打开阅读了你分享的「${title || ev.content}」`;
+        }
+        return `- 系统事实（${when}）：${ev.content}`;
+      });
+      ctxBlocks.push(`<events_notice>\n${noticeLines.join("\n")}\n</events_notice>`);
     }
 
     const stickersBlock = this.buildStickersBlock();
@@ -514,7 +545,7 @@ export class DirectEngine {
     const fullText = topText ? `${topText}\n\n${runtimeBlock}` : runtimeBlock;
     const content: ChatUserContent =
       imageBlocks.length > 0 ? [{ type: "text", text: fullText }, ...imageBlocks] : fullText;
-    return { content, injectedDoorNoteMaxId, recallCount };
+    return { content, injectedDoorNoteMaxId, injectedNoticeMaxId, recallCount };
   }
 
   private async triggerRollover(): Promise<void> {
@@ -555,6 +586,9 @@ export class DirectEngine {
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
+    groupId?: string;
+    version?: number;
+    historyBeforeSeq?: number;
     signal?: AbortSignal;
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
@@ -572,16 +606,20 @@ export class DirectEngine {
     wakeReason?: string;
     activityHint?: string;
     turnId?: string;
+    groupId?: string;
+    version?: number;
+    historyBeforeSeq?: number;
     signal?: AbortSignal;
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
     const turnId = opts.turnId ?? ulid(this.deps.clock.now());
     const systemPrompt = await this.getOrBuildStaticPrefix();
     const tier1Tools = this.deps.registry.getTier1Definitions();
-    const history = this.buildHistoryMessages(opts.userEventId);
+    const history = this.buildHistoryMessages(opts.userEventId, opts.historyBeforeSeq);
     const {
       content: dynamicUserContent,
       injectedDoorNoteMaxId,
+      injectedNoticeMaxId,
       recallCount,
     } = await this.buildDynamicUserMessage({
       mode: opts.mode,
@@ -906,6 +944,19 @@ export class DirectEngine {
       flushWakeStart();
     }
 
+    // Spec 02 §2.2：仅在非静默完成（产生了回复/表达/分享/工具调用）时推进 events_notice 游标
+    if (
+      !lastError &&
+      !aborted &&
+      injectedNoticeMaxId &&
+      (fullText.trim().length > 0 ||
+        toolCtx.expressions.length > 0 ||
+        shareCount > 0 ||
+        recordedToolCalls.length > 0)
+    ) {
+      this.deps.events.setCursor("events_notice", injectedNoticeMaxId);
+    }
+
     let persisted: StoredEvent | null = null;
     if (
       !lastError &&
@@ -924,6 +975,8 @@ export class DirectEngine {
       const { event } = this.deps.events.append({
         sessionId: this.sessionId,
         turnId,
+        groupId: opts.groupId ?? null,
+        version: opts.version ?? 1,
         role: "assistant",
         kind: opts.mode === "wake" ? "wake" : "chat",
         content: fullText,
@@ -931,6 +984,7 @@ export class DirectEngine {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
       });
       persisted = event;
+      opts.callbacks?.onAssistantPersisted?.(event);
       if (currentModelId) {
         this.lastAssistantModel = currentModelId;
       }

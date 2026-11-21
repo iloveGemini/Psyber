@@ -10,7 +10,9 @@ export type EventKind =
   | "memory_task"
   | "activity_event"
   | "door.updated"
-  | "share.opened";
+  | "privacy.peeked"
+  | "share.opened"
+  | "request.decided";
 export type EventStatus = "active" | "candidate" | "discarded" | "deleted" | "retracted";
 
 export interface StoredEvent {
@@ -45,6 +47,8 @@ export interface AppendEventInput {
   sessionId: string;
   turnId?: string | null;
   clientMessageId?: string | null;
+  groupId?: string | null;
+  version?: number;
   role: EventRole;
   kind: EventKind;
   activity?: string | null;
@@ -123,7 +127,7 @@ export class EventStore {
             id, seq, session_id, turn_id, client_message_id,
             group_id, version, status, role, kind,
             source, fonds, activity, content, thinking, metadata, created_at
-          ) VALUES (?, ?, ?, ?, ?, NULL, 1, 'active', ?, ?, 'live', '', ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'live', '', ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -131,6 +135,8 @@ export class EventStore {
           input.sessionId,
           input.turnId ?? null,
           input.clientMessageId ?? null,
+          input.groupId ?? null,
+          input.version ?? 1,
           input.role,
           input.kind,
           input.activity ?? null,
@@ -643,5 +649,338 @@ export class EventStore {
       }
     }
     return items;
+  }
+
+  /** 统计同一版本组下可切换（active + candidate）的助手版本总数 */
+  countGroupVersions(groupId: string | null): number {
+    if (!groupId) return 1;
+    const row = this.db
+      .query(
+        `SELECT COUNT(*) AS cnt FROM events
+         WHERE group_id = ? AND role = 'assistant' AND status IN ('active', 'candidate')`,
+      )
+      .get(groupId) as { cnt: number };
+    return Math.max(1, row.cnt);
+  }
+
+  /**
+   * 静默编辑当前会话最后一条活跃用户消息（Spec 04 §4）：
+   * - 仅允许编辑同会话最后一条 role='user' AND status='active'；
+   * - closed/cooling_off 态仅允许编辑 door_note，禁止编辑 chat；
+   * - 弃用原用户行及紧随其后的助手回复（status='discarded'），只追加新版本 active 用户行。
+   */
+  editLatestUserMessage(
+    id: string,
+    newContent: string,
+    opts: {
+      doorState: string;
+      newTurnId: string | null;
+      clientMessageId?: string | null;
+    },
+  ):
+    | { ok: true; event: StoredEvent; groupId: string; discardedAssistantIds: string[] }
+    | { ok: false; code: string; error: string } {
+    const tx = this.db.transaction(() => {
+      const target = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow | null;
+      if (!target) {
+        return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (target.role !== "user" || target.status !== "active") {
+        return {
+          ok: false as const,
+          code: "NOT_LATEST_USER_MESSAGE",
+          error: "仅允许编辑当前会话最后一条活跃的用户消息",
+        };
+      }
+      const latestUser = this.db
+        .query(
+          `SELECT id FROM events
+           WHERE session_id = ? AND role = 'user' AND status = 'active'
+           ORDER BY seq DESC
+           LIMIT 1`,
+        )
+        .get(target.session_id) as { id: string } | null;
+      if (!latestUser || latestUser.id !== target.id) {
+        return {
+          ok: false as const,
+          code: "NOT_LATEST_USER_MESSAGE",
+          error: "仅允许编辑当前会话最后一条活跃的用户消息",
+        };
+      }
+      if (
+        (opts.doorState === "closed" || opts.doorState === "cooling_off") &&
+        target.kind !== "door_note"
+      ) {
+        return {
+          ok: false as const,
+          code: "DOOR_CLOSED",
+          error: "门正关着，暂不允许编辑普通对话消息",
+        };
+      }
+
+      const groupId = target.group_id ?? target.id;
+      if (!target.group_id) {
+        this.db.query("UPDATE events SET group_id = ? WHERE id = ?").run(groupId, target.id);
+      }
+      this.db.query("UPDATE events SET status = 'discarded' WHERE id = ?").run(target.id);
+
+      const trailingAssts = this.db
+        .query(
+          `SELECT id FROM events
+           WHERE session_id = ? AND role = 'assistant' AND seq > ?
+             AND status IN ('active', 'candidate')`,
+        )
+        .all(target.session_id, target.seq) as Array<{ id: string }>;
+      const discardedAssistantIds = trailingAssts.map((r) => r.id);
+      if (discardedAssistantIds.length > 0) {
+        this.db
+          .query(
+            `UPDATE events SET status = 'discarded'
+             WHERE session_id = ? AND role = 'assistant' AND seq > ?
+               AND status IN ('active', 'candidate')`,
+          )
+          .run(target.session_id, target.seq);
+      }
+
+      const verRow = this.db
+        .query("SELECT COALESCE(MAX(version), 0) AS max_ver FROM events WHERE group_id = ?")
+        .get(groupId) as { max_ver: number };
+      const nextVersion = verRow.max_ver + 1;
+
+      const nowMs = this.clock.now();
+      const newId = ulid(nowMs);
+      const maxSeqRow = this.db
+        .query("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events")
+        .get() as { max_seq: number };
+      const nextSeq = maxSeqRow.max_seq + 1;
+
+      this.db
+        .query(
+          `INSERT INTO events (
+            id, seq, session_id, turn_id, client_message_id,
+            group_id, version, status, role, kind,
+            source, fonds, activity, content, thinking, metadata, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'user', ?, 'live', '', ?, ?, NULL, ?, ?)`,
+        )
+        .run(
+          newId,
+          nextSeq,
+          target.session_id,
+          opts.newTurnId,
+          opts.clientMessageId ?? null,
+          groupId,
+          nextVersion,
+          target.kind,
+          target.activity,
+          newContent,
+          target.metadata,
+          nowMs,
+        );
+      const inserted = this.db.query("SELECT * FROM events WHERE id = ?").get(newId) as EventRow;
+      return {
+        ok: true as const,
+        event: mapRow(inserted),
+        groupId,
+        discardedAssistantIds,
+      };
+    });
+    return tx();
+  }
+
+  /**
+   * 静默重摇助手回复（Spec 04 §4）：
+   * - 目标须为 role='assistant' AND status='active'，且门处于 open/quiet；
+   * - 原助手行置为 status='candidate'，分配/复用 groupId 与 nextVersion，返回对应用户消息供重新生成。
+   */
+  prepareRerollAssistantMessage(
+    id: string,
+    opts: { doorState: string },
+  ):
+    | {
+        ok: true;
+        groupId: string;
+        nextVersion: number;
+        userEvent: StoredEvent;
+        previousAssistantEvent: StoredEvent;
+      }
+    | { ok: false; code: string; error: string } {
+    const tx = this.db.transaction(() => {
+      const target = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow | null;
+      if (!target) {
+        return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (
+        target.role !== "assistant" ||
+        target.status !== "active" ||
+        (target.kind !== "chat" && target.kind !== "wake")
+      ) {
+        return {
+          ok: false as const,
+          code: "INVALID_REROLL_TARGET",
+          error: "仅允许重摇当前活跃的助手回复",
+        };
+      }
+      if (opts.doorState !== "open" && opts.doorState !== "quiet") {
+        return {
+          ok: false as const,
+          code: "DOOR_CLOSED",
+          error: "门正关着，暂不允许重摇回复",
+        };
+      }
+
+      const meta = target.metadata ? (JSON.parse(target.metadata) as Record<string, unknown>) : {};
+      let userRow: EventRow | null = null;
+      if (typeof meta.inReplyTo === "string" && meta.inReplyTo) {
+        userRow = this.db
+          .query("SELECT * FROM events WHERE id = ? AND role = 'user' AND status = 'active'")
+          .get(meta.inReplyTo) as EventRow | null;
+      }
+      if (!userRow) {
+        userRow = this.db
+          .query(
+            `SELECT * FROM events
+             WHERE session_id = ? AND role = 'user' AND status = 'active' AND seq < ?
+             ORDER BY seq DESC
+             LIMIT 1`,
+          )
+          .get(target.session_id, target.seq) as EventRow | null;
+      }
+      if (!userRow) {
+        return {
+          ok: false as const,
+          code: "INVALID_REROLL_TARGET",
+          error: "找不到对应的上一条用户消息，无法重摇",
+        };
+      }
+
+      const groupId = target.group_id ?? target.id;
+      this.db
+        .query("UPDATE events SET group_id = ?, status = 'candidate' WHERE id = ?")
+        .run(groupId, target.id);
+
+      const verRow = this.db
+        .query("SELECT COALESCE(MAX(version), 0) AS max_ver FROM events WHERE group_id = ?")
+        .get(groupId) as { max_ver: number };
+      const nextVersion = verRow.max_ver + 1;
+
+      const prevUpdated = this.db
+        .query("SELECT * FROM events WHERE id = ?")
+        .get(target.id) as EventRow;
+      return {
+        ok: true as const,
+        groupId,
+        nextVersion,
+        userEvent: mapRow(userRow),
+        previousAssistantEvent: mapRow(prevUpdated),
+      };
+    });
+    return tx();
+  }
+
+  /** 若 Reroll 生成失败或空中断，将原 candidate 助手回复恢复为 active，避免时间线丢消息 */
+  restoreAssistantCandidate(previousId: string): void {
+    this.db
+      .query("UPDATE events SET status = 'active' WHERE id = ? AND status = 'candidate'")
+      .run(previousId);
+  }
+
+  /**
+   * 切换助手版本组（Spec 04 §4）：
+   * 仅允许在同 group_id 的 candidate 助手版本间切换；Edit 弃用的 discarded 与 deleted 一律拒返 409。
+   */
+  switchVersion(
+    messageId: string,
+    targetVersion: number,
+  ):
+    | { ok: true; activated: StoredEvent; groupId: string }
+    | { ok: false; code: string; error: string } {
+    const tx = this.db.transaction(() => {
+      const anchor = this.db
+        .query("SELECT * FROM events WHERE id = ?")
+        .get(messageId) as EventRow | null;
+      if (!anchor) {
+        return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (!anchor.group_id || anchor.role !== "assistant") {
+        return {
+          ok: false as const,
+          code: "INVALID_VERSION_TARGET",
+          error: "该消息不存在可切换的历史版本组",
+        };
+      }
+
+      const target = this.db
+        .query(
+          `SELECT * FROM events
+           WHERE group_id = ? AND version = ? AND role = 'assistant'
+           LIMIT 1`,
+        )
+        .get(anchor.group_id, targetVersion) as EventRow | null;
+      if (!target || target.status !== "candidate") {
+        return {
+          ok: false as const,
+          code: "INVALID_VERSION_TARGET",
+          error: "目标版本不存在或不允许切换",
+        };
+      }
+
+      this.db
+        .query(
+          `UPDATE events SET status = 'candidate'
+           WHERE group_id = ? AND role = 'assistant' AND status = 'active'`,
+        )
+        .run(anchor.group_id);
+      this.db.query("UPDATE events SET status = 'active' WHERE id = ?").run(target.id);
+
+      const activated = this.db
+        .query("SELECT * FROM events WHERE id = ?")
+        .get(target.id) as EventRow;
+      return {
+        ok: true as const,
+        activated: mapRow(activated),
+        groupId: anchor.group_id,
+      };
+    });
+    return tx();
+  }
+
+  /** 汇总每个上锁抽屉条目的最近拆封时间戳（供 GET /api/v1/drawer 标注 peeked） */
+  getDrawerPeekStats(): Map<string, number> {
+    const rows = this.db
+      .query(
+        `SELECT metadata, created_at FROM events
+         WHERE kind = 'privacy.peeked' AND metadata IS NOT NULL
+         ORDER BY seq ASC`,
+      )
+      .all() as Array<{ metadata: string | null; created_at: number }>;
+    const map = new Map<string, number>();
+    for (const row of rows) {
+      if (!row.metadata) continue;
+      try {
+        const meta = JSON.parse(row.metadata) as { drawerId?: unknown };
+        if (typeof meta.drawerId === "string" && meta.drawerId) {
+          map.set(meta.drawerId, row.created_at);
+        }
+      } catch {
+        // 忽略损坏 JSON
+      }
+    }
+    return map;
+  }
+
+  /** 查询尚未经 events_notice 游标告知住户的系统事实事件（privacy.peeked / share.opened / request.decided） */
+  listUnnoticedEvents(limit = 20): StoredEvent[] {
+    const cursor = this.getCursor("events_notice") ?? "";
+    const rows = this.db
+      .query(
+        `SELECT * FROM events
+         WHERE kind IN ('privacy.peeked', 'share.opened', 'request.decided')
+           AND status = 'active'
+           AND id > ?
+         ORDER BY seq ASC
+         LIMIT ?`,
+      )
+      .all(cursor, Math.max(1, limit)) as EventRow[];
+    return rows.map(mapRow);
   }
 }

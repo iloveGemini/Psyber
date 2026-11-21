@@ -7,6 +7,7 @@ import type { MediaStore } from "../core/media.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
+import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
@@ -51,9 +52,11 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const urgent = meta.urgent === true ? true : undefined;
   const shares = Array.isArray(meta.shares) ? meta.shares : undefined;
 
+  const versionCount = ev.role === "assistant" && ev.groupId ? events.countGroupVersions(ev.groupId) : 1;
+
   return {
     ...ev,
-    versionCount: 1,
+    versionCount,
     ...(recallCount !== undefined ? { recallCount } : {}),
     ...(toolSummary !== undefined ? { toolSummary } : {}),
     ...(model !== undefined ? { model } : {}),
@@ -82,6 +85,7 @@ export interface AppDeps {
   dataDir?: string;
   db?: Database;
   memoryIndex?: MemoryIndex;
+  drawer?: DrawerStore;
   sse?: SseHub;
   engine?: DirectEngine;
   pairing?: PairingManager;
@@ -115,11 +119,16 @@ export function createApp(deps: AppDeps): Hono {
     videoClip?: { durationSec: number; frameHashes: string[] };
     urgent?: boolean;
     activityHint?: string;
+    groupId?: string;
+    version?: number;
+    historyBeforeSeq?: number;
+    restoreCandidateIdOnFailure?: string;
   }) => {
     if (!deps.engine) return;
     const ac = new AbortController();
     const activeTurnId = opts.turnId;
     activeAborts.set(activeTurnId, ac);
+    let persistedInTurn = false;
     void deps.engine
       .runTurn({
         mode: "chat",
@@ -131,6 +140,9 @@ export function createApp(deps: AppDeps): Hono {
         urgent: opts.urgent,
         activityHint: opts.activityHint,
         turnId: activeTurnId,
+        groupId: opts.groupId,
+        version: opts.version,
+        historyBeforeSeq: opts.historyBeforeSeq,
         signal: ac.signal,
         callbacks: {
           onTurnStart: (info) => deps.sse?.emit("turn.start", info),
@@ -148,6 +160,16 @@ export function createApp(deps: AppDeps): Hono {
               retractedId: ev.id,
               message: toTimelineItem(ev, deps.events),
             }),
+          onAssistantPersisted: (ev) => {
+            persistedInTurn = true;
+            if (opts.groupId) {
+              deps.sse?.emit("message.updated", {
+                action: "version",
+                groupId: opts.groupId,
+                message: toTimelineItem(ev, deps.events),
+              });
+            }
+          },
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
           onTurnSilence: (info) => deps.sse?.emit("turn.silence", info),
           onTurnDone: (info) => {
@@ -159,6 +181,9 @@ export function createApp(deps: AppDeps): Hono {
       })
       .finally(() => {
         activeAborts.delete(activeTurnId);
+        if (!persistedInTurn && opts.restoreCandidateIdOnFailure) {
+          deps.events.restoreAssistantCandidate(opts.restoreCandidateIdOnFailure);
+        }
       });
   };
 
@@ -506,6 +531,178 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ retractedId: id, eventSeq: res.event.seq, message: timelineItem });
   });
 
+  app.post("/api/v1/chat/messages/:id/edit", async (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
+    }
+    let body: { content?: string; clientMessageId?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    if (!content) {
+      return c.json({ error: { code: "EMPTY_MESSAGE", message: "编辑后的消息内容不能为空" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    const doorState = cfg.door.state as string;
+    if (doorState === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    for (const ac of activeAborts.values()) {
+      ac.abort();
+    }
+
+    const existing = deps.events.getById(id);
+    const isDoorNote = existing?.kind === "door_note";
+    const newTurnId = isDoorNote ? null : ulid(deps.clock.now());
+    const res = deps.events.editLatestUserMessage(id, content, {
+      doorState,
+      newTurnId,
+      clientMessageId: typeof body.clientMessageId === "string" ? body.clientMessageId : null,
+    });
+    if (!res.ok) {
+      const status = res.code === "NOT_FOUND" ? 404 : 409;
+      return c.json({ error: { code: res.code, message: res.error } }, status);
+    }
+
+    const timelineItem = toTimelineItem(res.event, deps.events);
+    for (const discardedId of res.discardedAssistantIds) {
+      deps.sse?.emit("message.updated", { action: "delete", deletedId: discardedId });
+    }
+    deps.sse?.emit("message.updated", {
+      action: "edit",
+      groupId: res.groupId,
+      message: timelineItem,
+    });
+
+    if (res.event.kind === "chat" && deps.engine && res.event.turnId) {
+      const meta = res.event.metadata ?? {};
+      const attachments = Array.isArray(meta.attachments)
+        ? meta.attachments.filter((x): x is string => typeof x === "string")
+        : undefined;
+      const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : undefined;
+      retryOrigins.set(res.event.turnId, {
+        userEventId: res.event.id,
+        activityHint: res.event.activity ?? undefined,
+      });
+      dispatchChatTurn({
+        turnId: res.event.turnId,
+        userEvent: res.event,
+        stickerId,
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        urgent: meta.urgent === true ? true : undefined,
+        activityHint: res.event.activity ?? undefined,
+      });
+    }
+
+    return c.json({ message: timelineItem, turnId: res.event.turnId }, 202);
+  });
+
+  app.post("/api/v1/chat/messages/:id/reroll", (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    const doorState = cfg.door.state as string;
+    if (doorState === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (activeAborts.size > 0) {
+      return c.json(
+        { error: { code: "TURN_IN_PROGRESS", message: "当前已有正在生成的回复，请稍后再试" } },
+        409,
+      );
+    }
+    const prep = deps.events.prepareRerollAssistantMessage(id, { doorState });
+    if (!prep.ok) {
+      const status = prep.code === "NOT_FOUND" ? 404 : 409;
+      return c.json({ error: { code: prep.code, message: prep.error } }, status);
+    }
+
+    const newTurnId = ulid(deps.clock.now());
+    const meta = prep.userEvent.metadata ?? {};
+    const attachments = Array.isArray(meta.attachments)
+      ? meta.attachments.filter((x): x is string => typeof x === "string")
+      : undefined;
+    const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : undefined;
+    retryOrigins.set(newTurnId, {
+      userEventId: prep.userEvent.id,
+      activityHint: prep.userEvent.activity ?? undefined,
+    });
+
+    dispatchChatTurn({
+      turnId: newTurnId,
+      userEvent: prep.userEvent,
+      stickerId,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      activityHint: prep.userEvent.activity ?? undefined,
+      groupId: prep.groupId,
+      version: prep.nextVersion,
+      historyBeforeSeq: prep.userEvent.seq,
+      restoreCandidateIdOnFailure: prep.previousAssistantEvent.id,
+    });
+
+    return c.json(
+      { turnId: newTurnId, groupId: prep.groupId, nextVersion: prep.nextVersion },
+      202,
+    );
+  });
+
+  app.post("/api/v1/chat/messages/:id/version", async (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
+    }
+    let body: { version?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const version =
+      typeof body.version === "number" && Number.isInteger(body.version) && body.version >= 1
+        ? body.version
+        : null;
+    if (version === null) {
+      return c.json({ error: { code: "INVALID_VERSION_TARGET", message: "version 必须为正整数" } }, 400);
+    }
+    const cfg = deps.getConfig();
+    if ((cfg.door.state as string) === "departed") {
+      return c.json(
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        410,
+      );
+    }
+    if (activeAborts.size > 0) {
+      return c.json(
+        { error: { code: "TURN_IN_PROGRESS", message: "当前已有正在生成的回复，请稍后再切换版本" } },
+        409,
+      );
+    }
+    const res = deps.events.switchVersion(id, version);
+    if (!res.ok) {
+      const status = res.code === "NOT_FOUND" ? 404 : 409;
+      return c.json({ error: { code: res.code, message: res.error } }, status);
+    }
+    const activatedItem = toTimelineItem(res.activated, deps.events);
+    deps.sse?.emit("message.updated", {
+      action: "version",
+      groupId: res.groupId,
+      message: activatedItem,
+    });
+    return c.json({ activated: activatedItem, groupId: res.groupId });
+  });
+
   app.post("/api/v1/shares/:id/open", (c) => {
     const id = c.req.param("id");
     if (!VALID_ULID_OR_ID_RE.test(id)) {
@@ -526,6 +723,56 @@ export function createApp(deps: AppDeps): Hono {
       shareId: res.shareId,
       openedAt: res.openedAt,
       firstOpen: res.firstOpen,
+    });
+  });
+
+  app.get("/api/v1/drawer", async (c) => {
+    if (!deps.drawer) {
+      return c.json({ error: { code: "NOT_ENABLED", message: "上锁抽屉未启用" } }, 404);
+    }
+    const items = await deps.drawer.listEntries(deps.events);
+    return c.json({ items });
+  });
+
+  app.post("/api/v1/drawer/:id/open", async (c) => {
+    if (!deps.drawer) {
+      return c.json({ error: { code: "NOT_ENABLED", message: "上锁抽屉未启用" } }, 404);
+    }
+    const id = decodeURIComponent(c.req.param("id"));
+    if (!isValidDrawerId(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法抽屉条目 ID" } }, 400);
+    }
+    let body: { confirmed?: unknown } = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    if (body.confirmed !== true) {
+      return c.json(
+        { error: { code: "CONFIRMATION_REQUIRED", message: "拆封上锁抽屉须显式确认 confirmed: true" } },
+        400,
+      );
+    }
+    const opened = await deps.drawer.openEntryForUser({
+      id,
+      events: deps.events,
+      sessionId: deps.getActiveSessionId(),
+      channel: "app",
+    });
+    if (!opened) {
+      return c.json({ error: { code: "NOT_FOUND", message: "找不到对应的上锁抽屉条目" } }, 404);
+    }
+    deps.sse?.emit("message.created", {
+      message: toTimelineItem(opened.peekedEvent, deps.events),
+    });
+    return c.json({
+      id: opened.id,
+      title: opened.title,
+      content: opened.content,
+      createdAt: opened.createdAt,
+      updatedAt: opened.updatedAt,
+      peekedEventId: opened.peekedEventId,
     });
   });
 

@@ -598,7 +598,7 @@ class AppController {
     final updated = await _api.editMessage(profile, messageId, newContent);
     if (_disposed) return;
     if (updated.id.isNotEmpty) {
-      _upsertTimelineItem(updated);
+      _replaceGroupAndUpsertTimelineItem(updated);
     }
     await refreshSnapshot();
   }
@@ -615,7 +615,7 @@ class AppController {
     final activated = await _api.switchMessageVersion(profile, messageId, version);
     if (_disposed) return;
     if (activated.id.isNotEmpty) {
-      _upsertTimelineItem(activated);
+      _replaceGroupAndUpsertTimelineItem(activated);
     }
   }
 
@@ -727,16 +727,7 @@ class AppController {
         } else {
           final rawMsg = frame.data['message'];
           if (rawMsg is Map<String, dynamic>) {
-            final item = TimelineItem.fromJson(rawMsg);
-            // 版本切换或编辑时替换同 groupId 的旧展示项
-            if (item.groupId != null) {
-              final list = List<TimelineItem>.from(timelineNotifier.value);
-              list.removeWhere(
-                (e) => e.groupId == item.groupId && e.role == item.role && e.id != item.id,
-              );
-              timelineNotifier.value = List<TimelineItem>.unmodifiable(list);
-            }
-            _upsertTimelineItem(item);
+            _replaceGroupAndUpsertTimelineItem(TimelineItem.fromJson(rawMsg));
           }
         }
         return;
@@ -882,6 +873,18 @@ class AppController {
         unawaited(refreshSnapshot());
         return;
     }
+  }
+
+  void _replaceGroupAndUpsertTimelineItem(TimelineItem item) {
+    if (item.id.isEmpty) return;
+    if (item.groupId != null) {
+      final list = List<TimelineItem>.from(timelineNotifier.value);
+      list.removeWhere(
+        (e) => e.groupId == item.groupId && e.role == item.role && e.id != item.id,
+      );
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(list);
+    }
+    _upsertTimelineItem(item);
   }
 
   void _upsertTimelineItem(TimelineItem item) {
