@@ -84,13 +84,17 @@ PSYBER-SEALED-V1
    - 用户通过 `POST /api/v1/drawer/:id/open` 或 CLI `psyber export --include-private` 拆封：**先**在同一事务内写入 `events (role='system', kind='privacy.peeked', session_id=activeSessionId || 'system', content='用户在 ' + channel + ' 拆封了上锁抽屉「' + title + '」', metadata={ drawerId, title, channel: 'app' | 'cli' })`，**再**返回解封正文；
    - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind IN ('privacy.peeked', 'share.opened', 'request.decided') AND id > lastNoticedId` 组装 `<events_notice>`（例如 `系统事实：用户在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`、`系统事实：用户在 <vagueWhen> 打开阅读了你分享的「<title>」`；若用户开启了评测透明告知，则按状态每轮客观注明`系统事实：用户当前开启了召回评测检视模式`），绝不替住户预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
 
-### 2.3 多尺度自传骨架 `<gist>` 读取与连续性拼装规程
+### 2.3 多尺度自传连续性 `<continuity>` 读取与拼装规程
 
-承接 `Spec 01` §2.5 与 `MEMORY.md` §2.1，`<gist>` 是住户亲笔滚动的自传时间骨架，新会话开局由 Direct Engine 调用 `server/src/memory/gist.ts` 组装：
+承接 `Spec 01` §2.5 与 `MEMORY.md` §2.1，`<continuity>` 是住户亲笔滚动的自传时间骨架 + 未入日梗概的近期日常笔记正文 + 上一段末尾原话，在新会话首轮开口前由 Direct Engine 调用 `server/src/memory/gist.ts` 组装并落盘定格至 `task_cursors['active_session']`：
 
-1. **分期磁盘结构**：
-   - **Ring 1 先落两层**：`memory/gist/days/YYYY-MM.md`（每日 `### YYYY-MM-DD`，≲ 300 字）与 `memory/gist/weeks/YYYY.md`（每周 `### YYYY-Www`，≲ 500 字），直接取最近 7 天 + 最近 4 周 + 尚未入日梗概的近期 `daily/` 卡片，受 `GIST_BUDGET ≤ 3000 tokens` 约束；
-   - **Ring 1.5 补全长程两层**：实例运行满 1 个月后再启用 `memory/gist/months/YYYY.md`（≲ 800 字）与 `memory/gist/years/YYYY.md`（≲ 1000 字）及四级区间去重金字塔。
+1. **分期磁盘结构与不重叠金字塔**：
+   - `memory/gist/days/YYYY-MM.md`（每日 `### YYYY-MM-DD`，≲ 300 字）、`memory/gist/weeks/YYYY.md`（每周 `### YYYY-Www`，≲ 500 字）、`memory/gist/months/YYYY.md`（每月 `### YYYY-MM`，≲ 800 字）与 `memory/gist/years/YYYY.md`（每年 ≲ 1000 字）；
+   - 按从近到远、**层级不重叠**规则保底拼装（梗概金字塔总预算 `≤ 16000` 字，单条读时防跑偏上限：天 `400` / 周 `650` / 月 `1000` / 年 `1200` 字）：先取最近 7 天 → 再取早于最旧那天的最近 4 周 → 再取早于最旧那周的最近 12 月与更早年份，防止早期周/月梗概挤占最近几天的预算，同时确保运行满一年及以上时月/年梗概不被误裁；
+2. **未入日梗概的近期 `daily/` 正文（`≤ 1800` 字）**：
+   - 仅收录日期晚于 `lastGistDay`（今日及尚未写日梗概的前日）的活跃/待核对 `daily/` **卡片正文**（去 Frontmatter，从新往旧保预算，超出提示用 `grep`/`read` 查阅）；睡前换段后自动为空；**旧天 `daily/` 与 `activities/` 全部交由双轨召回按需检索，不占开局预算**；
+3. **上一段末尾原话（`≤ 2000` 字）**：
+   - 按 `seq <= carryOverUntilSeq` 从旧段末尾向前按字符预算截取真实对话，按 `vagueWhen` 模糊时间分组呈现，用于无缝接住刚说完的话头与语气。
 
 ---
 

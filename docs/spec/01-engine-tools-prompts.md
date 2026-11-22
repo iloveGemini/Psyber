@@ -59,7 +59,7 @@ export interface ModelRef {
 | :--- | :--- | :--- |
 | `chat`（主对话） | OAuth 失效 / Key 无效 | SSE 推 `turn.error { code: "AUTH_EXPIRED", retryable: false }`，引导进设置更新凭证 |
 | `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；若配置了 `slots.fallbacks` 则按顺序自动切换备用模型（仅在相对上一条助手回复的模型发生变化时广播 `turn.model_switched`）；全部耗尽则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` 并支持客户端原地无痕重试（`POST /turns/:turnId/retry`，不重复插入用户消息；若多步工具调用已在前序步骤成功拿到工具结果，保留本轮内存检查点从断点步骤续跑而非整轮重来） |
-| `chat`（主对话） | 上下文接近/超出上限 | **直接切新 `session_id`**（注入 `<gist>` + 最近 6 轮原始对话）继续正常回复，旧会话交由后台单队列异步整理，**绝不进入前台忙态、绝不阻塞发消息**；若单轮输入本身超限则推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }` |
+| `chat`（主对话） | 上下文接近/超出上限 | **先同步执行 `daily_wrapup` 整理旧段**（期间广播 SSE `turn.rollover { phase: "wrapping", reason }` 供前端显示「正在收拢这段记忆…」），整理成功后再切新 `session_id`（持久化 `active_session`，首轮冻结注入 `<continuity>`）；遇到 `CONTEXT_OVERFLOW` 且当前段存在历史时，完成整理换段后当轮自动重试一次；仅当单轮输入本身超限或整理失败时推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }`；75% 换段或手动换段若整理失败则保留原 `session_id` 不硬切防失忆 |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
 | `memory_task`（写作轮） | 写作阶段模型错误 / 超时 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
 | `memory_task`（Ring 1.5 复核） | 复核/修订调用超时、报错或 JSON 不可解析 | **非阻塞降级**：仅记录告警日志，**绝不回滚阶段 A 已落盘的合法卡片**，正常提交阶段 A 改动并推进游标 |
@@ -82,11 +82,11 @@ export interface ModelRef {
 │     2. System Base Prompt（`prompts/main.md` · 脊柱底线、相处准绳与工具）│
 │     3. <user> memory/user.md 快照                                       │
 │     4. <shelf> memory/shelf/{rules,mirror,threads}.md 快照              │
+│     5. <continuity> 换段/续接自传连续性快照（新段首轮定格，整段不变）    │
 │   ★ CACHE BREAKPOINT #1（落在 system 末尾打 ephemeral，一并锁定 tools[]）│
 ├─────────────────────────────────────────────────────────────────────────┤
 │ [Segment 2 · Append-Only History] —— 映射为 messages[]，严禁回改历史消息 │
-│   · 首条助手锚点：完整多尺度自传骨架 <gist>（年 / 月 / 周 / 天 + 待入梗概情节）│
-│   · 历史轮次：user / assistant（只存正文 + express 记录 + 工具调用与结果） │
+│   · 仅按当前 session_id 完整回放本段真实对话（正文 + express + 工具结果）│
 │   ★ CACHE BREAKPOINT #2（动态落在「倒数第 1 条已落盘 assistant 消息」末尾）│
 ├─────────────────────────────────────────────────────────────────────────┤
 │ [Segment 3 · Dynamic Tail] —— 每轮注入当前最新 user 消息，严禁进 system   │
@@ -151,27 +151,27 @@ export interface ModelRef {
 
 > **精简决策（2026-11-20）**：厂商 Prompt Cache TTL 与计费策略随时演进，不再将业务逻辑绑死在 5 分钟 TTL 上。**已移除 4 分钟 1-token 保活探测与 `>40k & 25min` 温热换段规则**；仅通过 Segment 1 固定不变 + Segment 2 只追加的天然结构自然吃满缓存。
 
-### 2.5 拒绝旁观者摘要：极简异步换段（Rollover）与自传骨架 `<gist>`
+### 2.5 拒绝旁观者摘要：同步收尾换段（Rollover）与自传连续性 `<continuity>`
 
-彻底摒弃用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由住户本人以第一人称产生**。
+彻底摒弃用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由住户本人以第一人称产生**；且宁可短暂等待旧段收尾写完记忆，也绝不抢着让 AI 用缺失上下文的“失忆新段”回复用户。
 
 1. **换段（Rollover · 换新 `session_id`）触发条件**：
-   - **① 上下文阈值换段**：累计 Prompt Token 超过 `min(模型窗口 * 75%, contextLimits.chat)`（独处轮取 `contextLimits.solo`）或触发 `CONTEXT_OVERFLOW` 时；
-   - **② 每日睡前/跨日换段**：进入作息睡眠窗完成 `bedtime` 整理后，或跨日闲置超过 6 小时；
-   - **③ 用户手动「存记忆换段」（Ring 1.5）**：用户通过 `POST /api/v1/chat/wrap-up` 主动收尾当前段落时（聊完大事或想轻装切新段），同样走异步非阻塞换段与后台整理。
+   - **① 上下文阈值 / 溢出换段**：本轮实际生效模型的累计 Token 超过 `min(模型窗口 * 75%, contextLimits.chat)`（独处轮取 `contextLimits.solo`），或触发 `CONTEXT_OVERFLOW` 时；
+   - **② 每日睡前整理后换段**：进入作息睡眠窗完成 `bedtime` 整理（或因夜间关机错过 `bedtime` 而在次日补整理完成）后，只要库中**没有晚于本次 `bedtime` 已消化游标的新对话**，即自动切入 `fresh: true` 的新 `session_id`（无论服务是否重启过；若用户已在补整理期间提前开口聊起新话题，则不中途打断）；**若尚未完成 `bedtime` 整理，绝不因单纯跨日闲置截断未整理的原始对话**；
+   - **③ 用户手动「存记忆换段」（Ring 1.5）**：用户通过 `POST /api/v1/chat/wrap-up` 主动收尾当前段落时，同样先同步整理完当前段落再切新段。
    - *状态卡不走换段等待*：对方亲口说的恢复或变更，住户在对话当轮即顺手更新状态卡。
-2. **非阻塞异步整理（彻底消除死锁与前台忙态）**：
-   - 触发换段时，Direct Engine **立刻开启新 `session_id`**（首条注入 `<gist>` + 最近 6 轮原始对话）保证前台对话零卡顿，同时将旧会话未整理区间推入后台单队列，异步运行 `daily_wrapup` 整理并 `git commit`。
-   - **不再存在 `systemBusy: rollover` 前台忙态、不再排队拦截用户消息，也不再与 `ChatTurnLock` 死锁。**
-3. **新会话首条助手锚点：完整多尺度自传骨架 `<gist>`**：
-   - 新会话的历史首条不再放生硬的摘要，而是注入由住户本人历次睡前与整理轮亲自写下的 **完整自传骨架**，越远越粗，层层嵌套：
-     - **年（`years/`）**：针对长期实例，记录跨年核心生命轨迹（≲ 1000 字/年）；
-     - **月（`months/`）**：过去最多 12 个月（`GIST_LIMIT.month = 800` 字/月）；
-     - **周（`weeks/`）**：过去最多 4 周（`GIST_LIMIT.week = 500` 字/周，不与天重叠）；
-     - **天（`days/`）**：过去最多 7 天（`GIST_LIMIT.day = 300` 字/天）；
-     - **待入梗概情节**：取自 `updated_at > bedtime.last_run_at`（首次取当日零点，与 `Spec 02` §5.2 `bedtime` 窗口一致）的已落盘 `daily/` 与 `activities/` 卡片摘要（不含 `resolved`/`archived`/`faded`，按 `updated_at` 从新往旧截取至剩余字符预算，避免漏掉当日续更的长周期活动卡）；
-   - **预算红线**：整套 `<gist>` 骨架受硬上限严格约束（默认 `GIST_BUDGET ≤ 3000 tokens`），保持自传完整连贯且轻盈稳固；
-   - 新会话随后顺接上一段会话的**最近 6 轮原始对话**作为无缝滑行过渡。
+2. **先同步收尾整理、再切新段（保证连续性且单向锁零死锁）**：
+   - 触发换段（阈值 / 溢出 / 手动）时，Direct Engine 先广播 SSE `turn.rollover { phase: "wrapping", reason }`（客户端展示「正在收拢这段记忆…」），在 `turnMutex` 内同步执行 `daily_wrapup`（循环排空至换段截止序号 `cutoffSeq`，避免提前吃掉排队中的下一条用户消息）并 `git commit`；
+   - **整理成功后**才切入新 `session_id`，持久化 `active_session` 状态（`{ sessionId, fresh: true, carryOverUntilSeq, continuity: null }`，存入 `task_cursors['active_session']`），清空静态前缀缓存、工具会话白名单（`scope: "session"`）与用量水位，并广播 `turn.rollover { phase: "done", oldSessionId, newSessionId, contextUsage }`；
+   - **整理失败兜底**：75% 换段或手动换段若整理失败/超时，**保留原 `session_id` 不硬切**并广播 `turn.rollover { phase: "error" }`；`CONTEXT_OVERFLOW` 时若整理成功且当前段有历史，则立刻在新段自动重试本轮一次，仅当新空段本身仍超限或整理失败时推 `turn.error { code: "CONTEXT_OVERFLOW" }`；
+   - **单向锁防死锁**：主对话换段严格按 `turnMutex -> tidyMutex` 顺序加锁；后台 `bedtime` 完成回调 `onBedtimeCompleted` **必须在释放 `tidyMutex` 之后**触发，从结构上杜绝循环等待；
+   - **排队新消息不拒收、不串段**：收尾期间用户仍可正常 `POST /api/v1/chat/messages`（`202`），落盘后的排队消息在轮到执行时若检测到已切新段，自动重绑至新 `session_id`，绝不落进旧段过渡原话导致双发。
+3. **新会话 `<continuity>` 连续性块（冻结在 Static Prefix 末尾）**：
+   - 新段 `fresh === true` 期间只记录 `carryOverUntilSeq`；等到**新会话第一轮真正开口时**才惰性组装 `<continuity>` 并落盘定格至 `active_session.continuity`（同时置 `fresh = false`），后续同段与短停重启字节级复用，既吃满 Cache Breakpoint #1，又绝不在 `messages[0]` 伪造 `assistant` 消息破坏模型角色交替。
+   - `<continuity>` 参照 Psyche 分层结构按预算从新到旧保底拼装（越远越粗，层层不重叠）：
+     - **不重叠自传梗概金字塔（预算 `≤ 16000` 字；单条读时防跑偏上限：天 `400` / 周 `650` / 月 `1000` / 年 `1200` 字）**：优先保最近 **7 天**（`gist/days/`），再补早于最旧那天的最近 **4 周**（`gist/weeks/`），再补早于最旧那周的最近 **12 月**（`gist/months/`）与跨年（`gist/years/`）；
+     - **【最近的经历】（预算 `≤ 1800` 字）**：仅收录**晚于最后一条日梗概日期（`day > lastGistDay`）**的活跃 `daily/` **卡片正文**（用于填平白天盘中换段时尚未写今日日梗概的空白；睡前换段后自动为空；**旧天 `daily/` 与 `activities/` 全部交给双轨召回按需检索，不占开局预算**）；
+     - **【上一段末尾的原话】（预算 `≤ 2000` 字）**：按 `seq <= carryOverUntilSeq` 从旧段末尾向前按字符预算截取真实对话，按模糊时间分组，仅用于无缝接住刚说完的话头与语气。
 
 ---
 

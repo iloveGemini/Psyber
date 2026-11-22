@@ -33,7 +33,7 @@
 | 方法与路径 | 分期 | 说明 |
 | :--- | :--- | :--- |
 | `GET /api/v1/chat/history?before=<id>&limit=50` | **Ring 1** | 分页拉取时间线（含对话、门缝留言、具身表达元数据、可折叠 `✦ 整理记忆` 静默任务卡；媒体仅返回 URL，**严禁内联 base64**；断线重连可直接拉取补齐） |
-| `POST /api/v1/chat/messages` | **Ring 1** | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `attachments`、`stickerId`、Ring 1.5 可选 `urgent: true` 仅于 `closed` 态一次性紧急直达）；门为 `closed` 且非紧急时自动作为「门缝纸条」落盘不唤醒回复；上下文达阈值时直接切新会话并后台异步整理，不阻塞前台发消息 |
+| `POST /api/v1/chat/messages` | **Ring 1** | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `attachments`、`stickerId`、Ring 1.5 可选 `urgent: true` 仅于 `closed` 态一次性紧急直达）；门为 `closed` 且非紧急时自动作为「门缝纸条」落盘不唤醒回复；上下文达阈值时先同步整理旧会话再切新会话（期间新消息仍 `202` 排队落盘，切段后自动归属新段） |
 | `DELETE /api/v1/chat/messages/:id` | **Ring 1** | 静默软删消息（修对话，标记 `deleted`，绝不告知住户，不污染后续记忆整理） |
 | `POST /api/v1/turns/:turnId/abort` | **Ring 1** | 主动中止正在生成的对话轮或工具循环（保留已落盘的部分内容） |
 | `POST /api/v1/turns/:turnId/retry` | Ring 1.5 | 失败轮次原地无痕重试（不重复插入用户消息，避免聊天流出现重复气泡） |
@@ -41,7 +41,7 @@
 | `POST /api/v1/chat/messages/:id/reroll` | Ring 1.5 | 静默重摇助手回复（保留版本组，可切版本，绝不告知住户） |
 | `POST /api/v1/chat/messages/:id/version` | Ring 1.5 | 切换同一 `group_id` 的历史版本 |
 | `POST /api/v1/chat/messages/:id/retract` | Ring 1.5 | 双向社交撤回（用户撤回自己的消息，置 `status='retracted'`，住户仅见占位不知原文；与静默 `DELETE` 严格区分） |
-| `POST /api/v1/chat/wrap-up` | Ring 1.5 | 用户手动触发「存记忆换段」：立即切新 `session_id` 并将旧会话入队后台异步整理 |
+| `POST /api/v1/chat/wrap-up` | Ring 1.5 | 用户手动触发「存记忆换段」：先同步完成旧会话 `daily_wrapup` 整理再切新 `session_id`（前端显示「正在收拢这段记忆…」） |
 | `POST /api/v1/shares/:id/open` | Ring 1.5 | 用户首次点开住户递出的折叠分享卡（`ShareCard`）时上报拆阅回执，写入 `share.opened` 并告知住户 |
 | `POST /api/v1/turns/:turnId/approval` | Ring 2 | 响应同步高风险工具审批（`bash` / `browser` / 外部 MCP 120s 实时确认卡） |
 | `GET /api/v1/requests` | Ring 2 | 获取待处理与近期的异步申请卡列表（高敏健康数据、未授权本机目录访问等） |
@@ -60,7 +60,7 @@
   - `turn.done` — 本轮结束（含 `messageId`、`recallCount`、`aborted?`）
   - `turn.error` — 结构化异常（`AUTH_EXPIRED` / `RATE_LIMITED` / `PROVIDER_ERROR` / `CONTEXT_OVERFLOW`）
   - `ping` — 每 25 秒保活心跳
-- **Ring 1.5 / Ring 2 扩展事件**：`message.updated`（版本切换/编辑/软删/社交撤回）、`turn.tool`（同轮手账聚合工具进度）、`turn.silence`（独处/唤醒主动沉默极轻痕迹）、`turn.model_switched`（主备模型切换点提示）、`turn.approval_required` / `turn.approval_resolved`、`share.opened`、`user_status.updated`、`request.created` / `request.decided`、`activity.updated`、`sync.reset`。
+- **Ring 1.5 / Ring 2 扩展事件**：`message.updated`（版本切换/编辑/软删/社交撤回）、`turn.tool`（同轮手账聚合工具进度）、`turn.rollover`（同步换段收尾中/完成/失败状态提示）、`turn.silence`（独处/唤醒主动沉默极轻痕迹）、`turn.model_switched`（主备模型切换点提示）、`turn.approval_required` / `turn.approval_resolved`、`share.opened`、`user_status.updated`、`request.created` / `request.decided`、`activity.updated`、`sync.reset`。
 
 ### 2.4 召回评测与反馈（评测模式专用）
 

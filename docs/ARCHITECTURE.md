@@ -80,10 +80,10 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 ### 三明治上下文拼装（保护 Prompt Cache）
 
 1. **Static Prefix（整会话开局快照，打 Cache 断点）**：
-   - `<self> memory/self.md` 快照（置顶！住户自我认同唯一真相）+ `prompts/main.md` 脊柱底线与工具契约 + `memory/user.md` + `memory/shelf/` 常驻精要 + **固定不变的 Tier 1 工具声明**（字母序固定）。
+   - `<self> memory/self.md` 快照（置顶！住户自我认同唯一真相）+ `prompts/main.md` 脊柱底线与工具契约 + `memory/user.md` + `memory/shelf/` 常驻精要 + 换段首轮定格的 `<continuity>`（不重叠 `月→周→天` 梗概 + 未入日梗概的今日 `daily/` 正文 + 上一段末尾 `2000` 字原话）+ **固定不变的 Tier 1 工具声明**（字母序固定）。
    - **防缓存击穿约定**：开局后做会话级快照锁定；若盘中通过 `edit` 修改 `self.md`、`user.md` 或 `shelf/`，不回改当前前缀，仅在动态尾部增量提示或于下次换段刷新。
 2. **Append-Only History（只追加，严禁回改前文）**：
-   - 换段开局注入 `gist/`（月→周→天梗概）与最近未汇总摘要，之后只追加本会话真实对话（含具身表达记录与工具交互结果）。
+   - 仅按当前 `session_id` 完整回放本会话真实对话（含具身表达记录与工具交互结果）。
 3. **Dynamic Tail（每轮按需注入，不污染前文缓存）**：
    - 当前时间与作息体感 + 可选 `MoodProvider` 定性摘要 + **双轨召回卡片块** + 当前活跃 `ActivityPlugin` 上下文（含 Tier 2 场景工具提示）+ 本轮用户输入。
 
@@ -93,7 +93,7 @@ api ──► engine ──► tools ──► memory ──► store ──► 
   - **Ring 1** 仅需落 `chat`（主对话与静默整理共用，保持第一人称一致）与可选 `embedding`（向量召回）；
   - **Ring 1.5** 扩展 `vision`、`reranker`、独立 `memory_task` 覆盖位、**`digest` 附件摘要槽位**（用户发送的图片/短视频仅在当轮向主模型传原件，回复结束后由 `digest` 轻量模型生成文字描述替代历史原件，大幅降低多模态 Token 消耗；留空则每轮带原件）、**`fallbacks` 主/备模型降级链**（主模型重试耗尽后自动切换备用模型并在时间线仅于切换点插入 `ModelSwitchDivider`）、**思考深度离散档位**（`thinking.level: "off" | "low" | "medium" | "high"`）与**聊天 / 独处双上下文上限**（`contextLimits: { chat, solo }`，如聊天 `80k` 保细腻、独处 `200k` 容长文）；
   - **消耗统计落盘（严守 NG-4）**：每轮助手回复在 `events.metadata.usage` 记录真实输入/输出/缓存读写 Token 与估算费用，仅在设置页独立「消耗统计」视图（及悬停单条消息元数据）中呈现，绝不常驻污染主聊天面。
-- **异常安全降级**：`embedding` 不可用时召回自动降级为 SQLite FTS5；静默整理轮写作阶段遇模型错误或超时时回滚未提交磁盘改动且不推进游标；上下文超阈值（默认 75% 或 `contextLimits.chat`）时直接切新 `session_id` 并后台异步整理旧会话（同时支持用户随时手动触发「存记忆换段」），绝不阻塞前台发言；主对话遇鉴权过期或限流通过 SSE `turn.error` 返回标准错误码并支持原地无痕重试（不重复插入用户消息）。
+- **异常安全降级**：`embedding` 不可用时召回自动降级为 SQLite FTS5；静默整理轮写作阶段遇模型错误或超时时回滚未提交磁盘改动且不推进游标；上下文超阈值（默认 75% 或 `contextLimits.chat`）或用户手动触发「存记忆换段」时**先同步执行 `daily_wrapup` 收尾整理旧会话（前端提示「正在收拢这段记忆…」）再切新 `session_id`**，整理失败保留旧段不硬切防失忆；主对话遇鉴权过期或限流通过 SSE `turn.error` 返回标准错误码并支持原地无痕重试（不重复插入用户消息）。
 
 ---
 

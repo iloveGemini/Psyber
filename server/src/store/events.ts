@@ -57,6 +57,17 @@ export interface AppendEventInput {
   metadata?: Record<string, unknown> | null;
 }
 
+/** 持久化的活跃会话指针（存入 task_cursors['active_session']），确保换段未发言重启不复活旧段 */
+export interface ActiveSessionRecord {
+  sessionId: string;
+  /** true 表示已切新段、尚未在本段发出首轮（首轮发送前惰性定格 continuity） */
+  fresh: boolean;
+  /** 换段截取「上一段末尾原话」时的事件 seq 上限（避免重启丢过渡或误吞新段排队消息） */
+  carryOverUntilSeq?: number | null;
+  /** 本段首轮定格后的 <continuity> 文本（同段与短停重启字节级复用，保护 Prompt Cache #1） */
+  continuity?: string | null;
+}
+
 interface EventRow {
   id: string;
   seq: number;
@@ -398,7 +409,78 @@ export class EventStore {
     };
   }
 
-  /** 查询指定会话最近 N 条活跃或已撤回对话消息（按 seq ASC 返回，用于换段保留最近 6 轮过渡） */
+  /** 读取持久化的活跃会话状态（task_cursors['active_session']） */
+  getActiveSessionState(): ActiveSessionRecord | null {
+    const row = this.db
+      .query("SELECT last_event_id, meta_json FROM task_cursors WHERE task_key = 'active_session'")
+      .get() as { last_event_id: string; meta_json: string | null } | null;
+    if (!row) return null;
+    if (!row.meta_json) {
+      return row.last_event_id ? { sessionId: row.last_event_id, fresh: false } : null;
+    }
+    try {
+      const parsed = JSON.parse(row.meta_json) as Partial<ActiveSessionRecord>;
+      const sessionId =
+        typeof parsed.sessionId === "string" && parsed.sessionId.trim()
+          ? parsed.sessionId.trim()
+          : row.last_event_id;
+      if (!sessionId) return null;
+      return {
+        sessionId,
+        fresh: parsed.fresh === true,
+        carryOverUntilSeq:
+          typeof parsed.carryOverUntilSeq === "number" && Number.isFinite(parsed.carryOverUntilSeq)
+            ? parsed.carryOverUntilSeq
+            : null,
+        continuity: typeof parsed.continuity === "string" ? parsed.continuity : null,
+      };
+    } catch {
+      return row.last_event_id ? { sessionId: row.last_event_id, fresh: false } : null;
+    }
+  }
+
+  /** 持久化活跃会话指针与首轮定格的 <continuity>（原子写入 task_cursors） */
+  setActiveSessionState(state: ActiveSessionRecord): void {
+    this.setCursor("active_session", state.sessionId, {
+      sessionId: state.sessionId,
+      fresh: state.fresh,
+      carryOverUntilSeq: state.carryOverUntilSeq ?? null,
+      continuity: state.continuity ?? null,
+    });
+  }
+
+  /** 完整查询指定会话内的对话消息（按 seq ASC，不再用全局 limit 截断击穿缓存） */
+  listSessionMessages(
+    sessionId: string,
+    opts: { excludeEventId?: string; beforeSeq?: number } = {},
+  ): StoredEvent[] {
+    const rows = (
+      opts.beforeSeq !== undefined
+        ? this.db
+            .query(
+              `SELECT * FROM events
+               WHERE session_id = ? AND status IN ('active', 'retracted')
+                 AND role IN ('user', 'assistant')
+                 AND kind IN ('chat', 'door_note', 'wake')
+                 AND seq < ?
+               ORDER BY seq ASC`,
+            )
+            .all(sessionId, opts.beforeSeq)
+        : this.db
+            .query(
+              `SELECT * FROM events
+               WHERE session_id = ? AND status IN ('active', 'retracted')
+                 AND role IN ('user', 'assistant')
+                 AND kind IN ('chat', 'door_note', 'wake')
+               ORDER BY seq ASC`,
+            )
+            .all(sessionId)
+    ) as EventRow[];
+    const mapped = rows.map(mapRow);
+    return opts.excludeEventId ? mapped.filter((e) => e.id !== opts.excludeEventId) : mapped;
+  }
+
+  /** 查询指定会话最近 N 条活跃或已撤回对话消息（按 seq ASC 返回） */
   listRecentSessionMessages(sessionId: string, limit = 12): StoredEvent[] {
     const rows = this.db
       .query(
@@ -411,6 +493,127 @@ export class EventStore {
       )
       .all(sessionId, Math.max(1, limit)) as EventRow[];
     return rows.reverse().map(mapRow);
+  }
+
+  /** 跨会话取最近 N 条对话（支持 maxSeq 截止点，避免把换段期间排队的新消息算进上一段原话） */
+  listRecentMessages(limit = 12, maxSeq?: number | null): StoredEvent[] {
+    const rows = (
+      typeof maxSeq === "number" && Number.isFinite(maxSeq)
+        ? this.db
+            .query(
+              `SELECT * FROM events
+               WHERE status IN ('active', 'retracted')
+                 AND role IN ('user', 'assistant')
+                 AND kind IN ('chat', 'door_note', 'wake')
+                 AND seq <= ?
+               ORDER BY seq DESC
+               LIMIT ?`,
+            )
+            .all(maxSeq, Math.max(1, limit))
+        : this.db
+            .query(
+              `SELECT * FROM events
+               WHERE status IN ('active', 'retracted')
+                 AND role IN ('user', 'assistant')
+                 AND kind IN ('chat', 'door_note', 'wake')
+               ORDER BY seq DESC
+               LIMIT ?`,
+            )
+            .all(Math.max(1, limit))
+    ) as EventRow[];
+    return rows.reverse().map(mapRow);
+  }
+
+  /** 返回最近一条有效对话的完整定位信息（含 id、seq、sessionId、createdAt） */
+  getLatestChatEvent(): { id: string; seq: number; sessionId: string; createdAt: number } | null {
+    const row = this.db
+      .query(
+        `SELECT id, seq, session_id, created_at FROM events
+         WHERE status IN ('active', 'retracted')
+           AND role IN ('user', 'assistant')
+           AND kind IN ('chat', 'door_note', 'wake')
+         ORDER BY seq DESC
+         LIMIT 1`,
+      )
+      .get() as { id: string; seq: number; session_id: string; created_at: number } | null;
+    if (!row) return null;
+    return { id: row.id, seq: row.seq, sessionId: row.session_id, createdAt: row.created_at };
+  }
+
+  /** 返回最近一条有效对话所属的 sessionId 与时间，供重启恢复连续性 */
+  getLatestChatSession(): { sessionId: string; lastMessageAt: number } | null {
+    const latest = this.getLatestChatEvent();
+    if (!latest) return null;
+    return { sessionId: latest.sessionId, lastMessageAt: latest.createdAt };
+  }
+
+  hasMessagesInSession(sessionId: string): boolean {
+    const row = this.db
+      .query(
+        `SELECT 1 AS hit FROM events
+         WHERE session_id = ? AND status IN ('active', 'retracted')
+           AND role IN ('user', 'assistant')
+           AND kind IN ('chat', 'door_note', 'wake')
+         LIMIT 1`,
+      )
+      .get(sessionId) as { hit: number } | null;
+    return row !== null;
+  }
+
+  hasMessagesBeforeSession(sessionId: string): boolean {
+    const row = this.db
+      .query(
+        `SELECT 1 AS hit FROM events
+         WHERE session_id != ? AND status IN ('active', 'retracted')
+           AND role IN ('user', 'assistant')
+           AND kind IN ('chat', 'door_note', 'wake')
+         LIMIT 1`,
+      )
+      .get(sessionId) as { hit: number } | null;
+    return row !== null;
+  }
+
+  /** 将排队等待换段期间已落盘的用户事件重绑至换段后的新 sessionId，避免跨段错位 */
+  rebindEventSessionId(eventId: string, newSessionId: string): void {
+    this.db.query("UPDATE events SET session_id = ? WHERE id = ?").run(newSessionId, eventId);
+  }
+
+  /** 冷启动续接原会话时恢复最后一次助手回复的上下文总 Token 占用 */
+  getLatestSessionUsageTokens(sessionId: string): number {
+    const row = this.db
+      .query(
+        `SELECT metadata FROM events
+         WHERE session_id = ? AND role = 'assistant' AND status = 'active'
+           AND metadata IS NOT NULL
+         ORDER BY seq DESC
+         LIMIT 1`,
+      )
+      .get(sessionId) as { metadata: string | null } | null;
+    if (!row?.metadata) return 0;
+    try {
+      const meta = JSON.parse(row.metadata) as {
+        usage?: {
+          totalTokens?: unknown;
+          inputTokens?: unknown;
+          outputTokens?: unknown;
+          cacheReadTokens?: unknown;
+          cacheWriteTokens?: unknown;
+        };
+      };
+      const u = meta.usage;
+      if (!u) return 0;
+      if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) && u.totalTokens > 0) {
+        return Math.floor(u.totalTokens);
+      }
+      const sum =
+        (typeof u.inputTokens === "number" ? u.inputTokens : 0) +
+        (typeof u.outputTokens === "number" ? u.outputTokens : 0) +
+        (typeof u.cacheReadTokens === "number" ? u.cacheReadTokens : 0) +
+        (typeof u.cacheWriteTokens === "number" ? u.cacheWriteTokens : 0);
+      return Number.isFinite(sum) && sum > 0 ? Math.floor(sum) : 0;
+    } catch {
+      return 0;
+    }
   }
 
   getSticker(stickerId: string): StickerRecord | null {
@@ -486,6 +689,37 @@ export class EventStore {
     } catch {
       return null;
     }
+  }
+
+  getBedtimeLastRunAt(): number | null {
+    const row = this.db
+      .query("SELECT meta_json FROM task_cursors WHERE task_key = 'bedtime'")
+      .get() as { meta_json: string | null } | null;
+    if (!row?.meta_json) return null;
+    try {
+      const parsed = JSON.parse(row.meta_json) as { last_run_at?: unknown };
+      return typeof parsed.last_run_at === "number" && Number.isFinite(parsed.last_run_at)
+        ? parsed.last_run_at
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  getOldestPendingWrapupMs(): number | null {
+    const cursor = this.getCursor("daily_wrapup") ?? "";
+    const row = this.db
+      .query(
+        `SELECT created_at FROM events
+         WHERE status IN ('active', 'retracted')
+           AND role IN ('user', 'assistant')
+           AND kind IN ('chat', 'wake', 'door_note')
+           AND id > ?
+         ORDER BY seq ASC
+         LIMIT 1`,
+      )
+      .get(cursor) as { created_at: number } | null;
+    return row ? row.created_at : null;
   }
 
   getLastInteractionMs(): number | null {
@@ -676,6 +910,7 @@ export class EventStore {
       doorState: string;
       newTurnId: string | null;
       clientMessageId?: string | null;
+      activeSessionId?: string;
     },
   ):
     | { ok: true; event: StoredEvent; groupId: string; discardedAssistantIds: string[] }
@@ -684,6 +919,13 @@ export class EventStore {
       const target = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow | null;
       if (!target) {
         return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (opts.activeSessionId && target.session_id !== opts.activeSessionId) {
+        return {
+          ok: false as const,
+          code: "NOT_LATEST_USER_MESSAGE",
+          error: "该消息属于已收尾的旧会话，不能再编辑",
+        };
       }
       if (target.role !== "user" || target.status !== "active") {
         return {
@@ -794,7 +1036,7 @@ export class EventStore {
    */
   prepareRerollAssistantMessage(
     id: string,
-    opts: { doorState: string },
+    opts: { doorState: string; activeSessionId?: string },
   ):
     | {
         ok: true;
@@ -808,6 +1050,13 @@ export class EventStore {
       const target = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow | null;
       if (!target) {
         return { ok: false as const, code: "NOT_FOUND", error: "找不到这条消息" };
+      }
+      if (opts.activeSessionId && target.session_id !== opts.activeSessionId) {
+        return {
+          ok: false as const,
+          code: "INVALID_REROLL_TARGET",
+          error: "该回复属于已收尾的旧会话，不能再重摇",
+        };
       }
       if (
         target.role !== "assistant" ||

@@ -402,7 +402,8 @@ class FakePsyberApiClient implements PsyberApiClient {
     return WrapUpResult(
       oldSessionId: 'sess_1',
       newSessionId: 'sess_${wrapUpCallCount + 1}',
-      queued: true,
+      queued: false,
+      wrapped: true,
     );
   }
 
@@ -1591,7 +1592,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(api.wrapUpCallCount, 1);
-      expect(find.text('已开启新一段，旧对话正在后台整理'), findsOneWidget);
+      expect(find.text('已收拢这段记忆，开启新一段'), findsOneWidget);
     },
   );
 
@@ -2216,6 +2217,57 @@ void main() {
     controller.setAppForeground(true);
     await tester.pumpAndSettle();
     expect(controller.liveMotionForCommittedTurn('turn_expr_bg'), isNull);
+  });
+
+  testWidgets('SSE turn.rollover wrapping 展示「正在收拢这段记忆…」，done 后自动收起并更新水位', (
+    tester,
+  ) async {
+    final api = FakePsyberApiClient();
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://127.0.0.1:3721',
+        token: 'tok-rollover',
+        deviceId: 'dev-rollover',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+    await controller.initialize();
+    await controller.connectAndSync();
+
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('rollover_wrapping_banner')), findsNothing);
+    expect(find.text('正在收拢这段记忆…'), findsNothing);
+
+    api.emitSse('turn.rollover', {
+      'phase': 'wrapping',
+      'reason': 'threshold',
+      'oldSessionId': 'sess_1',
+    }, id: '10');
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('rollover_wrapping_banner')), findsOneWidget);
+    expect(find.text('正在收拢这段记忆…'), findsOneWidget);
+
+    api.emitSse('turn.rollover', {
+      'phase': 'done',
+      'reason': 'threshold',
+      'oldSessionId': 'sess_1',
+      'newSessionId': 'sess_2',
+      'contextUsage': {'usedTokens': 0, 'limitTokens': 150000, 'ratio': 0.0},
+    }, id: '11');
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('rollover_wrapping_banner')), findsNothing);
+    expect(controller.contextUsageNotifier.value?.usedTokens, 0);
   });
 }
 

@@ -102,6 +102,7 @@ class AppController {
       ValueNotifier<ContextUsageInfo?>(null);
   final ValueNotifier<bool> retryingTurnNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> wrappingUpNotifier = ValueNotifier<bool>(false);
+  bool _manualWrapUpInFlight = false;
   final ValueNotifier<String?> pendingModelSwitchNotifier =
       ValueNotifier<String?>(null);
   final ValueNotifier<SettingsSnapshot?> settingsNotifier =
@@ -458,6 +459,9 @@ class AppController {
     if (page.contextUsage != null) {
       contextUsageNotifier.value = page.contextUsage;
     }
+    if (!_manualWrapUpInFlight) {
+      wrappingUpNotifier.value = page.rolloverInProgress;
+    }
     if (_hasLoadedOlder && page.items.isNotEmpty) {
       final latestMinSeq = page.items.first.seq;
       final latestIds = page.items.map((e) => e.id).toSet();
@@ -653,10 +657,11 @@ class AppController {
     }
   }
 
-  /// 手动触发「存记忆换段」：立即切新 session_id 并将旧对话送去后台异步整理。
+  /// 手动触发「存记忆换段」：先同步完成旧段整理再切新 session_id。
   Future<WrapUpResult?> wrapUpMemorySession() async {
     final profile = profileNotifier.value;
     if (profile == null || wrappingUpNotifier.value) return null;
+    _manualWrapUpInFlight = true;
     wrappingUpNotifier.value = true;
     try {
       final res = await _api.wrapUpSession(profile);
@@ -670,6 +675,7 @@ class AppController {
       unawaited(refreshSnapshot());
       return res;
     } finally {
+      _manualWrapUpInFlight = false;
       if (!_disposed) {
         wrappingUpNotifier.value = false;
       }
@@ -1097,6 +1103,26 @@ class AppController {
         final resolvedId = frame.data['approvalId'] as String?;
         if (pendingApprovalNotifier.value?.approvalId == resolvedId) {
           pendingApprovalNotifier.value = null;
+        }
+        return;
+      case 'turn.rollover':
+        final phase = frame.data['phase'] as String? ?? '';
+        if (phase == 'wrapping') {
+          wrappingUpNotifier.value = true;
+        } else {
+          if (!_manualWrapUpInFlight) {
+            wrappingUpNotifier.value = false;
+          }
+          final rawUsage = frame.data['contextUsage'];
+          if (rawUsage is Map<String, dynamic>) {
+            contextUsageNotifier.value = ContextUsageInfo.fromJson(rawUsage);
+          }
+          if (phase == 'error') {
+            final msg = frame.data['message'] as String?;
+            if (msg != null && msg.isNotEmpty) {
+              turnErrorNotifier.value = msg;
+            }
+          }
         }
         return;
       case 'turn.done':

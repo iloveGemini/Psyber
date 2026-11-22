@@ -7,6 +7,7 @@ export type Ring1SseEventName =
   | "turn.start"
   | "turn.thinking"
   | "turn.tool"
+  | "turn.rollover"
   | "turn.expression"
   | "turn.text"
   | "turn.done"

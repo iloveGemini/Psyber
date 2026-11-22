@@ -266,13 +266,14 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     expect(doneInfos[0]?.mode).toBe("chat");
     expect(r1.rolledOver).toBe(true);
 
-    // 换段后的下一轮应注入 <gist> 与上段对话过渡
+    // 换段后的下一轮应在 Static Prefix 冻结注入 <continuity>（含梗概与上段末尾原话），且 messages[0] 为 user
     mockChat.queueStream(() => [{ type: "text_delta", delta: "接着聊。" }]);
     await engine.runTurn({ mode: "chat", userText: "新会话测试" });
     const postRolloverReq = mockChat.requests[mockChat.requests.length - 1];
-    const assistantMsgs = postRolloverReq.messages.filter((m) => m.role === "assistant");
-    expect(assistantMsgs.some((m) => m.content.includes("<gist>") && m.content.includes("手冲咖啡"))).toBe(true);
-    expect(assistantMsgs.some((m) => m.content.includes("记得那杯埃塞手冲！"))).toBe(true);
+    expect(postRolloverReq.systemPrompt).toContain("<continuity>");
+    expect(postRolloverReq.systemPrompt).toContain("手冲咖啡");
+    expect(postRolloverReq.systemPrompt).toContain("记得那杯埃塞手冲！");
+    expect(postRolloverReq.messages[0]?.role).toBe("user");
   });
 
   test("多模态图片附件透传、用户贴纸渲染、<stickers> 预算注入与动态 circadian 联动", async () => {

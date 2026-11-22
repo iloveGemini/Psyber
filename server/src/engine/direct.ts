@@ -19,11 +19,11 @@ import type {
 } from "../llm/client.ts";
 import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
 import { parseCardMarkdown } from "../memory/frontmatter.ts";
-import { buildGistBlock } from "../memory/gist.ts";
+import { buildContinuityBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { recallMemories, type EmbeddingClient } from "../memory/recall.ts";
 import { renderCircadianState } from "../mood/circadian.ts";
-import type { EventStore, StoredEvent } from "../store/events.ts";
+import type { ActiveSessionRecord, EventStore, StoredEvent } from "../store/events.ts";
 import type {
   ExpressionPayload,
   ShareCardRecord,
@@ -182,6 +182,25 @@ export interface RunTurnResult {
   checkpoint?: TurnCheckpoint;
 }
 
+export type RolloverReason = "threshold" | "overflow" | "manual" | "bedtime";
+
+export interface RolloverStatusEvent {
+  phase: "wrapping" | "done" | "error";
+  reason: RolloverReason;
+  oldSessionId?: string;
+  newSessionId?: string;
+  contextUsage?: ContextUsageSnapshot;
+  message?: string;
+}
+
+export interface RolloverResult {
+  ok: boolean;
+  oldSessionId: string;
+  newSessionId: string;
+  wrapped: boolean;
+  error?: string;
+}
+
 export interface DirectEngineDeps {
   dataDir: string;
   promptsDir: string;
@@ -199,7 +218,18 @@ export interface DirectEngineDeps {
   embedding?: EmbeddingClient;
   /** 429/5xx 指数退避延迟（默认 [1000, 3000] ms，离线测试可传 [0, 0]） */
   retryDelaysMs?: number[];
-  /** 75% 换段时由调用方触发后台异步整理旧会话（不阻塞前台） */
+  /**
+   * 换段前同步收尾回调（在切新 sessionId 之前排空 daily_wrapup，保证新段不失忆；
+   * 返回 ok: false 时保留旧 sessionId 不硬切）
+   */
+  onBeforeRollover?: (ctx: {
+    oldSessionId: string;
+    reason: RolloverReason;
+    cutoffSeq: number | null;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  /** 换段状态通知（供 SSE 广播 turn.rollover，前端显示「正在收拢这段记忆…」） */
+  onRolloverStatus?: (event: RolloverStatusEvent) => void;
+  /** 切入新 sessionId 后的通知钩子 */
   onRollover?: (oldSessionId: string, newSessionId: string) => void;
 }
 
@@ -233,28 +263,160 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * 极薄 Direct Engine（对齐 Spec 01 §2–§5）：
- * - 三明治上下文：Static Prefix 会话级快照锁死 + Append-Only History（跨轮剥除 thinking，换段注入 <gist> + 近 6 轮过渡）+ Dynamic Tail（原话置顶、语境置底，tool_result 绝不重复注入）
+ * - 三明治上下文：Static Prefix（含新段首轮冻结的 <continuity>）会话级锁死 + Append-Only History（按当前 sessionId 完整回放并剥除历史 thinking）+ Dynamic Tail（原话置顶、语境置底，tool_result 绝不重复注入）
  * - 单轮多步工具循环内保留 thinking + signature，429/5xx 指数退避重试 2 次
  * - 接入 Ring 1 极简 3 步召回（recallMemories）并写入 recall_traces 与 turn.done.recallCount
  * - wake [SILENT] 前 16 字符暂缓推流
- * - 达 75% 上下文上限直接切新 session_id，不阻塞前台
+ * - 达 75% / CONTEXT_OVERFLOW / 手动换段时先同步收尾整理旧段，成功后再切新 session_id 并持久化活跃会话指针
  */
 export class DirectEngine {
-  private sessionId: string;
+  private activeState: ActiveSessionRecord;
   private staticPrefixSnapshot: string | null = null;
   private readonly prefixDelta = new Map<string, string>();
   private readonly turnMutex = new AsyncMutex();
-  private rolloverGistAnchor: string | null = null;
-  private rolloverCarryOver: ChatMessage[] = [];
+  private needsLegacyContinuity = false;
+  private rolloverInProgress = false;
   private lastUsedTokens = 0;
   private lastAssistantModel: string | null = null;
 
   constructor(private readonly deps: DirectEngineDeps) {
-    this.sessionId = ulid(deps.clock.now());
+    const nowMs = deps.clock.now();
+    const persisted = deps.events.getActiveSessionState();
+    const latest = deps.events.getLatestChatEvent();
+    const bedtimeRunAt = deps.events.getBedtimeLastRunAt();
+
+    if (persisted) {
+      const bedtimeRanAfterLatest =
+        latest !== null && bedtimeRunAt !== null && bedtimeRunAt > latest.createdAt;
+      if (bedtimeRanAfterLatest && !persisted.fresh) {
+        // 停机前刚跑完 bedtime 但尚未切段：启动时补切 fresh 新段
+        this.activeState = {
+          sessionId: ulid(nowMs),
+          fresh: true,
+          carryOverUntilSeq: latest.seq,
+          continuity: null,
+        };
+        deps.events.setActiveSessionState(this.activeState);
+      } else {
+        // 严格信任持久化状态：哪怕 fresh===true（刚换段尚未发言就重启），也绝不复活已收尾旧段
+        this.activeState = persisted;
+        if (!persisted.fresh) {
+          this.lastUsedTokens = deps.events.getLatestSessionUsageTokens(persisted.sessionId);
+        }
+      }
+      return;
+    }
+
+    if (!latest) {
+      this.activeState = {
+        sessionId: ulid(nowMs),
+        fresh: false,
+        carryOverUntilSeq: null,
+        continuity: null,
+      };
+      deps.events.setActiveSessionState(this.activeState);
+      return;
+    }
+
+    const bedtimeRanAfterLastMsg = bedtimeRunAt !== null && bedtimeRunAt > latest.createdAt;
+    if (!bedtimeRanAfterLastMsg) {
+      // 尚未经过 bedtime 整理消化：续接原 sessionId，保留完整历史并恢复上下文水位
+      this.activeState = {
+        sessionId: latest.sessionId,
+        fresh: false,
+        carryOverUntilSeq: null,
+        continuity: null,
+      };
+      this.lastUsedTokens = deps.events.getLatestSessionUsageTokens(latest.sessionId);
+      if (deps.events.hasMessagesBeforeSession(latest.sessionId)) {
+        this.needsLegacyContinuity = true;
+      }
+    } else {
+      // 昨夜已完成 bedtime：启 fresh 新段，首轮开口前惰性定格 <continuity>
+      this.activeState = {
+        sessionId: ulid(nowMs),
+        fresh: true,
+        carryOverUntilSeq: latest.seq,
+        continuity: null,
+      };
+    }
+    deps.events.setActiveSessionState(this.activeState);
+  }
+
+  /**
+   * 晚间或开机补跑的 bedtime 完成后调用（调用方必须在释放 tidyMutex 后调用，保证锁单向零死锁）：
+   * - 按数据库真实事件校验：若期间用户已发来晚于本次已消化游标的新对话，不中途打断；
+   * - 否则切入 fresh 新段（若已在空新段则刷新过渡截止点与待拼 continuity），常驻运行也能每晚自动换段。
+   */
+  onBedtimeCompleted(digestedUpToEventId?: string | null): Promise<boolean> {
+    return this.turnMutex.runExclusive(async () => {
+      const latest = this.deps.events.getLatestChatEvent();
+      if (!latest) return false;
+
+      const cutoffId =
+        digestedUpToEventId ??
+        this.deps.events.getCursor("bedtime") ??
+        this.deps.events.getCursor("daily_wrapup");
+      if (cutoffId && latest.id > cutoffId) {
+        return false;
+      }
+
+      if (
+        this.activeState.fresh &&
+        !this.deps.events.hasMessagesInSession(this.activeState.sessionId)
+      ) {
+        this.activeState = {
+          ...this.activeState,
+          carryOverUntilSeq: latest.seq,
+          continuity: null,
+        };
+        this.staticPrefixSnapshot = null;
+        this.deps.events.setActiveSessionState(this.activeState);
+        return true;
+      }
+
+      const res = await this.performRollover({
+        reason: "bedtime",
+        runWrapup: false,
+        cutoffSeq: latest.seq,
+      });
+      return res.ok;
+    });
+  }
+
+  private async ensureContinuityFrozen(): Promise<void> {
+    if (!this.activeState.fresh && !this.needsLegacyContinuity) return;
+
+    const tailEvents =
+      typeof this.activeState.carryOverUntilSeq === "number"
+        ? this.deps.events.listRecentMessages(40, this.activeState.carryOverUntilSeq)
+        : [];
+    const continuity = await buildContinuityBlock({
+      dataDir: this.deps.dataDir,
+      memoryIndex: this.deps.memoryIndex,
+      nowMs: this.deps.clock.now(),
+      timeZone: this.deps.clock.timeZone,
+      lastBedtimeNightDate: this.deps.events.getBedtimeNightDate(),
+      tailEvents,
+      formatUserEvent: (ev) => this.formatHistoryUserContent(ev),
+    });
+
+    this.activeState = {
+      ...this.activeState,
+      fresh: false,
+      continuity,
+    };
+    this.needsLegacyContinuity = false;
+    this.staticPrefixSnapshot = null;
+    this.deps.events.setActiveSessionState(this.activeState);
   }
 
   getActiveSessionId(): string {
-    return this.sessionId;
+    return this.activeState.sessionId;
+  }
+
+  isRolloverInProgress(): boolean {
+    return this.rolloverInProgress;
   }
 
   private computeEffectiveRolloverLimit(mode: "chat" | "wake" = "chat"): number {
@@ -277,16 +439,29 @@ export class DirectEngine {
     };
   }
 
-  /** 手动「存记忆换段」：在互斥锁保护下切新 session_id 并触发后台异步整理 */
-  manualRollover(): Promise<{ oldSessionId: string; newSessionId: string }> {
+  /** 手动「存记忆换段」：在互斥锁保护下先同步完成旧段整理，成功后再切新 session_id */
+  manualRollover(): Promise<RolloverResult> {
     return this.turnMutex.runExclusive(async () => {
-      const oldSessionId = this.sessionId;
-      await this.triggerRollover();
-      return { oldSessionId, newSessionId: this.sessionId };
+      const latest = this.deps.events.getLatestChatEvent();
+      const hasSessionMsgs = this.deps.events.hasMessagesInSession(this.activeState.sessionId);
+      const hasPendingWrapup = this.deps.events.getOldestPendingWrapupMs() !== null;
+      if (this.activeState.fresh && !hasSessionMsgs && !hasPendingWrapup) {
+        return {
+          ok: true,
+          oldSessionId: this.activeState.sessionId,
+          newSessionId: this.activeState.sessionId,
+          wrapped: false,
+        };
+      }
+      return this.performRollover({
+        reason: "manual",
+        runWrapup: true,
+        cutoffSeq: latest?.seq ?? null,
+      });
     });
   }
 
-  /** 构建或复用当前会话的 Static Prefix 快照（盘中修改不回改，保护 Cache Breakpoint #1） */
+  /** 构建或复用当前会话的 Static Prefix 快照（含新段首轮冻结的 <continuity>，盘中修改不回改） */
   private async getOrBuildStaticPrefix(): Promise<string> {
     if (this.staticPrefixSnapshot !== null) {
       return this.staticPrefixSnapshot;
@@ -306,6 +481,9 @@ export class DirectEngine {
     if (userMd) sections.push(`<user>\n${userMd}\n</user>`);
     if (shelfParts.length > 0) {
       sections.push(`<shelf>\n${shelfParts.join("\n\n")}\n</shelf>`);
+    }
+    if (this.activeState.continuity) {
+      sections.push(this.activeState.continuity);
     }
 
     this.staticPrefixSnapshot = sections.join("\n\n");
@@ -362,25 +540,14 @@ export class DirectEngine {
     return `${prefix}${lines.join("\n")}${suffix}`;
   }
 
-  /** 构造 Segment 2：跨轮历史回放（换段首条注入 <gist> + 近 6 轮过渡，剥除历史 thinking） */
+  /** 构造 Segment 2：完整回放当前 sessionId 内的历史轮次（剥除历史 thinking；<continuity> 已冻结在 Static Prefix） */
   private buildHistoryMessages(excludeEventId?: string, beforeSeq?: number): ChatMessage[] {
     const history: ChatMessage[] = [];
-    if (this.rolloverGistAnchor) {
-      history.push({
-        role: "assistant",
-        content: this.rolloverGistAnchor,
-        timestamp: this.deps.clock.now(),
-      });
-    }
-    for (const msg of this.rolloverCarryOver) {
-      history.push(msg);
-    }
-
-    const page = this.deps.events.listHistory({ limit: 40 });
-    for (const ev of page.items) {
-      if (ev.sessionId !== this.sessionId) continue;
-      if (excludeEventId && ev.id === excludeEventId) continue;
-      if (beforeSeq !== undefined && ev.seq >= beforeSeq) continue;
+    const sessionEvents = this.deps.events.listSessionMessages(this.activeState.sessionId, {
+      excludeEventId,
+      beforeSeq,
+    });
+    for (const ev of sessionEvents) {
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
         // 双向社交撤回不对称性：用户撤回后，住户上下文只见占位看不到原文
         const content =
@@ -531,7 +698,7 @@ export class DirectEngine {
           dataDir: this.deps.dataDir,
           index: this.deps.memoryIndex,
           clock: this.deps.clock,
-          sessionId: this.sessionId,
+          sessionId: this.activeState.sessionId,
           turnId: opts.turnId,
           query: recallQuery,
           activityHint: opts.activityHint,
@@ -606,28 +773,99 @@ export class DirectEngine {
     return { content, injectedDoorNoteMaxId, injectedNoticeMaxId, recallCount };
   }
 
-  private async triggerRollover(): Promise<void> {
-    const oldSessionId = this.sessionId;
-    const recentEvents = this.deps.events.listRecentSessionMessages(oldSessionId, 12);
-    this.rolloverCarryOver = recentEvents.map((ev) => ({
-      role: ev.role === "assistant" ? "assistant" : "user",
-      content:
-        ev.role === "user"
-          ? ev.status === "retracted"
-            ? "（对方撤回了一条消息）"
-            : this.formatHistoryUserContent(ev)
-          : ev.status === "retracted"
-            ? `${ev.content}\n（我后来撤回了这条消息，对方看不到内容）`
-            : ev.content,
-      timestamp: ev.createdAt,
-    }));
-    this.rolloverGistAnchor = await buildGistBlock(this.deps.dataDir, this.deps.memoryIndex);
+  /**
+   * 同步收尾并切新 sessionId（必须在 turnMutex 内调用）：
+   * - runWrapup=true 时先同步排空旧段 daily_wrapup（广播 wrapping 状态供前端提示「正在收拢这段记忆…」）；
+   * - 整理失败时不硬切 sessionId 防失忆；整理成功后持久化 fresh 新段并清空 Static Prefix / 用量水位。
+   */
+  private async performRollover(opts: {
+    reason: RolloverReason;
+    runWrapup: boolean;
+    cutoffSeq?: number | null;
+  }): Promise<RolloverResult> {
+    const oldSessionId = this.activeState.sessionId;
+    const cutoffSeq =
+      opts.cutoffSeq !== undefined
+        ? opts.cutoffSeq
+        : (this.deps.events.getLatestChatEvent()?.seq ?? null);
 
-    this.sessionId = ulid(this.deps.clock.now());
+    if (opts.runWrapup && this.deps.onBeforeRollover) {
+      this.rolloverInProgress = true;
+      this.deps.onRolloverStatus?.({
+        phase: "wrapping",
+        reason: opts.reason,
+        oldSessionId,
+      });
+      try {
+        const wrapRes = await this.deps.onBeforeRollover({
+          oldSessionId,
+          reason: opts.reason,
+          cutoffSeq,
+        });
+        if (!wrapRes.ok) {
+          this.rolloverInProgress = false;
+          const message = wrapRes.error || "整理记忆失败，暂保留当前对话段";
+          this.deps.onRolloverStatus?.({
+            phase: "error",
+            reason: opts.reason,
+            oldSessionId,
+            message,
+          });
+          return {
+            ok: false,
+            oldSessionId,
+            newSessionId: oldSessionId,
+            wrapped: false,
+            error: message,
+          };
+        }
+      } catch (err) {
+        this.rolloverInProgress = false;
+        const message = err instanceof Error ? err.message || "整理记忆失败" : "整理记忆失败";
+        this.deps.onRolloverStatus?.({
+          phase: "error",
+          reason: opts.reason,
+          oldSessionId,
+          message,
+        });
+        return {
+          ok: false,
+          oldSessionId,
+          newSessionId: oldSessionId,
+          wrapped: false,
+          error: message,
+        };
+      }
+    }
+
+    const newSessionId = ulid(this.deps.clock.now());
+    this.activeState = {
+      sessionId: newSessionId,
+      fresh: true,
+      carryOverUntilSeq: cutoffSeq,
+      continuity: null,
+    };
+    this.deps.events.setActiveSessionState(this.activeState);
     this.staticPrefixSnapshot = null;
     this.prefixDelta.clear();
     this.lastUsedTokens = 0;
-    this.deps.onRollover?.(oldSessionId, this.sessionId);
+    this.needsLegacyContinuity = false;
+    this.rolloverInProgress = false;
+
+    this.deps.onRollover?.(oldSessionId, newSessionId);
+    this.deps.onRolloverStatus?.({
+      phase: "done",
+      reason: opts.reason,
+      oldSessionId,
+      newSessionId,
+      contextUsage: this.getContextUsage(),
+    });
+    return {
+      ok: true,
+      oldSessionId,
+      newSessionId,
+      wrapped: opts.runWrapup,
+    };
   }
 
   /**
@@ -673,14 +911,26 @@ export class DirectEngine {
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
     const turnId = opts.turnId ?? ulid(this.deps.clock.now());
+
+    // 若该用户消息是在上一轮同步换段期间排队落盘的，重绑到换段后的新 sessionId（绝不跨段错位）
+    if (opts.userEventId && !opts.groupId) {
+      const storedUser = this.deps.events.getById(opts.userEventId);
+      if (storedUser && storedUser.sessionId !== this.activeState.sessionId) {
+        this.deps.events.rebindEventSessionId(storedUser.id, this.activeState.sessionId);
+      }
+    }
+
+    let turnSessionId = this.activeState.sessionId;
     const cp =
-      opts.resumeCheckpoint && opts.resumeCheckpoint.sessionId === this.sessionId
+      opts.resumeCheckpoint && opts.resumeCheckpoint.sessionId === turnSessionId
         ? opts.resumeCheckpoint
         : undefined;
     const tier1Tools = this.deps.registry.getTier1Definitions();
 
     let systemPrompt: string;
     let messages: ChatMessage[];
+    let dynamicUserContent: ChatUserContent | null = null;
+    let initialHistoryCount = 0;
     let injectedDoorNoteMaxId: string | null;
     let injectedNoticeMaxId: string | null;
     let recallCount: number;
@@ -688,12 +938,15 @@ export class DirectEngine {
     if (cp) {
       systemPrompt = cp.systemPrompt;
       messages = [...cp.messages];
+      initialHistoryCount = Math.max(0, messages.length - 1);
       injectedDoorNoteMaxId = cp.injectedDoorNoteMaxId;
       injectedNoticeMaxId = cp.injectedNoticeMaxId;
       recallCount = cp.recallCount;
     } else {
+      await this.ensureContinuityFrozen();
       systemPrompt = await this.getOrBuildStaticPrefix();
       const history = this.buildHistoryMessages(opts.userEventId, opts.historyBeforeSeq);
+      initialHistoryCount = history.length;
       const dynamic = await this.buildDynamicUserMessage({
         mode: opts.mode,
         turnId,
@@ -705,6 +958,7 @@ export class DirectEngine {
         wakeReason: opts.wakeReason,
         activityHint: opts.activityHint,
       });
+      dynamicUserContent = dynamic.content;
       injectedDoorNoteMaxId = dynamic.injectedDoorNoteMaxId;
       injectedNoticeMaxId = dynamic.injectedNoticeMaxId;
       recallCount = dynamic.recallCount;
@@ -716,7 +970,7 @@ export class DirectEngine {
 
     const toolCtx: ToolExecutionContext = {
       turnId,
-      sessionId: this.sessionId,
+      sessionId: turnSessionId,
       mode: opts.mode,
       touchedMemoryPaths: new Set<string>(cp?.touchedMemoryPaths ?? []),
       expressionCount: cp?.expressions.length ?? 0,
@@ -782,7 +1036,6 @@ export class DirectEngine {
     const cfgForTurn = this.deps.getConfig();
     const effectiveThinkingLevel = resolveEffectiveThinkingLevel(cfgForTurn);
     const effectiveThinkingBudget = cfgForTurn.llm?.thinking?.budgetTokens;
-    const rolloverLimitTokens = this.computeEffectiveRolloverLimit(opts.mode);
     let activeModelId = this.deps.chatModel.modelId;
     let modelSwitchBroadcasted = false;
     const maybeBroadcastModelSwitch = (modelId: string | undefined, reason?: string) => {
@@ -806,11 +1059,15 @@ export class DirectEngine {
     let committedThinking = fullThinking;
     let completedToolSteps = cp?.completedToolSteps ?? 0;
     let aborted = false;
-    let rolledOver = cp?.rolledOver ?? false;
+    let thresholdReached = cp?.rolledOver ?? false;
+    let rolledOver = false;
+    let overflowRecovered = false;
+    let overflowCheckpointDisabled = false;
     let lastUsage: {
       model?: string;
       inputTokens: number;
       outputTokens: number;
+      totalTokens?: number;
       cacheReadTokens?: number;
       cacheWriteTokens?: number;
       estimatedCostUsd?: number;
@@ -818,10 +1075,10 @@ export class DirectEngine {
     let lastError: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
 
     const buildCheckpoint = (): TurnCheckpoint | undefined => {
-      if (completedToolSteps <= 0) return undefined;
+      if (completedToolSteps <= 0 || overflowCheckpointDisabled) return undefined;
       return {
         turnId,
-        sessionId: this.sessionId,
+        sessionId: turnSessionId,
         mode: opts.mode,
         userEventId: opts.userEventId,
         systemPrompt,
@@ -838,7 +1095,7 @@ export class DirectEngine {
         injectedNoticeMaxId,
         recallCount,
         completedToolSteps,
-        rolledOver,
+        rolledOver: thresholdReached,
       };
     };
 
@@ -855,17 +1112,19 @@ export class DirectEngine {
         let stepThinking = "";
         let stepThinkingSig: string | undefined;
         const stepToolCalls: ChatToolCall[] = [];
+        let retryStepAfterOverflow = false;
 
         // 对齐 Spec 01 §1.3：429 / 5xx（RATE_LIMITED / PROVIDER_ERROR）在尚未输出内容前指数退避重试 2 次
         for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
           let retryableFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
+          let overflowFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
           let producedOutputInAttempt = false;
 
           for await (const chunk of this.deps.chatModel.stream({
             systemPrompt,
             messages,
             tools: isWrapUpStep ? [] : tier1Tools,
-            sessionId: this.sessionId,
+            sessionId: turnSessionId,
             thinkingLevel: effectiveThinkingLevel,
             thinkingBudgetTokens: effectiveThinkingBudget,
             signal: opts.signal,
@@ -920,16 +1179,20 @@ export class DirectEngine {
                 ...(activeModelId ? { model: activeModelId } : {}),
                 inputTokens: chunk.inputTokens,
                 outputTokens: chunk.outputTokens,
+                totalTokens: chunk.totalTokens,
                 ...(chunk.cacheReadTokens !== undefined ? { cacheReadTokens: chunk.cacheReadTokens } : {}),
                 ...(chunk.cacheWriteTokens !== undefined ? { cacheWriteTokens: chunk.cacheWriteTokens } : {}),
                 ...(chunk.estimatedCostUsd !== undefined ? { estimatedCostUsd: chunk.estimatedCostUsd } : {}),
               };
-              if (chunk.totalTokens >= rolloverLimitTokens) {
-                rolledOver = true;
+              // 按当前实际生效模型的窗口实时算阈值（修复 DynamicChatModel 首轮与降级后窗口偏差）
+              const effectiveLimit = this.computeEffectiveRolloverLimit(opts.mode);
+              if (chunk.totalTokens >= effectiveLimit) {
+                thresholdReached = true;
               }
             } else if (chunk.type === "error") {
               if (chunk.code === "CONTEXT_OVERFLOW") {
-                rolledOver = true;
+                overflowFailure = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
+                break;
               }
               const canRetry =
                 !producedOutputInAttempt &&
@@ -949,11 +1212,77 @@ export class DirectEngine {
             aborted = true;
             break;
           }
+
+          // Spec 01 §1.3 & §2.5：CONTEXT_OVERFLOW 且存在旧历史时，先同步收尾换段并在新段当轮自动重试一次
+          if (overflowFailure) {
+            const currentUserEv = opts.userEventId
+              ? this.deps.events.getById(opts.userEventId)
+              : null;
+            const cutoffSeq = currentUserEv
+              ? Math.max(0, currentUserEv.seq - 1)
+              : (this.deps.events.getLatestChatEvent()?.seq ?? null);
+
+            if (
+              !overflowRecovered &&
+              !producedOutputInAttempt &&
+              completedToolSteps === 0 &&
+              initialHistoryCount > 0 &&
+              dynamicUserContent !== null
+            ) {
+              const roll = await this.performRollover({
+                reason: "overflow",
+                runWrapup: true,
+                cutoffSeq,
+              });
+              if (roll.ok) {
+                overflowRecovered = true;
+                rolledOver = true;
+                thresholdReached = false;
+                turnSessionId = this.activeState.sessionId;
+                toolCtx.sessionId = turnSessionId;
+                if (currentUserEv) {
+                  this.deps.events.rebindEventSessionId(currentUserEv.id, turnSessionId);
+                }
+                await this.ensureContinuityFrozen();
+                systemPrompt = await this.getOrBuildStaticPrefix();
+                messages = [
+                  { role: "user", content: dynamicUserContent, timestamp: this.deps.clock.now() },
+                ];
+                initialHistoryCount = 0;
+                retryStepAfterOverflow = true;
+                break;
+              }
+            } else if (completedToolSteps > 0) {
+              // 多步工具调用中途溢出：同步换段且禁用溢出检查点，避免重试陷入同载荷死循环
+              overflowCheckpointDisabled = true;
+              const roll = await this.performRollover({
+                reason: "overflow",
+                runWrapup: true,
+                cutoffSeq,
+              });
+              if (roll.ok) {
+                rolledOver = true;
+                if (currentUserEv) {
+                  this.deps.events.rebindEventSessionId(currentUserEv.id, this.activeState.sessionId);
+                }
+              }
+            }
+
+            lastError = overflowFailure;
+            opts.callbacks?.onTurnError?.({ turnId, ...lastError });
+            break;
+          }
+
           if (retryableFailure) {
             await sleepWithAbort(retryDelays[attempt], opts.signal);
             continue;
           }
           break;
+        }
+
+        if (retryStepAfterOverflow) {
+          step -= 1;
+          continue;
         }
 
         if (lastError || aborted) break;
@@ -1073,11 +1402,17 @@ export class DirectEngine {
       }
 
       if (isSilent) {
-        if (rolledOver) await this.triggerRollover();
+        if (thresholdReached) {
+          const roll = await this.performRollover({
+            reason: "threshold",
+            runWrapup: true,
+          });
+          if (roll.ok) rolledOver = true;
+        }
         opts.callbacks?.onTurnSilence?.({ turnId, ownTime: opts.mode === "wake" });
         return {
           turnId,
-          sessionId: this.sessionId,
+          sessionId: turnSessionId,
           message: null,
           text: "",
           thinking: fullThinking,
@@ -1131,7 +1466,7 @@ export class DirectEngine {
         if (recallCount > 0) metadata.recallCount = recallCount;
         if (aborted) metadata.aborted = true;
         const { event } = this.deps.events.append({
-          sessionId: this.sessionId,
+          sessionId: turnSessionId,
           turnId,
           groupId: opts.groupId ?? null,
           version: opts.version ?? 1,
@@ -1148,8 +1483,18 @@ export class DirectEngine {
         }
       }
 
-      if (rolledOver) {
-        await this.triggerRollover();
+      if (!lastError && thresholdReached) {
+        const cutoffSeq =
+          persisted?.seq ??
+          (opts.userEventId ? this.deps.events.getById(opts.userEventId)?.seq : null) ??
+          this.deps.events.getLatestChatEvent()?.seq ??
+          null;
+        const roll = await this.performRollover({
+          reason: "threshold",
+          runWrapup: true,
+          cutoffSeq,
+        });
+        if (roll.ok) rolledOver = true;
       }
 
       if (!lastError) {
@@ -1167,7 +1512,7 @@ export class DirectEngine {
 
       return {
         turnId,
-        sessionId: this.sessionId,
+        sessionId: turnSessionId,
         message: persisted,
         text: fullText,
         thinking: fullThinking,
@@ -1185,7 +1530,7 @@ export class DirectEngine {
       opts.callbacks?.onTurnError?.({ turnId, ...lastError });
       return {
         turnId,
-        sessionId: this.sessionId,
+        sessionId: turnSessionId,
         message: null,
         text: fullText,
         thinking: fullThinking,

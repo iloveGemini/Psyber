@@ -35,6 +35,8 @@ export interface TidyTaskOutcome {
   touchedMemoryPaths: string[];
   committed: boolean;
   summary: string;
+  /** 本次整理已消化到的最高 event.id（供 bedtime 换段校验期间是否产生未消化新对话） */
+  lastProcessedEventId: string | null;
   error?: string;
 }
 
@@ -280,6 +282,7 @@ async function executeSingleTidyPass(
       touchedMemoryPaths: [],
       committed: false,
       summary: "",
+      lastProcessedEventId: cursorId || null,
       error: failedReason,
     };
   }
@@ -310,21 +313,41 @@ async function executeSingleTidyPass(
     touchedMemoryPaths: touchedList,
     committed,
     summary,
+    lastProcessedEventId: lastProcessedId || null,
   };
 }
 
-function queryNextPendingBatch(db: Database, cursorId: string): RawEventRow[] {
-  const allPending = db
-    .query(
-      `SELECT id, seq, turn_id, status, role, kind, content
-       FROM events
-       WHERE status IN ('active', 'retracted')
-         AND role IN ('user', 'assistant')
-         AND kind IN ('chat', 'wake', 'door_note')
-         AND id > ?
-       ORDER BY seq ASC`,
-    )
-    .all(cursorId) as RawEventRow[];
+function queryNextPendingBatch(
+  db: Database,
+  cursorId: string,
+  maxSeq?: number | null,
+): RawEventRow[] {
+  const allPending = (
+    typeof maxSeq === "number" && Number.isFinite(maxSeq)
+      ? db
+          .query(
+            `SELECT id, seq, turn_id, status, role, kind, content
+             FROM events
+             WHERE status IN ('active', 'retracted')
+               AND role IN ('user', 'assistant')
+               AND kind IN ('chat', 'wake', 'door_note')
+               AND id > ?
+               AND seq <= ?
+             ORDER BY seq ASC`,
+          )
+          .all(cursorId, maxSeq)
+      : db
+          .query(
+            `SELECT id, seq, turn_id, status, role, kind, content
+             FROM events
+             WHERE status IN ('active', 'retracted')
+               AND role IN ('user', 'assistant')
+               AND kind IN ('chat', 'wake', 'door_note')
+               AND id > ?
+             ORDER BY seq ASC`,
+          )
+          .all(cursorId)
+  ) as RawEventRow[];
 
   const batch: RawEventRow[] = [];
   let chars = 0;
@@ -341,33 +364,56 @@ function queryNextPendingBatch(db: Database, cursorId: string): RawEventRow[] {
 }
 
 /**
- * Ring 1 单队列单轮异步记忆整理任务（daily_wrapup / bedtime）：
- * - daily_wrapup：按 10_000 字切批连续消费 chat / wake / door_note（绝不推进 door_notes_read）
+ * Ring 1 单队列单轮记忆整理任务（daily_wrapup / bedtime）：
+ * - daily_wrapup：按 10_000 字循环切批排空（可选 maxSeq 截断，绝不提前吃掉排队新消息，绝不推进 door_notes_read）
  * - bedtime（对齐 Spec 02 §5.2）：先循环排空剩余未整理对话，再汇总上次 bedtime 以来新写/修改卡片与周日 gist/days 梗概
  * - 任何阶段模型报错均按内存安全备份完整回滚，绝不推进游标，绝不碰沙箱外路径
  */
 export async function runMemoryTidyTask(
   deps: TidyTaskDeps,
-  opts: { taskType: TidyTaskType; nightDate?: string; signal?: AbortSignal },
+  opts: { taskType: TidyTaskType; nightDate?: string; maxSeq?: number | null; signal?: AbortSignal },
 ): Promise<TidyTaskOutcome> {
   if (opts.taskType === "daily_wrapup") {
-    const cursorId = deps.events.getCursor("daily_wrapup") ?? "";
-    const batch = queryNextPendingBatch(deps.db, cursorId);
-    if (batch.length === 0) {
-      return {
-        ok: true,
+    let totalDrained = 0;
+    const allTouched = new Set<string>();
+    let anyCommitted = false;
+    let lastSummary = "无新增记忆";
+    let lastProcessedEventId = deps.events.getCursor("daily_wrapup");
+
+    while (true) {
+      const cursorId = deps.events.getCursor("daily_wrapup") ?? "";
+      const batch = queryNextPendingBatch(deps.db, cursorId, opts.maxSeq);
+      if (batch.length === 0) break;
+      const passRes = await executeSingleTidyPass(deps, {
         taskType: "daily_wrapup",
-        processedEvents: 0,
-        touchedMemoryPaths: [],
-        committed: false,
-        summary: "无新增记忆",
-      };
+        batch,
+        signal: opts.signal,
+      });
+      if (!passRes.ok) {
+        return {
+          ...passRes,
+          processedEvents: totalDrained,
+          touchedMemoryPaths: Array.from(allTouched),
+          committed: anyCommitted,
+          lastProcessedEventId,
+        };
+      }
+      totalDrained += passRes.processedEvents;
+      for (const p of passRes.touchedMemoryPaths) allTouched.add(p);
+      if (passRes.committed) anyCommitted = true;
+      lastSummary = passRes.summary;
+      lastProcessedEventId = passRes.lastProcessedEventId ?? lastProcessedEventId;
     }
-    return executeSingleTidyPass(deps, {
+
+    return {
+      ok: true,
       taskType: "daily_wrapup",
-      batch,
-      signal: opts.signal,
-    });
+      processedEvents: totalDrained,
+      touchedMemoryPaths: Array.from(allTouched),
+      committed: anyCommitted,
+      summary: lastSummary,
+      lastProcessedEventId,
+    };
   }
 
   // bedtime：步骤 1 —— 循环排空游标后剩余未整理对话
@@ -377,7 +423,7 @@ export async function runMemoryTidyTask(
 
   while (true) {
     const cursorId = deps.events.getCursor("daily_wrapup") ?? "";
-    const batch = queryNextPendingBatch(deps.db, cursorId);
+    const batch = queryNextPendingBatch(deps.db, cursorId, opts.maxSeq);
     if (batch.length === 0) break;
     const drainRes = await executeSingleTidyPass(deps, {
       taskType: "daily_wrapup",

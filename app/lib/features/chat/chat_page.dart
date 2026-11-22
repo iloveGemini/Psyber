@@ -1013,6 +1013,55 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                             );
                           },
                         ),
+                        ValueListenableBuilder<bool>(
+                          valueListenable: widget.controller.wrappingUpNotifier,
+                          builder: (context, wrappingUp, _) {
+                            if (!wrappingUp) return const SizedBox.shrink();
+                            return Container(
+                              key: const Key('rollover_wrapping_banner'),
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: colors.accentSoft,
+                                border: Border(
+                                  top: BorderSide(color: colors.hairline),
+                                ),
+                              ),
+                              child: Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: PsyberTheme.readingMaxWidth,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      SizedBox(
+                                        width: 12,
+                                        height: 12,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 1.8,
+                                          color: colors.accent,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        '正在收拢这段记忆…',
+                                        style: TextStyle(
+                                          fontSize: 12.5,
+                                          color: colors.inkQuiet,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
                         ValueListenableBuilder<DoorStatus>(
                           valueListenable: widget.controller.doorNotifier,
                           builder: (context, door, _) =>

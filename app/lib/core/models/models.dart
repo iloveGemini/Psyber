@@ -456,17 +456,20 @@ class WrapUpResult {
     required this.oldSessionId,
     required this.newSessionId,
     required this.queued,
+    this.wrapped = false,
   });
 
   final String oldSessionId;
   final String newSessionId;
   final bool queued;
+  final bool wrapped;
 
   factory WrapUpResult.fromJson(Map<String, dynamic> json) {
     return WrapUpResult(
       oldSessionId: json['oldSessionId'] as String? ?? '',
       newSessionId: json['newSessionId'] as String? ?? '',
       queued: json['queued'] == true,
+      wrapped: json['wrapped'] == true,
     );
   }
 }
@@ -719,6 +722,7 @@ class HistoryPage {
     required this.latestEventSeq,
     this.nextBefore,
     this.activeTurnId,
+    this.rolloverInProgress = false,
     this.contextUsage,
   });
 
@@ -727,6 +731,7 @@ class HistoryPage {
   final String? nextBefore;
   final int latestEventSeq;
   final String? activeTurnId;
+  final bool rolloverInProgress;
   final ContextUsageInfo? contextUsage;
 
   factory HistoryPage.fromJson(Map<String, dynamic> json) {
@@ -746,6 +751,7 @@ class HistoryPage {
       nextBefore: json['nextBefore'] as String?,
       latestEventSeq: (json['latestEventSeq'] as num?)?.toInt() ?? 0,
       activeTurnId: json['activeTurnId'] as String?,
+      rolloverInProgress: json['rolloverInProgress'] == true,
       contextUsage: rawUsage is Map<String, dynamic>
           ? ContextUsageInfo.fromJson(rawUsage)
           : null,

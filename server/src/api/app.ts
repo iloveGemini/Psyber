@@ -144,7 +144,17 @@ export function createApp(deps: AppDeps): Hono {
     string,
     { userEventId: string; activityHint?: string; checkpoint?: TurnCheckpoint }
   >();
+  // Spec 01 §4.3：scope: "session" 仅对当前 sessionId 有效，换段后自动清空失效
+  let approvedSessionId = "";
   const sessionApprovedTools = new Set<string>();
+  const getSessionApprovedTools = (): Set<string> => {
+    const current = deps.getActiveSessionId();
+    if (current !== approvedSessionId) {
+      sessionApprovedTools.clear();
+      approvedSessionId = current;
+    }
+    return sessionApprovedTools;
+  };
   const pendingApprovals = new Map<
     string,
     {
@@ -221,7 +231,7 @@ export function createApp(deps: AppDeps): Hono {
           },
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
           onRequestApproval: (req) => {
-            if (sessionApprovedTools.has(req.toolName)) {
+            if (getSessionApprovedTools().has(req.toolName)) {
               return Promise.resolve({ decision: "allow", scope: "session" });
             }
             const approvalId = ulid(deps.clock.now());
@@ -362,10 +372,12 @@ export function createApp(deps: AppDeps): Hono {
     });
     const contextUsage = deps.engine?.getContextUsage();
     const activeTurnId = activeAborts.keys().next().value ?? null;
+    const rolloverInProgress = deps.engine?.isRolloverInProgress() ?? false;
     return c.json({
       ...page,
       items: page.items.map((ev) => toTimelineItem(ev, deps.events)),
       activeTurnId,
+      rolloverInProgress,
       ...(contextUsage ? { contextUsage } : {}),
     });
   });
@@ -516,8 +528,27 @@ export function createApp(deps: AppDeps): Hono {
     if (!deps.engine) {
       return c.json({ error: { code: "ENGINE_UNAVAILABLE", message: "对话引擎尚未就绪" } }, 503);
     }
-    const { oldSessionId, newSessionId } = await deps.engine.manualRollover();
-    return c.json({ oldSessionId, newSessionId, queued: true }, 202);
+    const result = await deps.engine.manualRollover();
+    if (!result.ok) {
+      return c.json(
+        {
+          error: {
+            code: "ROLLOVER_FAILED",
+            message: result.error || "整理记忆失败，暂保留当前对话段",
+          },
+        },
+        502,
+      );
+    }
+    return c.json(
+      {
+        oldSessionId: result.oldSessionId,
+        newSessionId: result.newSessionId,
+        queued: false,
+        wrapped: result.wrapped,
+      },
+      202,
+    );
   });
 
   app.post("/api/v1/turns/:turnId/retry", (c) => {
@@ -693,6 +724,7 @@ export function createApp(deps: AppDeps): Hono {
       doorState,
       newTurnId,
       clientMessageId: typeof body.clientMessageId === "string" ? body.clientMessageId : null,
+      activeSessionId: deps.getActiveSessionId(),
     });
     if (!res.ok) {
       const status = res.code === "NOT_FOUND" ? 404 : 409;
@@ -751,7 +783,10 @@ export function createApp(deps: AppDeps): Hono {
         409,
       );
     }
-    const prep = deps.events.prepareRerollAssistantMessage(id, { doorState });
+    const prep = deps.events.prepareRerollAssistantMessage(id, {
+      doorState,
+      activeSessionId: deps.getActiveSessionId(),
+    });
     if (!prep.ok) {
       const status = prep.code === "NOT_FOUND" ? 404 : 409;
       return c.json({ error: { code: prep.code, message: prep.error } }, status);
@@ -932,7 +967,7 @@ export function createApp(deps: AppDeps): Hono {
       );
     }
     if (decision === "allow" && scope === "session") {
-      sessionApprovedTools.add(entry.toolName);
+      getSessionApprovedTools().add(entry.toolName);
     }
     deps.sse?.emit("turn.approval_resolved", {
       approvalId,

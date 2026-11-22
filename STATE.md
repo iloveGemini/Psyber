@@ -1,11 +1,17 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-22（阅读系 5 套色板升级、日间/夜间独立色板持久化、修复助手 express 贴纸历史/流式不渲染及气泡动作在正文出现前提前消耗的缺陷）。
+> 最后更新：2026-11-22（同步收尾换段、`active_session` 持久化、Psyche 风格 `<continuity>` 金字塔与前端「正在收拢这段记忆…」提示落地，全量测试通过）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（流式稳定化与阅读主题升级完成）
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（同步换段与连续性重构完成）
 
 ### 已完成
+- **同步收尾换段、`sessionId` 持久化与 `<continuity>` 升级（`docs/` + `server/` + `app/`，2026-11-22）**：
+  - **契约与同步换段**：否掉异步先切段，75% 阈值 / `CONTEXT_OVERFLOW` / 手动 `POST /api/v1/chat/wrap-up` 均先同步排空 `daily_wrapup`（`turnMutex -> tidyMutex` 单向锁、`bedtime` 完成回调挪至释放 `tidyMutex` 后零死锁），成功后再切新 `sessionId`；整理失败保留原段不硬切；`CONTEXT_OVERFLOW` 有历史时换段后当轮自动重试一次；排队消息自动重绑新 `sessionId` 绝不双发。
+  - **状态持久化与安全边界**：`task_cursors['active_session']` 持久化 `{ sessionId, fresh, carryOverUntilSeq, continuity }`，彻底修复常驻服务 `bedtime` 不换段、换段未发言重启复活旧段、短停重启丢过渡轮与水位归零；工具 `scope: "session"` 白名单绑定当前 `sessionId` 换段即失效；`edit`/`reroll` 禁止跨段修改；`buildHistoryMessages` 按 `session_id` 完整回放保护缓存；开机补跑 `bedtime` 同步覆盖昨晚手动换段后关机缺日梗概场景。
+  - **Psyche 风格 `<continuity>` 与前端提示**：冻结在 Static Prefix 末尾（避免伪造 `messages[0]` 为 `assistant`），按「不重叠 `年→月→周→天` 梗概（≤16000 字，含单条防跑偏上限）+ 仅 `day > lastGistDay` 的 `daily/` 正文（≤1800 字，旧天与 `activities/` 交由召回）+ 上一段末尾原话（≤2000 字）」拼装；新增 SSE `turn.rollover` 与 `/chat/history.rolloverInProgress`，前端聊天页在收尾期间展示「正在收拢这段记忆…」轻提示。
+- **重启连续性与错峰补整理修复（`server/`，2026-11-22）**：
+  - 保留未整理会话跨日重启不截断、关机错过 `bedtime` 次日后台补跑能力（与上述持久化状态机合流）。
 - **日夜独立主题持久化 + 助手贴纸与气泡动作修复（2026-11-22）**：
   - **日夜色板独立保存（`app/`）**：`SessionStorage` 新增 `client_theme.json`（`ThemePreferences`），分别持久化 `lightPalette`、`darkPalette` 与 `themeMode`，切至「跟随系统」时自动按昼夜切换各自保存的阅读色板。
   - **助手贴纸显示修复（`server/` + `app/`）**：`toTimelineItem` 补充解析 `metadata.expressions` 中的贴纸，`TimelineItem.fromJson` 同步兜底读取 `expressions` 内贴纸，`StreamingAssistantBubble` 实时渲染流式 `latestExpression.sticker`。
@@ -26,5 +32,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-22 终改后实测）**：`bun run typecheck` 零错误；`bun test`（13 文件 / 43 用例 / 520 断言）全部通过。
-- **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（23 用例）全部通过。
+- **`server/`（2026-11-22 终改后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 49 用例 / 591 断言）全部通过。
+- **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（24 用例）全部通过。

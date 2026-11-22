@@ -5,7 +5,7 @@ import type { Hono } from "hono";
 import { createApp } from "./api/app.ts";
 import { PairingManager } from "./api/pairing.ts";
 import { performSqliteBackup } from "./core/backup.ts";
-import { SystemClock, localDay, type Clock } from "./core/clock.ts";
+import { SystemClock, addCalendarDays, localDay, type Clock } from "./core/clock.ts";
 import {
   DEFAULT_CIRCADIAN_CONFIG,
   initDataDir,
@@ -81,6 +81,8 @@ export interface BootOptions {
   approvalTimeoutMs?: number;
   /** 是否启动后台定时心跳（生产默认 true，单测可传 false 后手动调用 tickHeartbeat） */
   startHeartbeatTimer?: boolean;
+  /** 启动发现昨夜因关机错过 bedtime 时是否自动在后台补跑（默认 true） */
+  catchUpMissedBedtime?: boolean;
 }
 
 export interface PsyberRuntime {
@@ -199,6 +201,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   const pendingPromises = new Set<Promise<unknown>>();
   let dailyWrapupQueued = false;
   let queuedBedtimeNightDate: string | null = null;
+  let engineRef: DirectEngine | null = null;
 
   const trackBackground = <T>(p: Promise<T>): Promise<T> => {
     pendingPromises.add(p);
@@ -218,6 +221,30 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
   };
 
+  const runSyncDailyWrapup = async (
+    cutoffSeq: number | null,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (stopped) return { ok: false, error: "服务正在停机" };
+    const outcome = await tidyMutex.runExclusive(async () => {
+      if (stopped) return null;
+      return runMemoryTidyTask(
+        {
+          db,
+          dataDir,
+          promptsDir,
+          clock,
+          events,
+          memoryIndex,
+          memoryTools,
+          chatModel: tidyModel,
+        },
+        { taskType: "daily_wrapup", maxSeq: cutoffSeq },
+      );
+    });
+    if (!outcome) return { ok: false, error: "服务正在停机" };
+    return { ok: outcome.ok, error: outcome.error };
+  };
+
   const enqueueTidy = (
     taskType: TidyTaskType,
     nightDate?: string,
@@ -234,43 +261,56 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       queuedBedtimeNightDate = targetNight;
     }
 
-    const job = tidyMutex.runExclusive(async () => {
-      try {
-        if (stopped) return null;
-        const targetNight =
-          taskType === "bedtime" ? nightDate ?? localDay(clock.now(), config.timezone) : undefined;
-        const outcome = await runMemoryTidyTask(
-          {
-            db,
-            dataDir,
-            promptsDir,
-            clock,
-            events,
-            memoryIndex,
-            memoryTools,
-            chatModel: tidyModel,
-          },
-          { taskType, nightDate: targetNight },
-        );
-        if (taskType === "bedtime" && outcome.ok && targetNight) {
-          lastBedtimeNightDate = targetNight;
-          // Spec 05 §4.1：bedtime 睡前整理完成后自动触发一次 VACUUM INTO 本地日原子热备
-          await triggerBackup();
+    const job = (async () => {
+      let bedtimeDigestedEventId: string | null | undefined;
+      let shouldNotifyBedtimeDone = false;
+
+      const outcome = await tidyMutex.runExclusive(async () => {
+        try {
+          if (stopped) return null;
+          const targetNight =
+            taskType === "bedtime" ? nightDate ?? localDay(clock.now(), config.timezone) : undefined;
+          const res = await runMemoryTidyTask(
+            {
+              db,
+              dataDir,
+              promptsDir,
+              clock,
+              events,
+              memoryIndex,
+              memoryTools,
+              chatModel: tidyModel,
+            },
+            { taskType, nightDate: targetNight },
+          );
+          if (taskType === "bedtime" && res.ok && targetNight) {
+            lastBedtimeNightDate = targetNight;
+            // Spec 05 §4.1：bedtime 睡前整理完成后自动触发一次 VACUUM INTO 本地日原子热备
+            await triggerBackup();
+            bedtimeDigestedEventId = res.lastProcessedEventId;
+            shouldNotifyBedtimeDone = true;
+          }
+          return res;
+        } finally {
+          if (taskType === "daily_wrapup") {
+            dailyWrapupQueued = false;
+          } else {
+            queuedBedtimeNightDate = null;
+          }
         }
-        return outcome;
-      } finally {
-        if (taskType === "daily_wrapup") {
-          dailyWrapupQueued = false;
-        } else {
-          queuedBedtimeNightDate = null;
-        }
+      });
+
+      // 必须在释放 tidyMutex 后再调 onBedtimeCompleted（获取 turnMutex），严守单向锁顺序防死锁
+      if (shouldNotifyBedtimeDone && !stopped) {
+        await engineRef?.onBedtimeCompleted(bedtimeDigestedEventId);
       }
-    });
+      return outcome;
+    })();
 
     return trackBackground(job);
   };
 
-  // Stage 8: 装配 DirectEngine（75% 换段自动异步排入 daily_wrapup）
+  // Stage 8: 装配 DirectEngine（换段前先同步排空 daily_wrapup，期间通过 SSE turn.rollover 通知前端）
   const engine = new DirectEngine({
     dataDir,
     promptsDir,
@@ -282,10 +322,12 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     chatModel,
     db,
     media,
-    onRollover: () => {
-      void enqueueTidy("daily_wrapup");
+    onBeforeRollover: ({ cutoffSeq }) => runSyncDailyWrapup(cutoffSeq),
+    onRolloverStatus: (ev) => {
+      sse.emit("turn.rollover", { ...ev });
     },
   });
+  engineRef = engine;
 
   let heartbeatInFlight = false;
 
@@ -384,6 +426,38 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }, intervalMs);
   };
   rescheduleHeartbeatTimer();
+
+  // 若昨夜关机错过了睡眠窗 bedtime，白天开机时异步补跑昨夜整理（不阻塞前台第一轮对话）
+  // 对齐 Psyche pendingGists 思路：不仅看未整理对话，也覆盖昨晚手动换段后关机导致缺日梗概的情况
+  if (opts.catchUpMissedBedtime !== false) {
+    const sleepStatus = getSleepWindowStatus(clock.now(), config.timezone, config.circadian);
+    if (!sleepStatus.inSleepWindow) {
+      const today = localDay(clock.now(), config.timezone);
+      const yesterdayNight = addCalendarDays(today, -1);
+      if (lastBedtimeNightDate === null || lastBedtimeNightDate < yesterdayNight) {
+        const oldestPendingMs = events.getOldestPendingWrapupMs();
+        const hasPendingBeforeToday =
+          oldestPendingMs !== null && localDay(oldestPendingMs, config.timezone) < today;
+        const latestChat = events.getLatestChatEvent();
+        const latestChatDay = latestChat ? localDay(latestChat.createdAt, config.timezone) : null;
+        const hasChatSinceLastBedtime =
+          latestChatDay !== null &&
+          latestChatDay < today &&
+          (lastBedtimeNightDate === null || latestChatDay > lastBedtimeNightDate);
+        const hasDailyCardSinceLastBedtime = memoryIndex
+          .listAllRows()
+          .some((r) => {
+            if (r.space !== "daily") return false;
+            const d = localDay(Math.max(r.created_at, r.updated_at), config.timezone);
+            return d < today && (lastBedtimeNightDate === null || d > lastBedtimeNightDate);
+          });
+
+        if (hasPendingBeforeToday || hasChatSinceLastBedtime || hasDailyCardSinceLastBedtime) {
+          void enqueueTidy("bedtime", yesterdayNight);
+        }
+      }
+    }
+  }
 
   const app = createApp({
     version,

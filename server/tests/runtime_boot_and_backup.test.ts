@@ -294,4 +294,151 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
     expect(wake3.action).toBe("proactive");
     expect(desktopSent).toHaveLength(2);
   });
+
+  test("夜间关机错过 bedtime：次日重启自动携带昨晚过渡对话 + <gist> 并在后台补跑昨夜整理，同日短停重启无缝续接原会话", async () => {
+    const dataDir = await makeTempDir();
+    const clock = new VirtualClock(0, "Asia/Shanghai");
+
+    // 1. 昨晚 21:00 聊了一轮后直接关服（未经历 23:30 睡眠窗 bedtime）
+    clock.jumpToWallClock(2026, 11, 21, 21, 0, 0);
+    const chat1 = new MockChatModel();
+    const rt1 = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chat1,
+      startHeartbeatTimer: false,
+    });
+    const sessionDay1 = rt1.engine.getActiveSessionId();
+    const u1 = rt1.events.append({
+      sessionId: sessionDay1,
+      role: "user",
+      kind: "chat",
+      content: "昨晚我们约好周六去看海边日出",
+    });
+    chat1.queueStream(() => [{ type: "text_delta", delta: "记下了，周六早起去看日出。" }]);
+    await rt1.engine.runTurn({
+      mode: "chat",
+      userText: u1.event.content,
+      userEventId: u1.event.id,
+    });
+    await rt1.stop();
+
+    // 写入一份既有日梗概，验证跨日重启首轮也能同步注入 <gist>
+    await fs.writeFile(
+      path.join(dataDir, "memory", "gist", "days", "2026-11-20.md"),
+      "---\nupdated: 2026-11-20\n---\n前天整理了相机和三脚架。",
+      "utf8",
+    );
+
+    // 2a. 次日 13:20 重启但用户立刻发第一句话（尚未等后台补跑完 bedtime）：不截断昨天未整理的原始对话，直接续接原 sessionId
+    clock.jumpToWallClock(2026, 11, 22, 13, 20, 0);
+    const chatImmediate = new MockChatModel();
+    chatImmediate.queueStream(() => [{ type: "text_delta", delta: "刚开机我也记得昨晚的话。" }]);
+    const rtImmediate = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chatImmediate,
+      startHeartbeatTimer: false,
+      catchUpMissedBedtime: false,
+    });
+    activeRuntimes.push(rtImmediate);
+    expect(rtImmediate.engine.getActiveSessionId()).toBe(sessionDay1);
+    const uImm = rtImmediate.events.append({
+      sessionId: sessionDay1,
+      role: "user",
+      kind: "chat",
+      content: "刚开机就问你一句",
+    });
+    await rtImmediate.engine.runTurn({
+      mode: "chat",
+      userText: uImm.event.content,
+      userEventId: uImm.event.id,
+    });
+    const immBlob = chatImmediate.requests[0]!.messages.map((m) => String(m.content)).join("\n");
+    expect(immBlob).toContain("昨晚我们约好周六去看海边日出");
+    await rtImmediate.stop();
+    activeRuntimes.pop();
+
+    // 2b. 若次日重启先完成后台补跑昨夜 bedtime 再开始聊：先沿用原段防丢，补跑完自动换入带 <gist> + 最近 6 轮过渡的新段
+    clock.jumpToWallClock(2026, 11, 22, 13, 22, 0);
+    const chat2 = new MockChatModel();
+    // 后台补跑昨夜 bedtime 的两段响应（先排空 daily_wrapup，再写 bedtime 梗概）
+    chat2.queueStream(() => [{ type: "text_delta", delta: '{"summary": "约了周六海边日出"}' }]);
+    chat2.queueStream(() => [{ type: "text_delta", delta: '{"summary": "生成昨夜日梗概"}' }]);
+    // 今日第一句聊天响应
+    chat2.queueStream(() => [{ type: "text_delta", delta: "早上好，周六看日出我没忘！" }]);
+
+    const rt2 = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chat2,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rt2);
+    // 补跑完成前仍保留原 sessionDay1；补跑完成后自动切入 sessionDay2
+    await rt2.waitForIdle();
+    const sessionDay2 = rt2.engine.getActiveSessionId();
+    expect(sessionDay2).not.toBe(sessionDay1);
+    expect(rt2.events.getBedtimeNightDate()).toBe("2026-11-21");
+
+    clock.jumpToWallClock(2026, 11, 22, 13, 25, 0);
+    const u2 = rt2.events.append({
+      sessionId: sessionDay2,
+      role: "user",
+      kind: "chat",
+      content: "早上好呀",
+    });
+    const turn2 = await rt2.engine.runTurn({
+      mode: "chat",
+      userText: u2.event.content,
+      userEventId: u2.event.id,
+    });
+    expect(turn2.text).toBe("早上好，周六看日出我没忘！");
+
+    const chatCall = chat2.requests.find((c) =>
+      c.messages.some(
+        (m) => m.role === "user" && typeof m.content === "string" && m.content.includes("早上好呀"),
+      ),
+    );
+    expect(chatCall).toBeDefined();
+    expect(chatCall!.systemPrompt).toContain("<continuity>");
+    expect(chatCall!.systemPrompt).toContain("前天整理了相机和三脚架");
+    expect(chatCall!.systemPrompt).toContain("昨晚我们约好周六去看海边日出");
+    expect(chatCall!.systemPrompt).toContain("记下了，周六早起去看日出。");
+    expect(chatCall!.messages[0]?.role).toBe("user");
+
+    await rt2.stop();
+    activeRuntimes.pop();
+
+    // 3. 同日 30 分钟后再次短停重启（13:50，未再跑 bedtime）：续接原 sessionId 并完整保留冻结的 <continuity> 与本段全部历史
+    clock.jumpToWallClock(2026, 11, 22, 13, 50, 0);
+    const chat3 = new MockChatModel();
+    chat3.queueStream(() => [{ type: "text_delta", delta: "刚聊过，我都接得上。" }]);
+    const rt3 = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chat3,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rt3);
+    expect(rt3.engine.getActiveSessionId()).toBe(sessionDay2);
+
+    const u3 = rt3.events.append({
+      sessionId: sessionDay2,
+      role: "user",
+      kind: "chat",
+      content: "顺便带点热茶",
+    });
+    await rt3.engine.runTurn({
+      mode: "chat",
+      userText: u3.event.content,
+      userEventId: u3.event.id,
+    });
+    const call3 = chat3.requests[0]!;
+    const blob3 = call3.messages.map((m) => String(m.content)).join("\n");
+    expect(blob3).toContain("早上好呀");
+    expect(blob3).toContain("早上好，周六看日出我没忘！");
+    expect(call3.systemPrompt).toContain("<continuity>");
+    expect(call3.systemPrompt).toContain("昨晚我们约好周六去看海边日出");
+  });
 });

@@ -196,11 +196,16 @@ describe("Ring 1.5 聊天流升级：原地重试、手动存记忆换段、工�
         oldSessionId: string;
         newSessionId: string;
         queued: boolean;
+        wrapped: boolean;
       };
       expect(wrapBody.oldSessionId).toBe(oldSession);
       expect(wrapBody.newSessionId).not.toBe(oldSession);
-      expect(wrapBody.queued).toBe(true);
+      expect(wrapBody.queued).toBe(false);
+      expect(wrapBody.wrapped).toBe(true);
       expect(runtime.engine.getContextUsage().usedTokens).toBe(0);
+      // 同步收尾应在接口返回前已广播 turn.rollover wrapping -> done 且推进游标
+      expect(frames.some((f) => f.event === "turn.rollover" && f.data.phase === "wrapping")).toBe(true);
+      expect(frames.some((f) => f.event === "turn.rollover" && f.data.phase === "done")).toBe(true);
       await runtime.waitForIdle();
 
       // 前台订阅时，wake [SILENT] 仅发送轻量 turn.silence，不落盘聊天消息

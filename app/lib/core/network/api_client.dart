@@ -786,6 +786,8 @@ class HttpPsyberApiClient implements PsyberApiClient {
       uri: uri,
       bearerToken: profile.token,
       body: const <String, dynamic>{},
+      // 同步存记忆换段会等待旧段整理落盘，放宽超时避免长段落中途误报超时
+      timeout: const Duration(seconds: 180),
     );
     return WrapUpResult.fromJson(json);
   }

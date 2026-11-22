@@ -289,9 +289,11 @@ class _ContextSessionFooter extends StatelessWidget {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                      res.queued
-                                          ? '已开启新一段，旧对话正在后台整理'
-                                          : '已开启新一段',
+                                      res.wrapped
+                                          ? '已收拢这段记忆，开启新一段'
+                                          : res.queued
+                                              ? '已开启新一段，旧对话正在后台整理'
+                                              : '当前已在新的一段',
                                     ),
                                   ),
                                 );

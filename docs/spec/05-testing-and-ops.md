@@ -220,7 +220,7 @@ export async function createTestContext(opts: { timeZone?: string; initialTimeMs
 | **T09** | `tests/concurrency_locks.test.ts` | 并发锁隔离：后台 `MemoryTx` 持锁期间，前台普通聊天（`turnTouchedMemoryPaths.size === 0`）**零延迟放行推 `turn.done`**；当轮写卡才短持 `MemoryWriteMutex` 提交。 |
 | **T10** | `tests/cinema_frames.test.ts` | 观影生命周期与临时帧淘汰：15s 抽帧节流、单帧 ≤ 512KB、`cinema.bookmark` 钉帧免清理、观影结束满 24 小时后睡前任务等距保留 3 张代表帧，其余物理删除并置 `410 GONE`。 |
 | **T11** | `tests/api_messages.test.ts` | 消息操作状态机：`Edit`/`Reroll`/`Version`/`Delete` 严格追加不覆写旧行、每次生成新 `turn_id`、`clientMessageId` 幂等重试、`closed` 下拒 `reroll` 与编辑 `chat`、仅 `candidate` 允许 `/version`、流式生成中返 `409 TURN_IN_PROGRESS`、`departed` 下全写接口返 `410`。 |
-| **T12** | `tests/cache_rollover.test.ts` | 75% 异步换段与自传骨架：上下文超 75% 或 `CONTEXT_OVERFLOW` 时立刻切新 `session_id`（注入 `<gist>` + 最近 6 轮）继续前台回复不阻塞，旧会话交由后台单队列异步整理并 Git 留痕。 |
+| **T12** | `tests/cache_rollover.test.ts` | 75% 同步收尾换段与 `<continuity>`：上下文超 75% 或 `CONTEXT_OVERFLOW` 时先同步排空 `daily_wrapup`（广播 `turn.rollover`）并 Git 留痕，成功后再切新 `session_id`（首轮冻结 `<continuity>`，含不重叠梗概金字塔 + 未入日梗概 `daily/` 正文 + 2000 字末尾原话）；`CONTEXT_OVERFLOW` 换段后当轮自动重试。 |
 | **T13** | `tests/auth_and_sse.test.ts` | 设备配对与 SSE 同步：配对码 5m 过期/一次性/防爆破限流、`SHA-256(token)` 落盘与 `revokeDeviceIds` 即时断流、`streamSeq` 500 条环形缓冲续传与 `sync.reset`、`wake` `[SILENT]` 暂缓广播 `turn.start`/`turn.thinking`。 |
 | **T14** | `tests/expression_and_mcp.test.ts` | 具身表达与 MCP 桥接：`express` 单轮 3 次节流与贴纸同源校验、MCP 工具强制 Tier 3 隔离、默认 `confirm` 审批挂起与多端同步销除、单服宕机不阻塞启动与 8000 字输出截断。 |
 | **T15** | `tests/clock_backup_recovery.test.ts` | 时钟与灾备自愈：三时区/DST 23h/25h 回归、`VACUUM INTO` 本地日原子热备与 GFS 轮转、`psyber restore` 清理 `-wal`/`-shm` 还原、启动崩溃清理 `index.lock` 且兜底提交排除未跟踪文件。 |

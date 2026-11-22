@@ -150,7 +150,7 @@ source: live                      # live | import（预留外部历史迁移标�
 
 | 任务类型 | 分期 | 触发条件 | 递给 AI 的材料 | 预期写入目标 |
 | :--- | :--- | :--- | :--- | :--- |
-| **1. 换段结晶任务 (`daily_wrapup`)** | **Ring 1** | 上下文超过阈值（默认 75% 或 `contextLimits.chat`）切新 `session_id` 时异步触发，或由用户随时手动触发「存记忆换段」（绝不阻塞新会话前台发言） | 游标后的未整理对话（按 `TASK_BUDGET = 10_000` 字分批）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 当前未关闭 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入 `activities/` |
+| **1. 换段结晶任务 (`daily_wrapup`)** | **Ring 1** | 上下文超过阈值（默认 75% 或 `contextLimits.chat`）、`CONTEXT_OVERFLOW` 或用户手动触发「存记忆换段」时**先同步排空整理再切新 `session_id`**（保证新段不失忆，前端提示「正在收拢这段记忆…」） | 游标后至换段截止点的未整理对话（按 `TASK_BUDGET = 10_000` 字循环分批排空）+ `activities/REGISTRY.yaml` + `entities/REGISTRY.yaml` + 当前未关闭 `daily/` 短期 `state` 清单 | 更新 `daily/`（切片 / state 改 `resolved`）、按需兜底 `shelf/`/`favorite/`/`entities/`、识别隐式活动归入 `activities/` |
 | **2. 每日睡前整理任务 (`bedtime`)** | **Ring 1** | 进入作息睡眠窗（同日单次） | 先排空游标后剩余未整理对话，再递入当日已写/改卡片摘要 + 两份 `REGISTRY.yaml` | 滚动追加 `gist/`（Ring 1 先落 `days/` 与 `weeks/`，Ring 1.5 补 `months/`/`years/`）、按需修订 `shelf/`、`self.md`/`user.md` |
 | **3. 活动收尾任务 (`activity:<slug>`)** | Ring 1.5 | 某 `ActivityPlugin` 结束（如退出观影） | 该活动期间原始对话流 + 对应目录文件列表 + `card_style` | 更新或新建 `activities/<slug>/<topic>.md` |
 
