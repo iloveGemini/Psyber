@@ -284,7 +284,7 @@ describe("Ring 1.5 Edit / Reroll / Version 多版本状态机与上锁抽屉闭�
         const text = typeof last?.content === "string" ? last.content : "";
         seenUserBlocks.push(text);
         if (turnNo === 1) {
-          // 住户通过 Tier 1 call_tool 调用 Tier 3 drawer_write
+          // Psyber通过 Tier 1 call_tool 调用 Tier 3 drawer_write
           yield {
             type: "tool_call",
             id: "tc-dw-1",
@@ -320,7 +320,7 @@ describe("Ring 1.5 Edit / Reroll / Version 多版本状态机与上锁抽屉闭�
       const token = await pairClient(rt);
       const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
 
-      // 1. 触发住户调用 drawer_write
+      // 1. 触发Psyber调用 drawer_write
       await rt.app.request("/api/v1/chat/messages", {
         method: "POST",
         headers: auth,
@@ -345,7 +345,7 @@ describe("Ring 1.5 Edit / Reroll / Version 多版本状态机与上锁抽屉闭�
         .get() as { cnt: number };
       expect(peekCountBefore.cnt).toBe(0);
 
-      // 4. 住户自己读取不产生 privacy.peeked
+      // 4. Psyber自己读取不产生 privacy.peeked
       const selfRead = await rt.drawer.readEntryForResident("2026-11-21-late-night");
       expect(selfRead?.content).toBe("今天心里有点乱，想把这份脆弱先锁进抽屉里。");
       const peekAfterSelfRead = rt.db
@@ -394,6 +394,8 @@ describe("Ring 1.5 Edit / Reroll / Version 多版本状态机与上锁抽屉闭�
 
       const peekRow = rt.events.getById(opened.peekedEventId);
       expect(peekRow?.kind).toBe("privacy.peeked");
+      expect(peekRow?.content).toBe("拆封了上锁抽屉「深夜随笔」");
+      expect(peekRow?.content).not.toContain("用户在 app");
 
       // GET /drawer 现在显示 peeked: true
       const listAfter = (await (

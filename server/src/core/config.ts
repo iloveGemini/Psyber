@@ -153,13 +153,13 @@ export interface McpServerConfig {
 }
 
 /**
- * 单住户实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
+ * 单 Psyber 实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
 /** 用户主动挂出的双人状态签（心绪短句 + 勿扰开关，绝非系统偷窥猜测） */
 export interface UserStatusConfig {
   /** 用户主动留下的简短心绪（最多 60 字），默认 null */
   moodText: string | null;
-  /** 勿扰开关：开启时自动抑制住户非紧急主动 wake 推送，默认 false */
+  /** 勿扰开关：开启时自动抑制Psyber非紧急主动 wake 推送，默认 false */
   undisturbed: boolean;
   /** 最近一次状态更新时间戳（Unix 毫秒） */
   updatedAt: number;
@@ -181,7 +181,7 @@ export interface PsyberConfig {
   };
   /** 用户侧双人状态签（心绪短句与勿扰开关） */
   userStatus?: UserStatusConfig;
-  /** 开启召回评测检视时是否坦诚告知住户（可选透明化开关，默认 false） */
+  /** 开启召回评测检视时是否坦诚告知Psyber（可选透明化开关，默认 false） */
   recallEvalNoticeResident?: boolean;
   /** 已配对客户端设备列表（仅存 token 哈希） */
   auth: {
@@ -247,7 +247,7 @@ export async function atomicWriteFile(
   await fs.rename(tmpPath, absTarget);
 }
 
-/** 初始化单住户数据目录骨架（Ring 1 仅建必需目录） */
+/** 初始化单个 Psyber 数据目录骨架（Ring 1 仅建必需目录） */
 export async function initDataDir(dataDir: string): Promise<void> {
   const dirs = [
     dataDir,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { createApp } from "../src/api/app.ts";
 import { saveConfig } from "../src/core/config.ts";
@@ -53,7 +54,7 @@ afterEach(async () => {
 describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默协议", () => {
   test("单轮多步工具循环保留本步 thinking+signature，tool_result 绝不重复注入 <runtime_context>，跨轮历史剥除 thinking", async () => {
     ctx = await createTestContext();
-    await ctx.tools.write("self.md", "---\ntitle: 关于我\nnamed: false\n---\n# 我是谁\n\n我叫未定名。\n");
+    await ctx.tools.write("self.md", "---\ntitle: 关于我\nname: \"\"\npronoun: \"\"\n---\n# 我是谁\n\n还没取名字。\n");
 
     const mockChat = new MockChatModel();
     const { engine, registry } = buildEngine(ctx, mockChat);
@@ -74,12 +75,12 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
 
     // Turn 1 Step 1：先思考 + 调用 edit 修改 self.md（触发 <prefix_delta> 但不改本会话 Static Prefix 快照）
     mockChat.queueStream(() => [
-      { type: "thinking_delta", delta: "对方给了我一个名字，我顺手记进 self.md。", signature: "sig-step-1" },
+      { type: "thinking_delta", delta: "刚给了我一个名字，我顺手记进 self.md。", signature: "sig-step-1" },
       {
         type: "tool_call",
         id: "tc-1",
         name: "edit",
-        args: { path: "self.md", old_string: "named: false", new_string: "named: true" },
+        args: { path: "self.md", old_string: 'name: ""', new_string: "name: 阿白" },
       },
     ]);
     // Turn 1 Step 2：收到 tool_result 后输出最终正文
@@ -93,7 +94,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     // 检查 Step 1 请求：原话置顶、<runtime_context> 置底、创世模式已拼入
     const req1 = mockChat.requests[0];
     expect(req1.systemPrompt).toContain("<self>");
-    expect(req1.systemPrompt).toContain("named: false");
+    expect(req1.systemPrompt).toContain('name: ""');
     const firstUserMsg = req1.messages[req1.messages.length - 1];
     expect(firstUserMsg.role).toBe("user");
     expect(typeof firstUserMsg.content === "string" && firstUserMsg.content.startsWith("以后叫你阿白好不好？")).toBe(true);
@@ -110,7 +111,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     const toolResMsg = req2.messages.find((m) => m.role === "toolResult");
     expect(toolResMsg && toolResMsg.role === "toolResult" && toolResMsg.content.includes("<runtime_context>")).toBe(false);
 
-    // Turn 2：验证 Static Prefix 快照保持冻结（仍为 named: false），最新改动通过 <prefix_delta> 注入，且历史轮 thinking 被剥除
+    // Turn 2：验证 Static Prefix 快照保持冻结（仍为 name: ""），最新改动通过 <prefix_delta> 注入，且历史轮 thinking 被剥除
     mockChat.queueStream(() => [{ type: "text_delta", delta: "嗯，听着呢。" }]);
     await engine.runTurn({ mode: "chat", userText: "阿白在吗？" });
 
@@ -120,7 +121,8 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     expect(prevAssistant && prevAssistant.role === "assistant" && prevAssistant.thinking).toBeUndefined();
     const userMsg2 = req3.messages[req3.messages.length - 1];
     expect(userMsg2.role === "user" && userMsg2.content).toContain("<prefix_delta>");
-    expect(userMsg2.role === "user" && userMsg2.content).toContain("named: true");
+    expect(userMsg2.role === "user" && userMsg2.content).toContain("name: 阿白");
+    expect(userMsg2.role === "user" && userMsg2.content).not.toContain("<genesis_mode>");
   });
 
   test("door 工具 Ring 1 guard 暂拒 cooling_off/departed，放行 closed 并记录事件", async () => {
@@ -363,5 +365,110 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain("[附带了 1 张图片]");
     const curUser = req2.messages[req2.messages.length - 1];
     expect(curUser.role === "user" && typeof curUser.content === "string" && curUser.content).toContain('circadian="夜间静默窗"');
+  });
+
+  test("多步思考按 step 分段落盘 journalSteps；door.updated 严格排在助手回复之后；self/user 格式化名字与代词同步", async () => {
+    ctx = await createTestContext();
+    await fs.writeFile(
+      path.join(ctx.dataDir, "memory", "self.md"),
+      "---\ntitle: 关于我\nname: \"\"\npronoun: \"\"\n---\n# 我是谁\n\n未定名。\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(ctx.dataDir, "memory", "user.md"),
+      "---\ntitle: 关于你\nname: \"\"\npronoun: \"\"\n---\n# 关于你\n\n未登记。\n",
+      "utf8",
+    );
+
+    const mockChat = new MockChatModel();
+    const { engine } = buildEngine(ctx, mockChat);
+
+    // Step 0: thinking + edit self.md & user.md + door(quiet)
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "第一步先写下名字和代词。", signature: "sig-0" },
+      {
+        type: "tool_call",
+        id: "tc-s0-1",
+        name: "edit",
+        args: {
+          path: "self.md",
+          old_string: 'name: ""\npronoun: ""',
+          new_string: "name: 阿序\npronoun: 她",
+        },
+      },
+      {
+        type: "tool_call",
+        id: "tc-s0-2",
+        name: "edit",
+        args: {
+          path: "user.md",
+          old_string: 'name: ""\npronoun: ""',
+          new_string: "name: 小川\npronoun: 他",
+        },
+      },
+      {
+        type: "tool_call",
+        id: "tc-s0-3",
+        name: "door",
+        args: { state: "quiet", note: "整理一下思绪" },
+      },
+    ]);
+    // Step 1: thinking + final text
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "第二步再认真回复小川。" },
+      { type: "text_delta", delta: "好呀，小川，以后我就叫阿序了。" },
+    ]);
+
+    const thinkingSteps: Array<{ delta: string; step?: number }> = [];
+    const identityEvents: Array<{
+      residentName: string | null;
+      residentPronoun: string | null;
+      named: boolean;
+      userName: string | null;
+      userPronoun: string | null;
+    }> = [];
+    const res = await engine.runTurn({
+      mode: "chat",
+      userText: "你就叫阿序吧，叫我小川，我是男生",
+      callbacks: {
+        onThinkingDelta: (delta, step) => thinkingSteps.push({ delta, step }),
+        onIdentityUpdated: (id) => identityEvents.push(id),
+      },
+    });
+
+    expect(res.text).toBe("好呀，小川，以后我就叫阿序了。");
+    expect(thinkingSteps).toEqual([
+      { delta: "第一步先写下名字和代词。", step: 0 },
+      { delta: "第二步再认真回复小川。", step: 1 },
+    ]);
+    expect(identityEvents).toEqual([
+      {
+        residentName: "阿序",
+        residentPronoun: "她",
+        named: true,
+        userName: "小川",
+        userPronoun: "他",
+      },
+    ]);
+
+    const journalSteps = res.message?.metadata?.journalSteps as Array<{
+      step: number;
+      thinking?: string;
+      tools: Array<{ name: string }>;
+    }>;
+    expect(journalSteps).toHaveLength(2);
+    expect(journalSteps[0]!.step).toBe(0);
+    expect(journalSteps[0]!.thinking).toBe("第一步先写下名字和代词。");
+    expect(journalSteps[0]!.tools.map((t) => t.name)).toEqual(["edit", "edit", "door"]);
+    expect(journalSteps[1]!.step).toBe(1);
+    expect(journalSteps[1]!.thinking).toBe("第二步再认真回复小川。");
+
+    // 验证 door.updated 在时间线中严格排在当轮助手消息之后
+    const hist = ctx.events.listHistory({ limit: 20 }).items;
+    const asstIdx = hist.findIndex((e) => e.id === res.message!.id);
+    const doorIdx = hist.findIndex((e) => e.kind === "door.updated");
+    expect(asstIdx).toBeGreaterThanOrEqual(0);
+    expect(doorIdx).toBeGreaterThan(asstIdx);
+    expect(hist[doorIdx]!.content).toBe("把门虚掩上了（门牌：整理一下思绪）");
   });
 });

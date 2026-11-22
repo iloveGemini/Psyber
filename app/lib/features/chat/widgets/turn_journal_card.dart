@@ -31,8 +31,8 @@ class ModelSwitchDivider extends StatelessWidget {
   }
 }
 
-/// 同轮「思考 + 多步工具调用」统一手账折卡（Spec 04 §5.4）：
-/// - 将思考内容与常规非隐私工具步骤聚合为时间线上一张折叠手账卡；
+/// 同轮「思考 + 多步工具调用」按步分段手账折卡（Spec 04 §5.4）：
+/// - 按 step 顺序分段渲染每一步的思考与工具动作，避免多步思考糊成一坨；
 /// - 保留 Key('thinking_toggle') 与 Key('thinking_body') 供流畅展开阅读；
 /// - 隐私敏感工具（look_at_screen）永不收入此卡，由下方 ScreenToolCard 独立展示。
 class TurnJournalCard extends StatefulWidget {
@@ -41,12 +41,14 @@ class TurnJournalCard extends StatefulWidget {
     required this.thinking,
     this.progressTools = const <ToolProgressItem>[],
     this.summaryTools = const <ToolSummaryItem>[],
+    this.journalSteps = const <TurnJournalStep>[],
     this.isStreaming = false,
   });
 
   final String thinking;
   final List<ToolProgressItem> progressTools;
   final List<ToolSummaryItem> summaryTools;
+  final List<TurnJournalStep> journalSteps;
   final bool isStreaming;
 
   @override
@@ -64,7 +66,7 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
     }
   }
 
-  List<_JournalToolStep> _collectSteps() {
+  List<_JournalToolStep> _collectAllTools() {
     final steps = <_JournalToolStep>[];
     for (final t in widget.progressTools) {
       if (t.isScreen) continue;
@@ -89,33 +91,86 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
     return steps;
   }
 
-  String _headerTitle(List<_JournalToolStep> steps, bool hasThinking) {
+  List<_RenderedJournalStep> _collectRenderedSteps() {
+    if (widget.journalSteps.isNotEmpty) {
+      final rendered = <_RenderedJournalStep>[];
+      for (final js in widget.journalSteps) {
+        final tools = <_JournalToolStep>[];
+        for (final t in js.progressTools) {
+          if (t.isScreen) continue;
+          tools.add(
+            _JournalToolStep(
+              label: t.label.isNotEmpty ? t.label : t.name,
+              status: t.status,
+            ),
+          );
+        }
+        if (tools.isEmpty) {
+          for (final s in js.summaryTools) {
+            if (s.isScreen) continue;
+            tools.add(
+              _JournalToolStep(
+                label: s.label.isNotEmpty ? s.label : s.name,
+                status: s.ok ? 'done' : 'error',
+              ),
+            );
+          }
+        }
+        if (js.thinking.trim().isNotEmpty || tools.isNotEmpty) {
+          rendered.add(
+            _RenderedJournalStep(
+              thinking: js.thinking.trim(),
+              tools: tools,
+            ),
+          );
+        }
+      }
+      if (rendered.isNotEmpty) return rendered;
+    }
+
+    final fallbackTools = _collectAllTools();
+    if (widget.thinking.trim().isEmpty && fallbackTools.isEmpty) {
+      return const <_RenderedJournalStep>[];
+    }
+    return <_RenderedJournalStep>[
+      _RenderedJournalStep(
+        thinking: widget.thinking.trim(),
+        tools: fallbackTools,
+      ),
+    ];
+  }
+
+  String _headerTitle(List<_JournalToolStep> tools, bool hasThinking) {
     if (widget.isStreaming) {
       return hasThinking ? '思考中…' : '翻看手账…';
     }
-    if (steps.isEmpty) {
+    if (tools.isEmpty) {
       return '思考过程';
     }
-    final firstLabel = steps.first.label;
-    if (steps.length == 1) {
+    final firstLabel = tools.first.label;
+    if (tools.length == 1) {
       return hasThinking ? '思索 · $firstLabel' : firstLabel;
     }
     return hasThinking
-        ? '思索与动作 · $firstLabel 等 ${steps.length} 步'
-        : '$firstLabel 等 ${steps.length} 步';
+        ? '思索与动作 · $firstLabel 等 ${tools.length} 步'
+        : '$firstLabel 等 ${tools.length} 步';
   }
 
   @override
   Widget build(BuildContext context) {
-    final hasThinking = widget.thinking.trim().isNotEmpty;
-    final steps = _collectSteps();
-    if (!hasThinking && steps.isEmpty) {
+    final renderedSteps = _collectRenderedSteps();
+    final allTools = _collectAllTools();
+    final hasThinking = renderedSteps.any((s) => s.thinking.isNotEmpty) ||
+        widget.thinking.trim().isNotEmpty;
+    if (!hasThinking && allTools.isEmpty && renderedSteps.isEmpty) {
       return const SizedBox.shrink();
     }
 
     final colors = context.colors;
     final runningSteps =
-        steps.where((s) => s.status == 'running').toList(growable: false);
+        allTools.where((s) => s.status == 'running').toList(growable: false);
+    final firstThinkingIndex =
+        renderedSteps.indexWhere((s) => s.thinking.isNotEmpty);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -145,7 +200,7 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
                       ),
                       const SizedBox(width: 5),
                       Text(
-                        _headerTitle(steps, hasThinking),
+                        _headerTitle(allTools, hasThinking),
                         style: TextStyle(
                           fontSize: 12,
                           color: colors.inkQuiet,
@@ -197,47 +252,74 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (hasThinking)
-                    SelectableText(
-                      widget.thinking,
-                      key: const Key('thinking_body'),
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        height: 1.55,
-                        color: colors.inkQuiet,
+                  for (var i = 0; i < renderedSteps.length; i++) ...[
+                    if (i > 0)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Divider(
+                          height: 1,
+                          thickness: 0.7,
+                          color: colors.hairline.withValues(alpha: 0.8),
+                        ),
                       ),
-                    ),
-                  if (hasThinking && steps.isNotEmpty) const SizedBox(height: 8),
-                  for (final step in steps)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 3),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            step.status == 'error'
-                                ? PhosphorIconsLight.warningCircle
-                                : step.status == 'running'
-                                    ? PhosphorIconsLight.circleDashed
-                                    : PhosphorIconsLight.check,
-                            size: 12.5,
-                            color: step.status == 'error'
-                                ? colors.dangerInk
-                                : colors.inkFaint,
+                    if (renderedSteps.length > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          '第 ${i + 1} 步',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w500,
+                            color: colors.inkFaint,
                           ),
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Text(
-                              '${step.label}${step.status == 'running' ? ' · 进行中' : step.status == 'error' ? ' · 未成' : ''}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: colors.inkQuiet,
+                        ),
+                      ),
+                    if (renderedSteps[i].thinking.isNotEmpty)
+                      SelectableText(
+                        renderedSteps[i].thinking,
+                        key: i == firstThinkingIndex
+                            ? const Key('thinking_body')
+                            : Key('thinking_body_$i'),
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.55,
+                          color: colors.inkQuiet,
+                        ),
+                      ),
+                    if (renderedSteps[i].thinking.isNotEmpty &&
+                        renderedSteps[i].tools.isNotEmpty)
+                      const SizedBox(height: 6),
+                    for (final stepTool in renderedSteps[i].tools)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 3),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              stepTool.status == 'error'
+                                  ? PhosphorIconsLight.warningCircle
+                                  : stepTool.status == 'running'
+                                      ? PhosphorIconsLight.circleDashed
+                                      : PhosphorIconsLight.check,
+                              size: 12.5,
+                              color: stepTool.status == 'error'
+                                  ? colors.dangerInk
+                                  : colors.inkFaint,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                '${stepTool.label}${stepTool.status == 'running' ? ' · 进行中' : stepTool.status == 'error' ? ' · 未成' : ''}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: colors.inkQuiet,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
+                  ],
                 ],
               ),
             ),
@@ -245,6 +327,12 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
       ),
     );
   }
+}
+
+class _RenderedJournalStep {
+  const _RenderedJournalStep({required this.thinking, required this.tools});
+  final String thinking;
+  final List<_JournalToolStep> tools;
 }
 
 class _JournalToolStep {

@@ -43,7 +43,7 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
 
     const first = await ctx.tools.write(
       "self.md",
-      "---\ntitle: 关于我\nnamed: false\n---\n# 我是谁\n\n我刚来到这里。\n",
+      '---\ntitle: 关于我\nname: ""\npronoun: ""\n---\n# 我是谁\n\n我刚来到这里。\n',
     );
     expect(first.ok).toBe(true);
 
@@ -51,12 +51,12 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
     expect(overwrite.ok).toBe(false);
     expect(overwrite.output).toContain("禁止整篇覆写");
 
-    const edited = await ctx.tools.edit("self.md", "named: false", "named: true");
+    const edited = await ctx.tools.edit("self.md", 'name: ""', "name: 阿白");
     expect(edited.ok).toBe(true);
 
     const readBack = await ctx.tools.read("self.md");
     expect(readBack.ok).toBe(true);
-    expect(readBack.output).toContain("named: true");
+    expect(readBack.output).toContain("name: 阿白");
   });
 
   test("edit 支持标点/空白归一化回退匹配，零命中时返回相近片段与行号", async () => {

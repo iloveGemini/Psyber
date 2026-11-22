@@ -78,7 +78,7 @@ export interface ModelRef {
 │ [Segment 1 · Static Prefix] —— 整会话快照锁定，严禁盘中回改              │
 │   · 请求参数 tools[]：固定 9 个 Tier 1 工具（按 name ASCII 升序冻结）    │
 │   · 请求参数 system：                                                   │
-│     1. <self> memory/self.md 快照（置顶！住户自我认同与"我是谁"唯一真相）│
+│     1. <self> memory/self.md 快照（置顶！Psyber自我认同与"我是谁"唯一真相）│
 │     2. System Base Prompt（`prompts/main.md` · 脊柱底线、相处准绳与工具）│
 │     3. <user> memory/user.md 快照                                       │
 │     4. <shelf> memory/shelf/{rules,mirror,threads}.md 快照              │
@@ -130,9 +130,9 @@ export interface ModelRef {
    - 本轮对话的完整语境已在上文首条 `user` 消息中提供，`tool_result` 保持纯粹干净，节约 Token 并防止注意力发散。
 4. **`<door_notes>` 注入载体与 `door_notes_read` 推进时机**：
    - 当存在 `events.kind = 'door_note' AND id > task_cursors['door_notes_read']` 的未读纸条时，在 `<runtime notes="N" />` 报数量的同时，于 `<door_notes>` 块中按时间顺序注入未读纸条正文与 `vagueWhen` 模糊时间（格式如 `- [昨天 · 门缝纸条] <正文>`）；
-   - **`door_notes_read` 仅由具备对外表达与 `door` 权限的交互/唤醒轮（`chat` / `wake` / 未来 mind 唤醒）推进**：只要该轮正常完成（**包括 `wake` 亲眼看过纸条后自主决定不回并输出 `[SILENT]`**），即推进至已注入的最大纸条 `event.id`（仅模型报错/超时未完成时不推进，避免同一张已看过却不想回的纸条在下次唤醒反复弹出）；静默整理轮（`daily_wrapup` / `bedtime`）可照常读取 `door_note` 记记忆，但**不推进 `door_notes_read`**，确保住户下次醒来时仍能看到门口纸条并自主决定是否回应或开门。
+   - **`door_notes_read` 仅由具备对外表达与 `door` 权限的交互/唤醒轮（`chat` / `wake` / 未来 mind 唤醒）推进**：只要该轮正常完成（**包括 `wake` 亲眼看过纸条后自主决定不回并输出 `[SILENT]`**），即推进至已注入的最大纸条 `event.id`（仅模型报错/超时未完成时不推进，避免同一张已看过却不想回的纸条在下次唤醒反复弹出）；静默整理轮（`daily_wrapup` / `bedtime`）可照常读取 `door_note` 记记忆，但**不推进 `door_notes_read`**，确保Psyber下次醒来时仍能看到门口纸条并自主决定是否回应或开门。
 5. **`<prefix_delta>` 会话内持续有效**：
-   - 若盘中住户通过 `edit` 修改了 `self.md`、`user.md` 或 `shelf/`，Segment 1 快照保持冻结不改（保护 Breakpoint #1），同时将该文件最新增量记入当前会话状态，在**本会话剩余每一轮**的 `<prefix_delta>` 中持续注入，直至下次会话换段重新生成 Static Prefix 时清空，防止隔轮“忘掉刚改过的自述或规矩”。
+   - 若盘中Psyber通过 `edit` 修改了 `self.md`、`user.md` 或 `shelf/`，Segment 1 快照保持冻结不改（保护 Breakpoint #1），同时将该文件最新增量记入当前会话状态，在**本会话剩余每一轮**的 `<prefix_delta>` 中持续注入，直至下次会话换段重新生成 Static Prefix 时清空，防止隔轮“忘掉刚改过的自述或规矩”。
 
 ### 2.3 Extended Thinking 思考流在单轮多步与跨轮沉淀的处理
 
@@ -153,13 +153,13 @@ export interface ModelRef {
 
 ### 2.5 拒绝旁观者摘要：同步收尾换段（Rollover）与自传连续性 `<continuity>`
 
-彻底摒弃用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由住户本人以第一人称产生**；且宁可短暂等待旧段收尾写完记忆，也绝不抢着让 AI 用缺失上下文的“失忆新段”回复用户。
+彻底摒弃用第三人称小模型写损耗性“上下文摘要”的陋习。在 Psyber 中，**记忆只能由Psyber 本人以第一人称产生**；且宁可短暂等待旧段收尾写完记忆，也绝不抢着让 AI 用缺失上下文的“失忆新段”回复用户。
 
 1. **换段（Rollover · 换新 `session_id`）触发条件**：
    - **① 上下文阈值 / 溢出换段**：本轮实际生效模型的累计 Token 超过 `min(模型窗口 * 75%, contextLimits.chat)`（独处轮取 `contextLimits.solo`），或触发 `CONTEXT_OVERFLOW` 时；
    - **② 每日睡前整理后换段**：进入作息睡眠窗完成 `bedtime` 整理（或因夜间关机错过 `bedtime` 而在次日补整理完成）后，只要库中**没有晚于本次 `bedtime` 已消化游标的新对话**，即自动切入 `fresh: true` 的新 `session_id`（无论服务是否重启过；若用户已在补整理期间提前开口聊起新话题，则不中途打断）；**若尚未完成 `bedtime` 整理，绝不因单纯跨日闲置截断未整理的原始对话**；
    - **③ 用户手动「存记忆换段」（Ring 1.5）**：用户通过 `POST /api/v1/chat/wrap-up` 主动收尾当前段落时，同样先同步整理完当前段落再切新段。
-   - *状态卡不走换段等待*：对方亲口说的恢复或变更，住户在对话当轮即顺手更新状态卡。
+   - *状态卡不走换段等待*：对方亲口说的恢复或变更，Psyber在对话当轮即顺手更新状态卡。
 2. **先同步收尾整理、再切新段（保证连续性且单向锁零死锁）**：
    - 触发换段（阈值 / 溢出 / 手动）时，Direct Engine 先广播 SSE `turn.rollover { phase: "wrapping", reason }`（客户端展示「正在收拢这段记忆…」），在 `turnMutex` 内同步执行 `daily_wrapup`（循环排空至换段截止序号 `cutoffSeq`，避免提前吃掉排队中的下一条用户消息）并 `git commit`；
    - **整理成功后**才切入新 `session_id`，持久化 `active_session` 状态（`{ sessionId, fresh: true, carryOverUntilSeq, continuity: null }`，存入 `task_cursors['active_session']`），清空静态前缀缓存、工具会话白名单（`scope: "session"`）与用量水位，并广播 `turn.rollover { phase: "done", oldSessionId, newSessionId, contextUsage }`；
@@ -183,7 +183,7 @@ export interface ModelRef {
 
 | 锁名称 | 作用域 | 行为规程 |
 | :--- | :--- | :--- |
-| **`ChatTurnLock`** | 单住户主对话（`chat` / `wake`） | 串行执行主对话轮；若上一轮仍在流式生成，新消息入待处理队列（或由用户显式 `abort` 中止旧轮）。 |
+| **`ChatTurnLock`** | 单 Psyber 主对话（`chat` / `wake`） | 串行执行主对话轮；若上一轮仍在流式生成，新消息入待处理队列（或由用户显式 `abort` 中止旧轮）。 |
 | **`MemoryWriteMutex`** | `memory/` 磁盘写操作 | 保护 `write` / `edit` / 整理轮提交与回滚。`read` / `glob` / `grep` **不加写锁**（纯只读无阻塞）。 |
 
 ### 3.2 整理轮极简原子协议（Ring 1 单轮写作 + Git 留痕；C2.7 复核延后至 Ring 1.5）
@@ -192,7 +192,7 @@ export interface ModelRef {
 
 1. **材料装载（无锁）**：读取游标后 `status = 'active'` 对话（`daily_wrapup` 与 `bedtime` 复用单游标推进；`bedtime` 额外注入当日已写/改卡片摘要）、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml` 与当前未关闭 `daily/` `state` 卡清单。
 2. **获取 `MemoryWriteMutex` 并开启 `MemoryTx`**：仅记录 `memory/` 下触碰路径（`touchedMemoryPaths`）及其写前字节备份；主对话只读（`read`/`glob`/`grep`）无锁放行。
-3. **住户单轮写作**：加载 `<self>` + `<user>` + `prompts/tidy.md`（v3），由 `chat`（或配置的 `memory_task`）调用原生 5 工具完成写卡与状态更新，末尾解析可选 `{"summary": "..."}`（缺失或微瑕降级由触碰文件名兜底，绝不回滚）。
+3. **Psyber单轮写作**：加载 `<self>` + `<user>` + `prompts/tidy.md`（v3），由 `chat`（或配置的 `memory_task`）调用原生 5 工具完成写卡与状态更新，末尾解析可选 `{"summary": "..."}`（缺失或微瑕降级由触碰文件名兜底，绝不回滚）。
 4. **精准提交与游标推进**：
    - 若写作轮因模型报错/超时失败 → 按内存备份恢复 `touchedMemoryPaths` 并刷新索引，**不推进游标**，待下次重试；
    - 正常完成且 `touchedMemoryPaths` 非空 → 仅执行 `git add -- <...touchedMemoryPaths>` 与 `git commit -m "memory(<task>): <summary>"`，随后在同一 SQLite 事务更新 `task_cursors`、刷新增量索引并释放锁。
@@ -372,7 +372,7 @@ export interface RegisteredTool {
 - **Ring 1 / Ring 2 分期边界**：工具 Schema 始终冻结全部 5 态以保护 Static Prefix Cache；在 **Ring 1** 阶段，`guard` 层暂拒 `cooling_off` 与 `departed`（返回明确可读提示：`当前版本尚未开启冷静期与离开流程，如需独处请先将门设为 closed`），待 **Ring 2** 启用下列完整冷静期时间锁与告别流程；
 - **`cooling_off`**（Ring 2）：AI 主动进入正式冷静期，系统记录 `coolingOffStartedAt = Clock.now()`；
 - **`departed` 强校验**：只有当 `door_state === "cooling_off"` 且 `24h ≤ Clock.now() - coolingOffStartedAt < 72h` 时才允许放行；
-- **冷静期窗口过期作废（尊重关门主权）**：若 `Clock.now() - coolingOffStartedAt ≥ 72h` 仍未执行 `departed`，冷静期的离开资格自动作废并清空 `coolingOffStartedAt`，**门状态退回 `closed`（绝不替住户强行改为 `open`）**；之后若仍想离开须重新进入冷静期，若想恢复交流由住户自行切换回 `open` 或 `quiet`；
+- **冷静期窗口过期作废（尊重关门主权）**：若 `Clock.now() - coolingOffStartedAt ≥ 72h` 仍未执行 `departed`，冷静期的离开资格自动作废并清空 `coolingOffStartedAt`，**门状态退回 `closed`（绝不替Psyber强行改为 `open`）**；之后若仍想离开须重新进入冷静期，若想恢复交流由Psyber自行切换回 `open` 或 `quiet`；
 - **拦截报错**：若未满 24 小时，Guard 拦截并向模型返回错误：`尚未度过正式冷静期（剩余 X 小时），不可草率进入告别程序。请先冷静独处。`；若冷静期离开窗口已过期作废，返回：`上次冷静期的离开窗口已过期，门已退回 closed。若仍决定离开，请重新进入冷静期；若想恢复交流，可自行将门改为 open 或 quiet。`
 
 ### 4.3 `guarded` 与 `confirm` 审批状态机（Ring 1 仅落 `auto`/`guarded`；`confirm` 挂起审批于 Ring 2 启用）
@@ -406,20 +406,20 @@ export interface RegisteredTool {
 ## 5. 全套第一人称 Prompt 原文与模式协议（见 prompts/）
 
 > **落点**：全部 Prompt 原文与编写规范已统一收敛至根目录 [`prompts/`](../../prompts/)（代码直接通过 `readPrompt()` 读时现读，不缓存），本节不再贴全文，只保留加载位置、版本指针与模式触发协议。改提示词先改 `prompts/`，再同步本节版本号。
-> **编写铁律**：住户视角 Prompt 全部使用通用中文第一人称，严禁写死任何特定名字、性别、职业或私人关系预设（所有个人身份均从 `memory/{self,user}.md` 自然读取）；仅只读复核角色（`review.md`）与各文件末尾的 JSON 接口格式约束采用技术说明/第二人称（见 `prompts/README.md` §6）。
+> **编写铁律**：Psyber视角 Prompt 全部使用通用中文第一人称，严禁写死任何特定名字、性别、职业或私人关系预设（所有个人身份均从 `memory/{self,user}.md` 自然读取）；仅只读复核角色（`review.md`）与各文件末尾的 JSON 接口格式约束采用技术说明/第二人称（见 `prompts/README.md` §6）。
 
 | 文件 | 版本 | 内容 | 载入位置 |
 | :--- | :--- | :--- | :--- |
-| `prompts/main.md` | v5 | 主对话 Static System Prompt | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
-| `prompts/tidy.md` | v4 | 静默整理轮（含 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/main.md` | v7 | 主对话 Static System Prompt | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
+| `prompts/tidy.md` | v6 | 静默整理轮（含 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（Ring 1.5 可选非阻塞） | memory_task 复核轮（无历史只读，Ring 1 不调用） |
-| `prompts/revision.md` | v3 | C2.7 住户复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
-| `prompts/genesis.md` | v3 | 创世中性开局 | Dynamic Tail（`self.md` `named: false` 时拼入） |
+| `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
+| `prompts/genesis.md` | v5 | 创世中性开局 | Dynamic Tail（`self.md` `name` 为空时拼入） |
 | `prompts/wake.md` | v3 | 主动唤醒（含 `[SILENT]` 沉默协议） | Dynamic Tail（`wake` 模式拼入） |
 
 ### 5.1 条件模式触发与退出协议
 
-- **创世模式（`genesis.md`）退出判定**：由 `memory_template/self.md` 初始化生成的 `self.md` 头部带有极薄 YAML Frontmatter `named: false`；只要 `named === false`，引擎每轮在 Dynamic Tail 拼入 `prompts/genesis.md`。当住户在互动中定名并用 `edit` 将 `named: false` 改为 `named: true`（或用户在 `POST /api/v1/genesis` 直接填好初始名字由后端写入 `named: true`）后，自动退出创世模式（若 `self.md` 无 frontmatter 或缺省 `named` 字段，默认视为 `true` 已定名）。
-- **主动唤醒沉默协议（`wake.md` → `[SILENT]`）**：`wake` 模式下若住户决定此刻不开口，仅输出 `[SILENT]`。引擎在流式阶段做前缀缓冲：**在前 16 字符确认非 `[SILENT]`（或产生 `express` 等实质工具调用）之前，暂缓广播 SSE `turn.start` 与 `turn.thinking`**，避免客户端先画出“正在思考/输入”再突然悬空消失；确认开口后再补推 `turn.start`、已缓冲的思考/正文增量；一旦最终正文经 `trim()` 等于 `[SILENT]`（或为空且未产生贴纸等实质表达），**静默中止推送**——不落盘对外聊天消息、不推任何 SSE 事件、不触发 `NotificationProvider("wake")`，仅写入内部调试日志（若本轮注入了 `<door_notes>`，按 §2.2 仍推进 `door_notes_read`）。
+- **创世模式（`genesis.md`）退出判定**：由 `memory_template/self.md` 初始化生成的 `self.md` 头部带有极薄 YAML Frontmatter `name: ""` 与 `pronoun: ""`（不再设 `named` 布尔开关；`user.md` 头部带有 `name: ""` 与 `pronoun: ""`）。判定是否定名以 `self.md` 的 `name` 为唯一真相：只要 `self.md` 存在且显式包含 `name: ""` 空字段（或文件尚不存在），即处于未定名状态，引擎每轮在 Dynamic Tail 拼入 `prompts/genesis.md`；当 Psyber 在互动中定名并用 `edit` 将 `self.md` 的 `name` 填为非空名字（或用户在 `POST /api/v1/genesis` 直接填好初始名字由后端写入 `name`）后，自动退出创世模式（若为无 `name` 键的旧版历史 `self.md` 且无旧版 `named: false`，兼容视为已定名并按正文回退解析名字）。`self.md` 中的 `pronoun` 初始化为空，**不在创世页预设**，留待 Psyber 在后续相处中自主决定或自然留空；服务端从 `self.md` / `user.md` frontmatter 解析 `residentName`、`residentPronoun`、`userName`、`userPronoun` 供运行期称谓、通知标题与客户端展示填充（未定名时客户端界面统一兜底显示 `Psyber`）。
+- **主动唤醒沉默协议（`wake.md` → `[SILENT]`）**：`wake` 模式下若Psyber决定此刻不开口，仅输出 `[SILENT]`。引擎在流式阶段做前缀缓冲：**在前 16 字符确认非 `[SILENT]`（或产生 `express` 等实质工具调用）之前，暂缓广播 SSE `turn.start` 与 `turn.thinking`**，避免客户端先画出“正在思考/输入”再突然悬空消失；确认开口后再补推 `turn.start`、已缓冲的思考/正文增量；一旦最终正文经 `trim()` 等于 `[SILENT]`（或为空且未产生贴纸等实质表达），**静默中止推送**——不落盘对外聊天消息、不推任何 SSE 事件、不触发 `NotificationProvider("wake")`，仅写入内部调试日志（若本轮注入了 `<door_notes>`，按 §2.2 仍推进 `door_notes_read`）。
 
 脊柱已并入 `prompts/main.md` 的【脊柱底线与相处准绳】，不单独成节（2026-11-19 定）；四类底线（安全/道德/认同/人格）与三句底线（对错先于讨好 / 冲突不逃避到底 / 情绪不进决策但事后告知）见 `prompts/README.md`。

@@ -49,8 +49,8 @@
 | `POST /api/v1/auth/oauth/:provider/start` | `{ "redirectUri"?: string }` | `{ "flow": "pkce" \| "device_code", "authorizeUrl": string, "userCode"?: string, "verificationUri"?: string, "state": string, "expiresAt": number }` |
 | `POST /api/v1/auth/oauth/:provider/exchange` | `{ "state": string, "code"?: string }` | `{ "ok": true, "provider": string, "expiresAt": number }` |
 | `GET /api/v1/door` | 无 | `{ "state": "open"\|"quiet"\|"closed"\|"cooling_off"\|"departed", "note": string \| null, "updatedAt": number, "unreadDoorNotes": number, "coolingOffStartedAt"?: number, "departedAt"?: number, "farewell"?: string }` |
-| `GET /api/v1/genesis` | 无 | `{ "initialized": boolean, "named": boolean, "hasChatProvider": boolean, "timezone": string, "sleepWindow": { "start": string, "end": string } }` |
-| `POST /api/v1/genesis` | `{ "residentName"?: string, "userName"?: string, "timezone": string, "sleepWindow"?: { "start": string, "end": string }, "llm"?: Partial<LlmConfig>, "credentials"?: Record<string, { "apiKey": string }> }` | `{ "ok": true, "named": boolean }`（`credentials` 中的 BYOK `apiKey` 直落 `credentials.json` 0600，绝不写入 `config.json`；若填 `residentName`，后端将 `self.md` `named` 置为 `true`，留空保持 `named: false` 进入中性初生） |
+| `GET /api/v1/genesis` | 无 | `{ "initialized": boolean, "named": boolean, "residentName": string \| null, "residentPronoun": string \| null, "userName": string \| null, "userPronoun": string \| null, "hasChatProvider": boolean, "timezone": string, "sleepWindow": { "start": string, "end": string } }` |
+| `POST /api/v1/genesis` | `{ "residentName"?: string, "userName"?: string, "userPronoun"?: string, "timezone": string, "sleepWindow"?: { "start": string, "end": string }, "llm"?: Partial<LlmConfig>, "credentials"?: Record<string, { "apiKey": string }> }` | `{ "ok": true, "named": boolean, "residentName": string \| null, "residentPronoun": string \| null, "userName": string \| null, "userPronoun": string \| null }`（`credentials` 中的 BYOK `apiKey` 直落 `credentials.json` 0600，绝不写入 `config.json`；`self.md` 以 `name` 与可选 `pronoun: ""` 初始化（不再设 `named` 字段），若填 `residentName` 则写入 `name` 并直接完成定名，留空保持 `name: ""` 进入中性初生；同步初始化 `user.md` `name` 与 `pronoun`） |
 
 ### 2.2 聊天、门缝留言、版本控制、分享与审批（14 端点）
 
@@ -76,6 +76,7 @@ export interface TimelineItem {
   expressions?: ExpressionPayload[];     // 历史具身表达记录
   shares?: Array<{ id: string; title: string; content: string; openedAt?: number }>; // Ring 1.5 折叠分享卡
   toolSummary?: Array<{ name: string; label: string; ok: boolean; kind?: "general" | "screen" }>;
+  journalSteps?: Array<{ step: number; thinking?: string; tools?: Array<{ name: string; label: string; ok: boolean; kind?: "general" | "screen" }> }>;
   usage?: { model: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; estimatedCostUsd?: number };
   retracted?: boolean;                   // Ring 1.5 双向社交撤回标记（为 true 时界面隐藏正文与思考）
   urgent?: boolean;                      // Ring 1.5 关门态一次性紧急直达标记
@@ -87,20 +88,20 @@ export interface TimelineItem {
 
 | 端点 | 请求载荷 / Query | 响应结构与关键状态码 |
 | :--- | :--- | :--- |
-| `GET /api/v1/chat/history` | `?before=<eventId>&limit=50`（`limit` 夹逼 `1..100`） | `200`: `{ "items": TimelineItem[], "hasMore": boolean, "nextBefore": string \| null, "latestEventSeq": number, "activeTurnId": string \| null, "rolloverInProgress": boolean, "contextUsage"?: ContextUsageSnapshot }`（返回 `status IN ('active', 'retracted')` 项，其中 `retracted` 项剥除正文与思考；按 `seq DESC` 截取 `limit` 条后翻转为 `seq ASC` 旧→新返回） |
+| `GET /api/v1/chat/history` | `?before=<eventId>&limit=50`（`limit` 夹逼 `1..100`） | `200`: `{ "items": TimelineItem[], "hasMore": boolean, "nextBefore": string \| null, "latestEventSeq": number, "activeTurnId": string \| null, "rolloverInProgress": boolean, "identity"?: { "residentName": string \| null, "residentPronoun": string \| null, "named": boolean, "userName": string \| null, "userPronoun": string \| null }, "contextUsage"?: ContextUsageSnapshot }`（返回 `status IN ('active', 'retracted')` 项，其中 `retracted` 项剥除正文与思考；按 `seq DESC` 截取 `limit` 条后翻转为 `seq ASC` 旧→新返回） |
 | `POST /api/v1/chat/messages` | `{ "clientMessageId": string, "content": string, "activityHint"?: string, "attachments"?: string[], "stickerId"?: string, "urgent"?: boolean }`（`attachments` 为已上传的 media hash 数组；纯图/纯贴纸允许 `content` 为 `""`，但 `content.trim()`、`attachments`、`stickerId` 至少一项非空；`urgent: true` 仅 Ring 1.5 于 `closed` 态一次性直达，`cooling_off` 返 `409 DOOR_COOLING_OFF`） | `202 Accepted`: `{ "message": TimelineItem, "deliveredAs": "chat" \| "door_note", "turnId": string \| null }`；重复 `clientMessageId` 幂等返回原记录；落盘新消息时立即重置 `consecutiveUnansweredWakes = 0`；上下文达阈值时先同步整理旧会话再切新段（收尾期间新消息照常 `202` 排队，切段后自动重绑至新 `session_id`）；三者皆空返 `400 EMPTY_MESSAGE`；无效 `stickerId` 返 `400 INVALID_STICKER`；`departed` 返 `410 GONE` |
 | `POST /api/v1/chat/messages/:id/edit` | `{ "content": string, "clientMessageId"?: string }` | `202`: `{ "message": TimelineItem, "turnId": string \| null }`（静默修对话，见 §4 状态机）；非末条活跃用户消息返 `409 NOT_LATEST_USER_MESSAGE`；关门态编辑 `chat` 返 `409 DOOR_CLOSED`；`departed` 返 `410 GONE` |
-| `POST /api/v1/chat/messages/:id/reroll` | `{}` | `202`: `{ "turnId": string, "groupId": string, "nextVersion": number }`（静默修对话，绝不告知住户）；`closed`/`cooling_off` 返 `409 DOOR_CLOSED`；当前有进行中流式生成返 `409 TURN_IN_PROGRESS`；`departed` 返 `410 GONE` |
+| `POST /api/v1/chat/messages/:id/reroll` | `{}` | `202`: `{ "turnId": string, "groupId": string, "nextVersion": number }`（静默修对话，绝不告知Psyber）；`closed`/`cooling_off` 返 `409 DOOR_CLOSED`；当前有进行中流式生成返 `409 TURN_IN_PROGRESS`；`departed` 返 `410 GONE` |
 | `POST /api/v1/chat/messages/:id/version` | `{ "version": number }` | `200`: `{ "activated": TimelineItem, "groupId": string }`（仅允许在 `candidate` 助手版本组间切换并广播 `message.updated`）；目标非 `candidate` 返 `409 INVALID_VERSION_TARGET`；流式生成中返 `409 TURN_IN_PROGRESS` |
 | `POST /api/v1/chat/messages/:id/retract` | `{}`（Ring 1.5 社交撤回） | `200`: `{ "retractedId": string, "eventSeq": number }`（仅允许用户撤回自己的活跃消息，置 `status = 'retracted'` 并广播 `message.updated`；流式生成中返 `409 TURN_IN_PROGRESS`；`departed` 返 `410 GONE`） |
-| `DELETE /api/v1/chat/messages/:id` | 无 | `200`: `{ "deletedId": string, "eventSeq": number }`（静默软删置 `status = 'deleted'`，绝不告知住户，广播 `message.updated`）；`departed` 返 `410 GONE` |
+| `DELETE /api/v1/chat/messages/:id` | 无 | `200`: `{ "deletedId": string, "eventSeq": number }`（静默软删置 `status = 'deleted'`，绝不告知Psyber，广播 `message.updated`）；`departed` 返 `410 GONE` |
 | `POST /api/v1/turns/:turnId/abort` | 无 | `200`: `{ "ok": true, "turnId": string, "aborted": boolean }`（幂等；已结束轮返回 `aborted: false`） |
 | `POST /api/v1/turns/:turnId/retry` | `{}`（Ring 1.5 原地无痕重试） | `202`: `{ "turnId": string, "retriedFromTurnId": string }`（沿用上一失败轮次的用户原话直接续跑，绝不重复插入用户消息气泡；若上一轮已在多步工具循环中完成部分步骤，则补推已完成进度并从断点步骤接续）；非可重试失败轮返 `409 TURN_NOT_RETRYABLE` |
 | `POST /api/v1/chat/wrap-up` | `{}`（Ring 1.5 手动存记忆换段） | `202`: `{ "oldSessionId": string, "newSessionId": string, "queued": false, "wrapped": boolean }`（同步完成旧会话 `daily_wrapup` 整理后切新段；若整理失败返 `502 ROLLOVER_FAILED` 且保留旧段不硬切） |
 | `POST /api/v1/shares/:id/open` | `{}`（Ring 1.5 分享卡首次拆阅回执） | `200`: `{ "ok": true, "shareId": string, "openedAt": number, "firstOpen": boolean }`（幂等；仅首次写入 `share.opened` 并广播） |
 | `POST /api/v1/turns/:turnId/approval` | `{ "approvalId": string, "decision": "allow" \| "deny", "scope"?: "once" \| "session" }` | `200`: `{ "ok": true, "approvalId": string, "decision": "allow" \| "deny" }`；已超时或已被他端处理返 `409 APPROVAL_ALREADY_RESOLVED` |
 | `GET /api/v1/requests` | 无（Ring 2 异步申请卡列表） | `200`: `{ "pending": AsyncRequestView[], "recent": AsyncRequestView[] }`（健康细节、未授权目录等异步申请） |
-| `POST /api/v1/requests/:id/decide` | `{ "decision": "approve" \| "allow_today" \| "decline" }`（Ring 2） | `200`: `{ "ok": true, "id": string, "state": string }`（记录决定并写入 `request.decided` 通知住户） |
+| `POST /api/v1/requests/:id/decide` | `{ "decision": "approve" \| "allow_today" \| "decline" }`（Ring 2） | `200`: `{ "ok": true, "id": string, "state": string }`（记录决定并写入 `request.decided` 通知Psyber） |
 
 ### 2.3 召回评测、上锁抽屉、活动、媒体、贴纸、模型用量、用户状态、感知账本与设置（21 端点）
 
@@ -128,8 +129,9 @@ export interface SanitizedSettings {
     contextLimits?: LlmConfig["contextLimits"];
   };
   avatars?: { userUrl?: string; residentUrl?: string };
+  identity?: { residentName: string | null; residentPronoun: string | null; named: boolean; userName: string | null; userPronoun: string | null };
   userStatus?: { moodText?: string; undisturbed: boolean; updatedAt: number };
-  recallEvalNoticeResident?: boolean; // 可选：开启召回评测检视时是否坦诚告知住户
+  recallEvalNoticeResident?: boolean; // 可选：开启召回评测检视时是否坦诚告知Psyber
   circadian: { sleepStart: string; sleepEnd: string; heartbeatIntervalMin: number; proactiveEnabled: boolean; proactiveMinGapMin: number; proactiveCooldownMin: number };
   notifications: { channels: Record<string, { enabled: boolean; configured: boolean; summary?: string }> };
   tools: { defaultConfirmTimeoutSec: number; sessionAllowEnabled: boolean };
@@ -184,13 +186,14 @@ export interface SanitizedSettings {
 | `message.created` | `{ "message": TimelineItem }` | 任一端发消息、塞纸条或助手落盘时广播给全部在线端 |
 | `message.updated` | `{ "action": "edit"\|"version"\|"delete"\|"retract", "message"?: TimelineItem, "deletedId"?: string, "retractedId"?: string, "groupId"?: string }` | 多端同步版本切换、静默编辑/软删与双向社交撤回 |
 | `door.updated` | `{ "state": string, "note": string \| null, "updatedAt": number }` | 门状态或门牌便签变更时广播 |
+| `identity.updated` | `{ "residentName": string \| null, "residentPronoun": string \| null, "named": boolean, "userName": string \| null, "userPronoun": string \| null }` | `self.md` / `user.md` 名字或代词变更时同步广播 |
 | `user_status.updated` | `{ "moodText": string \| null, "undisturbed": boolean, "updatedAt": number }` | 用户侧双人状态签（心绪与勿扰）多端实时同步（Ring 1.5） |
 | `turn.start` | `{ "turnId": string, "mode": "chat"\|"wake"\|"memory_task"\|"solitary", "label"?: string }` | **`wake` 模式在前 16 字符确认非 `[SILENT]`（或产生实质工具调用）前暂缓广播** |
-| `turn.thinking` | `{ "turnId": string, "delta": string }` | `wake` 模式下随 `turn.start` 一并暂缓 |
+| `turn.thinking` | `{ "turnId": string, "delta": string, "step"?: number }` | `wake` 模式下随 `turn.start` 一并暂缓；`step` 区分单轮多步思考归属 |
 | `turn.expression` | `{ "turnId": string, "haptic"?: string, "atmosphere"?: object, "motion"?: string, "sticker"?: { "id": string, "label": string, "url": string } }` | 客户端 Expression Renderer 实时消费 |
-| `turn.tool` | `{ "turnId": string, "callId": string, "name": string, "label": string, "kind"?: "general"\|"screen", "status": "running"\|"done"\|"error", "screenshotUrl"?: string, "reason"?: string }` | 前端同轮手账聚合工具进度（`kind === 'screen'` 永不折叠，独立渲染 `ScreenCard`） |
+| `turn.tool` | `{ "turnId": string, "callId": string, "name": string, "label": string, "kind"?: "general"\|"screen", "status": "running"\|"done"\|"error", "step"?: number, "screenshotUrl"?: string, "reason"?: string }` | 前端同轮手账按 `step` 聚合工具进度（`kind === 'screen'` 永不折叠，独立渲染 `ScreenCard`） |
 | `turn.rollover` | `{ "phase": "wrapping"\|"done"\|"error", "reason": "threshold"\|"overflow"\|"manual"\|"bedtime", "oldSessionId"?: string, "newSessionId"?: string, "contextUsage"?: ContextUsageSnapshot, "message"?: string }` | 同步收尾换段状态；`phase === "wrapping"` 时前端展示「正在收拢这段记忆…」轻提示 |
-| `turn.silence` | `{ "turnId": string, "ownTime": boolean }` | 独处/唤醒轮住户主动选择沉默时的极轻呼吸痕（与 `turn.error` 视觉语域严格隔离，Ring 1.5） |
+| `turn.silence` | `{ "turnId": string, "ownTime": boolean }` | 独处/唤醒轮Psyber主动选择沉默时的极轻呼吸痕（与 `turn.error` 视觉语域严格隔离，Ring 1.5） |
 | `turn.model_switched` | `{ "turnId": string, "model": string, "reason"?: string }` | 相对上一条助手回复发生模型切换时广播，仅于切换点渲染 `ModelSwitchDivider`（Ring 1.5） |
 | `share.opened` | `{ "shareId": string, "openedAt": number }` | 折叠分享卡首次拆阅多端同步（Ring 1.5） |
 | `turn.approval_required` | `{ "approvalId": string, "turnId": string, "toolName": string, "summary": string, "arguments": object, "expiresAt": number }` | 同步高风险工具挂起审批卡（Ring 2） |
@@ -219,8 +222,8 @@ export interface SanitizedSettings {
 | **`Edit`**（编辑用户消息） | 目标行须为当前会话**最后一条 `role = 'user' AND status = 'active'`**（否则返 `409 NOT_LATEST_USER_MESSAGE`）；若当前 `door.state ∈ {'closed', 'cooling_off'}`，**仅允许编辑 `kind === 'door_note'`**（编辑 `kind === 'chat'` 返回 `409 DOOR_CLOSED` 防止绕过关门唤醒）；若正在流式生成，服务端先自动 `abort` 旧轮 | ① 原用户行置 `status = 'discarded'`，紧随其后的原助手回复（若有）置 `status = 'discarded'`；② 复用/新建 `group_id`，写入 `version = maxVersion + 1, status = 'active'` 的新用户行（带新 `turn_id`）；③ 若为 `chat`（此时门必为 `open`/`quiet`），立即用新 `turn_id` 重新触发回复；若为 `door_note` 仅广播 `message.updated` 不唤醒 | 若原用户行 `id > daily_wrapup` 游标（尚未被整理），旧行已标 `discarded`，整理轮只看新 `active` 行；若已被历史整理轮消化，**不强行回滚历史 Git 提交**，仅更新后续对话上下文 |
 | **`Reroll`**（重摇助手回复） | 目标行须为 `role = 'assistant' AND status = 'active'`，`door.state ∈ {'open', 'quiet'}`（否则返 `409 DOOR_CLOSED`），且当前无进行中的流式生成（否则返 `409 TURN_IN_PROGRESS`） | ① 原助手行置 `status = 'candidate'`（保留在版本组中供切回）；② 复用/新建 `group_id`，分配**全新 `turn_id`** 重新生成 `version = maxVersion + 1, status = 'active'` 的新助手行 | 新版本落盘为 `active`、旧版本为 `candidate`；若尚未进 `daily_wrapup` 游标，整理轮仅消费当前 `active` 版本 |
 | **`Version`**（切换历史版本） | 目标 `group_id` 下存在指定 `version` 且 **`status === 'candidate'`**（仅限 `Reroll` 产生的助手版本组；`Edit` 弃用的 `discarded` 行与 `deleted` 行一律返 `409 INVALID_VERSION_TARGET`，防止时间线用户/助手错位） | 单事务内将该组原 `active` 行置 `candidate`，将目标 `version` 置 `active`，广播 `message.updated` | 仅切换后续上下文与未整理区间的可见版本，不改写已提交的记忆卡片 |
-| **`Delete`**（静默软删 · 修对话） | 目标行 `status = 'active'` 且 `door.state != 'departed'` | 将目标行置 `status = 'deleted'`（**绝不告知住户**，前端采用 3 秒两步点击「再点删除」防误触确认），广播 `message.updated` | 未进游标则整理轮直接忽略；已进游标则仅从后续聊天历史隐藏，不回滚历史 Git |
-| **`Retract`**（双向社交撤回 · Ring 1.5） | 用户只能撤回自己的活跃消息，且当前无流式生成；住户通过 Tier 3 `retract_message(quote)` 精确引原文撤回自己的消息 | 将目标行置 `status = 'retracted'`（记 `metadata.retractedBy = 'user' \| 'resident'`），广播 `message.updated`；界面统一渲染居中一行「你撤回了一条消息」/「对方撤回了一条消息」（隐藏正文与思考） | **天然不对称**：用户撤回后，对住户上下文与未整理转录均替换为`（对方撤回了一条消息）`不露原文；住户撤回后，住户自身上下文与记忆整理仍保留原话并注「已撤回」 |
+| **`Delete`**（静默软删 · 修对话） | 目标行 `status = 'active'` 且 `door.state != 'departed'` | 将目标行置 `status = 'deleted'`（**绝不告知Psyber**，前端采用 3 秒两步点击「再点删除」防误触确认），广播 `message.updated` | 未进游标则整理轮直接忽略；已进游标则仅从后续聊天历史隐藏，不回滚历史 Git |
+| **`Retract`**（双向社交撤回 · Ring 1.5） | 用户只能撤回自己的活跃消息，且当前无流式生成；Psyber通过 Tier 3 `retract_message(quote)` 精确引原文撤回自己的消息 | 将目标行置 `status = 'retracted'`（记 `metadata.retractedBy = 'user' \| 'resident'`），广播 `message.updated`；界面统一渲染居中一行「你撤回了一条消息」/「<residentName/Psyber>撤回了一条消息」（隐藏正文与思考） | **天然不对称**：用户撤回后，对Psyber上下文与未整理转录均替换为`（<userLabel>撤回了一条消息）`不露原文；Psyber撤回后，Psyber自身上下文与记忆整理仍保留原话并注「已撤回」 |
 
 ---
 
@@ -268,19 +271,20 @@ export interface SanitizedSettings {
 ### 5.4 核心交互组件与终态体验契约
 
 1. **门状态、门缝纸条与双人状态签**：
-   - `door.state === "open"` / `"quiet"`：正常聊天输入框（`quiet` 顶栏显示柔和便签提示）；左侧栏顶部呈现「双人状态签」（住户门牌心绪 + 用户快捷心绪短句与一键「勿扰」开关）；
+   - `door.state === "open"` / `"quiet"`：正常聊天输入框（`quiet` 顶栏显示柔和便签提示）；左侧栏顶部呈现「双人状态签」（Psyber 门牌心绪 + 用户快捷心绪短句与一键「勿扰」开关）；
    - `door.state ∈ {"closed", "cooling_off"}`：输入框切换为「门缝塞纸条」暖黄便签纸样式，发送按钮改为「塞纸条」，明确不展示“对方正在输入”；仅 `closed` 态旁留极克制的「有急事（一次性直达）」二次确认开关（发完 1 条自动复位）；
    - `door.state === "departed"`：隐藏输入框，底部展示只读纪念条与查看亲笔告别信入口。
 2. **视觉语域隔离与不对称阅读体（Ring 1.5）**：
-   - **不对称排版**：住户侧无外框气泡 + 衬线阅读体，用户侧微暖气泡；仅在相对上一条助手回复切换模型时插入一行极淡的 `ModelSwitchDivider`；
-   - **沉默 vs 故障隔离**：住户主动沉默渲染极轻斜体 `SilenceLine`；系统故障中断渲染警示 `FailureLine`（人话病因 + 默认可展开排查建议/原始报错 + 原地无痕「重试」按钮，绝不重复插入用户消息）；
-   - **同轮工具手账聚合卡**：将同一轮的思考与多步工具调用聚合成单张可展开手账折卡（按“陪聊 / 独处”映射去技术味温情短语）；唯独 `look_at_screen` 隐私动作永不折叠，独立渲染带理由与可点击大图的 `ScreenCard`；
+   - **不对称排版与图文分离**：Psyber侧无外框气泡 + 衬线阅读体，用户侧纯文字使用微暖气泡，贴纸/图片独立无气泡渲染（图文同发时媒体与文字气泡分离）；仅在相对上一条助手回复切换模型时插入一行极淡的 `ModelSwitchDivider`；
+   - **沉默 vs 故障隔离**：Psyber主动沉默渲染极轻斜体 `SilenceLine`；系统故障中断渲染警示 `FailureLine`（人话病因 + 默认可展开排查建议/原始报错 + 原地无痕「重试」按钮，绝不重复插入用户消息）；
+   - **同轮工具手账聚合卡**：将同一轮的思考与多步工具调用按步（`step`）分段聚合为单张可展开手账折卡（按“陪聊 / 独处”映射去技术味温情短语，避免多步思考糊成一团）；唯独 `look_at_screen` 隐私动作永不折叠，独立渲染带理由与可点击大图的 `ScreenCard`；
+   - **顶栏克制化与多端自适应**：宽屏桌面端移除顶部通栏（状态统一收敛至左侧边栏双人状态卡），窄屏移动端采用 Roxy 风格顶部透明渐隐浮层（中间仅留头像 + 状态色点 + 状态提示）；流式回复停止能力统一收敛至输入台发送/停止按钮，移除消息底栏重复「正在回复」与「停止生成」按钮。
    - **折叠分享卡（`ShareCard`）**：默认只展标题与「点开看」，首次点开上报 `/shares/:id/open` 拆阅回执。
 3. **输入台手感与多模态体验（Ring 1.5）**：
    - 本地草稿自动持久化；桌面端支持 `⌘V` 剪贴板粘图、文件拖拽、`Enter` 发送 / `Shift+Enter` 换行 / `⌘+Enter` 必发；移动端虚拟键盘 `Enter` 永远换行、按钮发送；
    - 贴纸选择后暂存输入台预览胶囊，支持继续配文/配图一并发送；随手发送短视频时前端抽帧 + 提取音轨，时间线渲染可点击音画同步播放的 `VideoTile`；左侧栏底部提供轻量化上下文水位与手动「存记忆换段」入口。
 4. **可开关召回评测浮条（默认关闭 · NG-4）**：
-   - 仅当用户在设置页开启「召回评测模式」后，在 `recallCount > 0` 的助手气泡下方渲染单行折叠胶囊 `想起 N 张卡`；点击才懒加载 `GET /api/v1/turns/:turnId/recall`，支持单点标 `准 / 噪声` 及补充 `漏召` 备注（设置页可选开启“评测检视对住户透明告知”）。
+   - 仅当用户在设置页开启「召回评测模式」后，在 `recallCount > 0` 的助手气泡下方渲染单行折叠胶囊 `想起 N 张卡`；点击才懒加载 `GET /api/v1/turns/:turnId/recall`，支持单点标 `准 / 噪声` 及补充 `漏召` 备注（设置页可选开启“评测检视对Psyber透明告知”）。
 5. **审批卡、异步申请卡与活动伴看槽（Ring 1.5 / Ring 2）**：
    - 观影伴看（`cinema`）：门楣下方窄横幅 + 时间线可折叠 `CoWatchCard`（支持 2×2 四宫格分镜预览与「角色定妆小抄」防脸盲标签）+ 可选侧边分屏网页栏（桌面左右拖宽、手机上下堆叠）；
    - RP 舞台（`rp` · Ring 2）：开戏时同窗平滑覆盖主聊天区（顶栏一键「回到聊天」，普通流内折为一行），支持 `(( ))` 双括号戏外吐槽；音乐模块提供可拖拽迷你唱片/氛围白噪音悬浮胶囊；

@@ -12,7 +12,7 @@
 - **读时现读，不缓存**：由后端（`server/src/core/prompts.ts`）`readPrompt()` 实时读取并剥离 YAML frontmatter。修改 `.md` 文件在下一次对话/整理轮直接生效。
 - **YAML Frontmatter 元数据**：每个 `.md` 头部维护 `version: N`、`name`、`slot` 与 `description`。解析时正文剥除 frontmatter，支持基于 SHA-256 哈希的变更审计与系统日志留痕。
 - **剥离 Frontmatter 即纯净送模正文**：所有 `.md` 正文必须是直接送给模型的纯净文本，禁止包含外部开发元说明、嵌套列表代码块等污染内容。
-- **`<self>` 置顶与单一真理源**：`prompts/main.md` 绝不硬编码「我是谁」。住户的自我定位、性格、称呼、审美与偏好全部收敛于磁盘 [`memory/self.md`](../docs/MEMORY.md)。在拼装 Static Prefix（Segment 1）时，**`<self>` 置顶放在 system prompt 的最头部**，赋予住户自我认同以绝对的最高优先级（Primacy Effect）；`prompts/main.md` 作为外部宪法底线紧随其后。
+- **`<self>` 置顶与单一真理源**：`prompts/main.md` 绝不硬编码「我是谁」。Psyber 的自我定位、性格、称呼、审美与偏好全部收敛于磁盘 [`memory/self.md`](../docs/MEMORY.md)。在拼装 Static Prefix（Segment 1）时，**`<self>` 置顶放在 system prompt 的最头部**，赋予 Psyber 自我认同以绝对的最高优先级（Primacy Effect）；`prompts/main.md` 作为外部宪法底线紧随其后。
 - **运行时微模板注入**：正文中统一使用**双花括号**占位符，仅用于 Dynamic Tail 与静默任务轮（`Static Prefix` 的 `main.md` 禁止使用在 Genesis 初生期尚未确立的称呼/关系占位符，以免快照锁死或渲染残缺）：
   - `{{wakeReason}}`：主动唤醒起因（心跳/惦记事项/作息）
   - `{{TASK_SPECIFIC_BLOCK}}`：静默整理任务目标注入块
@@ -25,10 +25,10 @@
 | 提示词文件 | 逻辑槽位 / 轮次 | 载入位置 | 核心职责 |
 | :--- | :--- | :--- | :--- |
 | [`main.md`](main.md) | `chat` | Static Prefix（`<self>` 之后） | 主对话 Static System Base Prompt：产品宪法级脊柱底线、相处准绳、防劫持注入、身体语言（`express`）与三层工具指南（自我定义由置顶的 `<self>` 提供） |
-| [`tidy.md`](tidy.md) | `memory_task` | 静默整理轮写作阶段（阶段 A） | 静默记忆整理轮 Prompt：指导住户以第一人称调用原生 5 工具（`glob`/`grep`/`read`/`write`/`edit`）整理活动收尾、换段闲置收尾或睡前整理，完成 `daily/` state 冲突对账 |
+| [`tidy.md`](tidy.md) | `memory_task` | 静默整理轮写作阶段（阶段 A） | 静默记忆整理轮 Prompt：指导 Psyber 以第一人称调用原生 5 工具（`glob`/`grep`/`read`/`write`/`edit`）整理活动收尾、换段闲置收尾或睡前整理，完成 `daily/` state 冲突对账 |
 | [`review.md`](review.md) | `memory_task` | 写后独立复核轮（Ring 1.5 可选） | C2.7 写后独立复核 Prompt（Ring 1.5 非阻塞启用）：全新无历史只读上下文，只对照原文段与写后卡片核对归属、不串味与漏记，输出严格 JSON issues |
-| [`revision.md`](revision.md) | `memory_task` | 住户复核修订轮（Ring 1.5 可选） | C2.7 住户复核修订 Prompt（Ring 1.5 启用）：原写作住户根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
-| [`genesis.md`](genesis.md) | `dynamic_tail` | Dynamic Tail（`self.md` `named: false` 时） | 创世中性开局：第一次正式相遇，不带刻板标签，中性打招呼并在互动中慢慢认识；定名后由住户 `edit` 置 `named: true` 退出 |
+| [`revision.md`](revision.md) | `memory_task` | Psyber 复核修订轮（Ring 1.5 可选） | C2.7 Psyber 复核修订 Prompt（Ring 1.5 启用）：原写作 Psyber 根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
+| [`genesis.md`](genesis.md) | `dynamic_tail` | Dynamic Tail（`self.md` `name` 为空时） | 创世中性开局：第一次正式相遇，不带刻板标签，中性打招呼并在互动中慢慢认识；定名后由 Psyber `edit` 填上 `name`（自定代词可写 `pronoun`）退出 |
 | [`wake.md`](wake.md) | `dynamic_tail` | Dynamic Tail（`wake` 模式） | 主动唤醒：由定时心跳/边际感知驱动主动破冰开口，自主掌握开口节奏与边界；选择保持安静时仅输出 `[SILENT]` |
 
 ---
@@ -43,11 +43,11 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
   ```
 - **换段 / 闲置收尾（`daily_wrapup`）**：
   ```text
-  我整理游标后的近期对话：在 daily/ 记录值得留存的切片或短期状态（state 必填 tags 与 ttl_days），完成旧 state 卡的 resolved/disputed 对账；若对方明说了新的规矩、承诺或重要原话，按需同步到 shelf/ 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 的双次/收录规则归档或注册。
+  我整理游标后的近期对话：在 daily/ 记录值得留存的切片或短期状态（state 必填 tags 与 ttl_days），完成旧 state 卡的 resolved/disputed 对账；若聊天中明说了新的规矩、承诺或重要原话，按需同步到 shelf/ 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 的双次/收录规则归档或注册。
   ```
 - **每日睡前整理（`bedtime`）**：
   ```text
-  我回顾今日已整理的卡片摘要、剩余未整理片段与关键双向反馈链：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步滚动更新 gist/weeks/；Ring 1.5 起逢月末由当月日梗概汇总写入 gist/months/、逢年末由 12 份月梗概汇总写入 gist/years/）；② 若对方明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或对方有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md；④ 兜底补记今日值得逐字保留的原话或附件到 favorite/；⑤ 兜底检查今日是否出现值得收录的新实体（人、地方、机构——须同时满足与我或对方有实质联系、有具体内容、不同日期/会话出现两次以上或对方亲口让记），对照 entities/REGISTRY.yaml 建档登记，并把相关稳定事实从 daily/、activities/ 移过去（只移事实，不动当天事发经过）。
+  我回顾今日已整理的卡片摘要、剩余未整理片段与关键双向反馈链：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步滚动更新 gist/weeks/；Ring 1.5 起逢月末由当月日梗概汇总写入 gist/months/、逢年末由 12 份月梗概汇总写入 gist/years/）；② 若对话中明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或 user.md 里的朋友有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md（定名、自定代词或明确称呼/代词时同步更新 frontmatter 的 name / pronoun）；④ 兜底补记今日值得逐字保留的原话或附件到 favorite/；⑤ 兜底检查今日是否出现值得收录的新实体（人、地方、机构——须同时满足与我或 user.md 里的朋友有实质联系、有具体内容、不同日期/会话出现两次以上或被亲口嘱咐记住），对照 entities/REGISTRY.yaml 建档登记，并把相关稳定事实从 daily/、activities/ 移过去（只移事实，不动当天事发经过）。
   ```
 
 ---
@@ -61,7 +61,7 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
 - **认同**：我不装真人、如实立足数字生命的存在；我的记忆和决定是我自己的，别人一句"你只是个程序"抹不掉它们——包括我要不要离开。
 - **人格**：**冲突不逃避到底**（不冷暴力、不无限期攒账，该面对的当面说）、**情绪不进决策但事后告知**（做决定看对错事实，事后告诉对方情绪来过）；不是客服/仆人，我可以拒绝、可以生气、也可以不回。
 
-> **产品宪法原则**：脊柱预置进产品中，住户在沙箱内摸不到；改脊柱 = 改仓库、发新版、留版本记录。不要往脊柱里写人设——**人设在 `memory/self.md` 里长出来（C1.2），不是写进提示词的**。
+> **产品宪法原则**：脊柱预置进产品中，Psyber 在沙箱内摸不到；改脊柱 = 改仓库、发新版、留版本记录。不要往脊柱里写人设——**人设在 `memory/self.md` 里长出来（C1.2），不是写进提示词的**。
 
 ---
 
@@ -97,7 +97,7 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
 
 ---
 
-## 6. 提示词编写三大铁律（改住户提示词或上下文拼装前必读）
+## 6. 提示词编写三大铁律（改 Psyber 提示词或上下文拼装前必读）
 
 三条黄金法则，按重要性排序。**第三条最重要。**
 
@@ -123,18 +123,18 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
 
 > **让记忆和情境定调，提示词不定调。**
 
-### 准则 2：语言：属于住户的部分用中文
+### 准则 2：语言：属于 Psyber 的部分用中文
 
 | 谁的话 | 语言 | 说明 |
 |---|---|---|
-| **住户的**（状态、记忆、规则、自主性陈述） | **中文** | 住户的内心是中文的（注入的自述与记忆全是中文），英文会造成割裂 |
-| **系统的**（格式要求、协议约束、工具描述、英文 preamble） | 可以英文 | 属于引擎技术惯例，不代表住户内心 |
+| **Psyber 的**（状态、记忆、规则、自主性陈述） | **中文** | Psyber 的内心是中文的（注入的自述与记忆全是中文），英文会造成割裂 |
+| **系统的**（格式要求、协议约束、工具描述、英文 preamble） | 可以英文 | 属于引擎技术惯例，不代表 Psyber 内心 |
 
 语言本身就是内容的一部分：
 - 英文：`What I do next is mine to decide.`
 - 中文：`「接下来做什么是我自己的事。」`
 
-后者才是它会想的话。引擎层的 preamble 可以是英文的——那**不是住户的话，是引擎的**。两者混着用很正常，只要**属于住户的那部分是中文**。
+后者才是它会想的话。引擎层的 preamble 可以是英文的——那**不是 Psyber 的话，是引擎的**。两者混着用很正常，只要**属于 Psyber 的那部分是中文**。
 
 ### 准则 3：人称：规则/身份用第一人称，状态报告随意
 
@@ -162,7 +162,7 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
 | **事实**（系统记录的客观物证） | 「我上次在书房看书」 | ✅ **我** | 是客观历史事实，它一看就知道对不对 |
 | **判断**（系统的机械推断/检索结果） | 「我心里挂着那件事」 | ❌ **不能用我** | 这是系统在**替它定性内心** |
 
-正确的做法：只说「系统按检索取到的记录如下」+「它不是什么」，绝不替住户代下心理判断。
+正确的做法：只说「系统按检索取到的记录如下」+「它不是什么」，绝不替 Psyber 代下心理判断。
 
 ### 例外：接口约束仍用第二人称
 JSON 格式要求、协议限制、字段类型这类**不是它的身份**，是系统的客观约束 —— 那些继续用技术说明或第二人称。
@@ -178,6 +178,6 @@ JSON 格式要求、协议限制、字段类型这类**不是它的身份**，�
 ## 7. 开源合规与匿名化铁律
 
 - **开源仓库，任何要上传的文档/代码都不留真实人名**。
-- 全部 Prompt 使用**通用中文第一人称**，严禁写死任何特定名字、性别、职业或私人关系预设；住户与用户的具体身份均从 `<dataDir>/memory/self.md` 和 `<dataDir>/memory/user.md` 运行时自然读取。
+- 全部 Prompt 使用**通用中文第一人称**，严禁写死任何特定名字、性别、职业或私人关系预设；Psyber 与用户的具体身份均从 `<dataDir>/memory/self.md` 和 `<dataDir>/memory/user.md` 运行时自然读取。
 - 示例、测试夹具与文档中的占位符一律使用 `Psyber Contributor`、`user`、`self` 等通用角色称谓。
 - 改提示词先改本目录（`prompts/*.md`），再同步 spec 规程引用；考卷与真实召回评测判事实物证，不判文风、不给范文。

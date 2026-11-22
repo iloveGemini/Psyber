@@ -19,7 +19,11 @@ import {
   resolveEffectiveThinkingLevel,
   testModelConnection,
 } from "../llm/router.ts";
-import { applyGenesisMemory, getGenesisNamedStatus } from "../memory/genesis.ts";
+import {
+  applyGenesisMemory,
+  readIdentityProfile,
+  type IdentityProfile,
+} from "../memory/genesis.ts";
 import type { AppDeps } from "./app.ts";
 import { hashBearerToken } from "./app.ts";
 
@@ -34,7 +38,12 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
-function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials, mcp?: McpManager) {
+function sanitizeSettings(
+  cfg: PsyberConfig,
+  creds: StoredCredentials,
+  mcp?: McpManager,
+  identity?: IdentityProfile,
+) {
   const providers: Record<
     string,
     { kind: string; authMode: string; baseUrl?: string; authStatus: "configured" | "unset" }
@@ -89,6 +98,7 @@ function sanitizeSettings(cfg: PsyberConfig, creds: StoredCredentials, mcp?: Mcp
         ? { residentUrl: `/api/v1/media/${cfg.avatars.residentHash}` }
         : {}),
     },
+    ...(identity ? { identity } : {}),
     userStatus: {
       moodText: cfg.userStatus?.moodText ?? null,
       undisturbed: cfg.userStatus?.undisturbed === true,
@@ -201,9 +211,15 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
   app.get("/api/v1/genesis", async (c) => {
     const cfg = deps.getConfig();
-    const named = deps.dataDir
-      ? await getGenesisNamedStatus(deps.dataDir, deps.clock.now(), cfg.timezone)
-      : false;
+    const identity: IdentityProfile = deps.dataDir
+      ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
+      : {
+          residentName: null,
+          residentPronoun: null,
+          named: false,
+          userName: null,
+          userPronoun: null,
+        };
     const creds: StoredCredentials = deps.dataDir
       ? await loadCredentials(deps.dataDir)
       : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
@@ -213,7 +229,11 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
     return c.json({
       initialized: Boolean(cfg.genesisCompleted),
-      named,
+      named: identity.named,
+      residentName: identity.residentName,
+      residentPronoun: identity.residentPronoun,
+      userName: identity.userName,
+      userPronoun: identity.userPronoun,
       hasChatProvider,
       timezone: cfg.timezone,
       sleepWindow: { start: circadian.sleepStart, end: circadian.sleepEnd },
@@ -224,6 +244,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     let body: {
       residentName?: string;
       userName?: string;
+      userPronoun?: string;
       timezone?: string;
       sleepWindow?: { start?: string; end?: string };
       llm?: Partial<LlmConfig>;
@@ -256,7 +277,13 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     }
     cfg.genesisCompleted = true;
 
-    let named = Boolean(typeof body.residentName === "string" && body.residentName.trim());
+    let identity: IdentityProfile = {
+      residentName: body.residentName?.trim() || null,
+      residentPronoun: null,
+      named: Boolean(typeof body.residentName === "string" && body.residentName.trim()),
+      userName: body.userName?.trim() || null,
+      userPronoun: body.userPronoun?.trim() || null,
+    };
     if (deps.dataDir) {
       // BYOK API Key 直落 0600 权限的 credentials.json，绝不写入 config.json
       if (body.credentials && typeof body.credentials === "object") {
@@ -269,17 +296,26 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         await saveCredentials(deps.dataDir, creds);
       }
 
-      const memRes = await applyGenesisMemory({
+      await applyGenesisMemory({
         dataDir: deps.dataDir,
         memoryIndex: deps.memoryIndex,
         residentName: body.residentName,
         userName: body.userName,
+        userPronoun: body.userPronoun,
       });
-      named = memRes.named;
       await saveConfig(deps.dataDir, cfg);
+      identity = await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone);
+      deps.sse?.emit("identity.updated", { ...identity });
     }
 
-    return c.json({ ok: true, named });
+    return c.json({
+      ok: true,
+      named: identity.named,
+      residentName: identity.residentName,
+      residentPronoun: identity.residentPronoun,
+      userName: identity.userName,
+      userPronoun: identity.userPronoun,
+    });
   });
 
   // 媒体内容寻址上传与不可变 ETag 读取
@@ -359,10 +395,14 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
   // 脱敏设置读写（绝不返回任何明文令牌或密钥）
   app.get("/api/v1/settings", async (c) => {
+    const cfg = deps.getConfig();
     const creds = deps.dataDir
       ? await loadCredentials(deps.dataDir)
       : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
-    return c.json(sanitizeSettings(deps.getConfig(), creds, deps.mcp));
+    const identity = deps.dataDir
+      ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
+      : undefined;
+    return c.json(sanitizeSettings(cfg, creds, deps.mcp, identity));
   });
 
   app.patch("/api/v1/settings", async (c) => {
@@ -494,7 +534,10 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     }
 
     deps.onSettingsUpdated?.();
-    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps.mcp) });
+    const identity = deps.dataDir
+      ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
+      : undefined;
+    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps.mcp, identity) });
   });
 
   // Ring 1.5 外部 MCP 生态预设与单服手动重连

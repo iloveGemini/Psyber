@@ -61,6 +61,7 @@ class LeftArchivePanelContent extends StatelessWidget {
               const Spacer(),
               if (!isSidebar || onCollapse != null)
                 IconButton(
+                  key: isSidebar ? const Key('left_drawer_button') : null,
                   icon: Icon(
                     isSidebar ? PhosphorIconsLight.sidebarSimple : PhosphorIconsLight.x,
                     size: 18,
@@ -77,32 +78,35 @@ class LeftArchivePanelContent extends StatelessWidget {
           child: ListView(
             padding: const EdgeInsets.symmetric(vertical: 8),
             children: [
-              ListTile(
-                key: const Key('open_drawer_entry'),
-                leading: Icon(
-                  PhosphorIconsLight.lock,
-                  size: 18,
-                  color: colors.thresholdAmber,
+              ValueListenableBuilder<IdentityInfo>(
+                valueListenable: controller.identityNotifier,
+                builder: (context, identity, _) => ListTile(
+                  key: const Key('open_drawer_entry'),
+                  leading: Icon(
+                    PhosphorIconsLight.lock,
+                    size: 18,
+                    color: colors.thresholdAmber,
+                  ),
+                  title: const Text(
+                    '上锁的抽屉',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  subtitle: Text(
+                    '私密日记（拆封会留痕并让${identity.residentSubject}知道）',
+                    style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                  ),
+                  onTap: () {
+                    if (!isSidebar) {
+                      Navigator.of(context).pop();
+                    }
+                    unawaited(
+                      showDialog<void>(
+                        context: context,
+                        builder: (_) => DrawerModal(controller: controller),
+                      ),
+                    );
+                  },
                 ),
-                title: const Text(
-                  '上锁的抽屉',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-                ),
-                subtitle: Text(
-                  '私密日记（拆封会留痕并告知对方）',
-                  style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-                ),
-                onTap: () {
-                  if (!isSidebar) {
-                    Navigator.of(context).pop();
-                  }
-                  unawaited(
-                    showDialog<void>(
-                      context: context,
-                      builder: (_) => DrawerModal(controller: controller),
-                    ),
-                  );
-                },
               ),
               ValueListenableBuilder<DoorStatus>(
                 valueListenable: controller.doorNotifier,

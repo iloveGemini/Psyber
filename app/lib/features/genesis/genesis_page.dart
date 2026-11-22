@@ -30,6 +30,7 @@ class _GenesisPageState extends State<GenesisPage> {
   final _apiKeyController = TextEditingController();
 
   String _providerKind = 'openai';
+  String _userPronoun = '';
   bool _showCustomBaseUrl = false;
   bool _obscureKey = true;
   bool _submitting = false;
@@ -73,6 +74,7 @@ class _GenesisPageState extends State<GenesisPage> {
       await widget.controller.completeGenesis(
         residentName: _residentNameController.text.trim(),
         userName: _userNameController.text.trim(),
+        userPronoun: _userPronoun.isEmpty ? null : _userPronoun,
         timezone: _timezoneController.text.trim().isEmpty
             ? 'Asia/Shanghai'
             : _timezoneController.text.trim(),
@@ -151,7 +153,7 @@ class _GenesisPageState extends State<GenesisPage> {
                           key: const Key('genesis_resident_name'),
                           controller: _residentNameController,
                           decoration: const InputDecoration(
-                            labelText: '住户名字（留空则为中性初生）',
+                            labelText: 'Psyber 名字（留空则为中性初生）',
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -159,8 +161,45 @@ class _GenesisPageState extends State<GenesisPage> {
                           key: const Key('genesis_user_name'),
                           controller: _userNameController,
                           decoration: const InputDecoration(
-                            labelText: '希望对方怎么称呼你（可选）',
+                            labelText: '怎么称呼你（可选）',
                           ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Text(
+                              '你的代词',
+                              style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
+                            ),
+                            const SizedBox(width: 10),
+                            for (final opt in const [
+                              ('', '先不写'),
+                              ('他', '他'),
+                              ('她', '她'),
+                            ])
+                              Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: ChoiceChip(
+                                  key: Key('genesis_pronoun_${opt.$1.isEmpty ? 'none' : opt.$1}'),
+                                  label: Text(opt.$2),
+                                  selected: _userPronoun == opt.$1,
+                                  selectedColor: colors.accentSoft,
+                                  backgroundColor: colors.mineralCanvas,
+                                  side: BorderSide(
+                                    color: _userPronoun == opt.$1
+                                        ? colors.accentBorder
+                                        : colors.hairline,
+                                  ),
+                                  labelStyle: TextStyle(
+                                    fontSize: 12,
+                                    color: _userPronoun == opt.$1
+                                        ? colors.inkDeep
+                                        : colors.inkQuiet,
+                                  ),
+                                  onSelected: (_) => setState(() => _userPronoun = opt.$1),
+                                ),
+                              ),
+                          ],
                         ),
                         const Padding(
                           padding: EdgeInsets.symmetric(vertical: 18),

@@ -68,7 +68,7 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "filesystem",
     label: "本机只读目录 (Filesystem)",
-    description: "授权住户按需查看指定文件夹内的文档（请将路径改为允许访问的目录）",
+    description: "授权 Psyber 按需查看指定文件夹内的文档（请将路径改为允许访问的目录）",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/folder"],

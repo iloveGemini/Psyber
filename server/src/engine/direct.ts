@@ -19,6 +19,11 @@ import type {
 } from "../llm/client.ts";
 import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
 import { parseCardMarkdown } from "../memory/frontmatter.ts";
+import {
+  parseSelfIdentity,
+  readIdentityProfile,
+  type IdentityProfile,
+} from "../memory/genesis.ts";
 import { buildContinuityBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { recallMemories, type EmbeddingClient } from "../memory/recall.ts";
@@ -55,6 +60,20 @@ export interface ToolProgressEvent {
   label: string;
   kind: "general" | "screen";
   status: "running" | "done" | "error";
+  step?: number;
+}
+
+export interface JournalStepTool {
+  name: string;
+  label: string;
+  ok: boolean;
+  kind: "general" | "screen";
+}
+
+export interface JournalStepRecord {
+  step: number;
+  thinking?: string;
+  tools: JournalStepTool[];
 }
 
 export interface ContextUsageSnapshot {
@@ -65,13 +84,15 @@ export interface ContextUsageSnapshot {
 
 export interface TurnStreamCallbacks {
   onTurnStart?: (info: { turnId: string; mode: "chat" | "wake" }) => void;
-  onThinkingDelta?: (delta: string) => void;
+  onThinkingDelta?: (delta: string, step?: number) => void;
   onToolProgress?: (info: ToolProgressEvent) => void;
   onTextDelta?: (delta: string) => void;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
   onMessageRetracted?: (event: StoredEvent) => void;
   onAssistantPersisted?: (event: StoredEvent) => void;
+  onSystemNoticePersisted?: (event: StoredEvent) => void;
+  onIdentityUpdated?: (identity: IdentityProfile) => void;
   onModelSwitched?: (info: { turnId: string; model: string; reason?: string }) => void;
   onRequestApproval?: (req: ToolApprovalRequest) => Promise<ToolApprovalResult>;
   onTurnSilence?: (info: { turnId: string; ownTime: boolean }) => void;
@@ -157,6 +178,7 @@ export interface TurnCheckpoint {
     kind: "general" | "screen";
   }>;
   toolProgress: ToolProgressEvent[];
+  journalSteps?: JournalStepRecord[];
   expressions: ExpressionPayload[];
   shares: ShareCardRecord[];
   touchedMemoryPaths: string[];
@@ -490,12 +512,11 @@ export class DirectEngine {
     return this.staticPrefixSnapshot;
   }
 
-  /** 判断是否仍处于创世未定名状态（self.md named: false） */
+  /** 判断是否仍处于创世未定名状态（self.md 显式空 name: "" 或旧版 named: false） */
   private async isGenesisMode(): Promise<boolean> {
     const selfMd = await readOptionalMemoryFile(this.deps.dataDir, "self.md");
     if (!selfMd) return false;
-    const parsed = parseCardMarkdown("self.md", selfMd, this.deps.clock.now(), this.deps.clock.timeZone);
-    return parsed.rawFrontmatter.named === false;
+    return !parseSelfIdentity(selfMd, this.deps.clock.now(), this.deps.clock.timeZone).named;
   }
 
   /** 将用户消息与贴纸元数据渲染为自然文本（Spec 03 §2.2：[贴纸: <label>]） */
@@ -541,7 +562,11 @@ export class DirectEngine {
   }
 
   /** 构造 Segment 2：完整回放当前 sessionId 内的历史轮次（剥除历史 thinking；<continuity> 已冻结在 Static Prefix） */
-  private buildHistoryMessages(excludeEventId?: string, beforeSeq?: number): ChatMessage[] {
+  private buildHistoryMessages(
+    userLabel: string,
+    excludeEventId?: string,
+    beforeSeq?: number,
+  ): ChatMessage[] {
     const history: ChatMessage[] = [];
     const sessionEvents = this.deps.events.listSessionMessages(this.activeState.sessionId, {
       excludeEventId,
@@ -549,10 +574,10 @@ export class DirectEngine {
     });
     for (const ev of sessionEvents) {
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
-        // 双向社交撤回不对称性：用户撤回后，住户上下文只见占位看不到原文
+        // 双向社交撤回不对称性：用户撤回后，Psyber上下文只见占位看不到原文
         const content =
           ev.status === "retracted"
-            ? "（对方撤回了一条消息）"
+            ? `（${userLabel}撤回了一条消息）`
             : this.formatHistoryUserContent(ev);
         history.push({
           role: "user",
@@ -560,10 +585,10 @@ export class DirectEngine {
           timestamp: ev.createdAt,
         });
       } else if (ev.role === "assistant" && (ev.kind === "chat" || ev.kind === "wake")) {
-        // 跨轮历史严格剥除 thinking；住户自己撤回的消息在自身上下文里保留原话
+        // 跨轮历史严格剥除 thinking；Psyber自己撤回的消息在自身上下文里保留原话
         const content =
           ev.status === "retracted"
-            ? `${ev.content}\n（我后来撤回了这条消息，对方看不到内容）`
+            ? `${ev.content}\n（我后来撤回了这条消息，${userLabel}看不到内容）`
             : ev.content;
         history.push({ role: "assistant", content, timestamp: ev.createdAt });
       }
@@ -576,6 +601,7 @@ export class DirectEngine {
     mode: "chat" | "wake";
     turnId: string;
     userText: string;
+    userLabel: string;
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
@@ -593,6 +619,7 @@ export class DirectEngine {
     const tz = this.deps.clock.timeZone;
     const unreadNotesCount = this.deps.events.countUnreadDoorNotes();
     const circadianLabel = renderCircadianState(nowMs, tz, cfg.circadian);
+    const userLabel = opts.userLabel;
 
     const runtimeAttrs = [
       `time="${vagueTimeOfDay(nowMs, tz)}"`,
@@ -608,7 +635,7 @@ export class DirectEngine {
 
     if (opts.urgent) {
       ctxBlocks.push(
-        `<urgent_channel>对方在门关着时开启了「一次性紧急通道」发来这一条消息，发完通道已自动重新关上。</urgent_channel>`,
+        `<urgent_channel>${userLabel}在门关着时开启了「一次性紧急通道」发来这一条消息，发完通道已自动重新关上。</urgent_channel>`,
       );
     }
 
@@ -617,13 +644,13 @@ export class DirectEngine {
     if (cfg.userStatus?.moodText) userStatusParts.push(`心绪「${cfg.userStatus.moodText}」`);
     if (userStatusParts.length > 0) {
       ctxBlocks.push(
-        `<user_status>对方主动挂出的状态：${userStatusParts.join("；")}。</user_status>`,
+        `<user_status>${userLabel}主动挂出的状态：${userStatusParts.join("；")}。</user_status>`,
       );
     }
 
     if (cfg.recallEvalNoticeResident) {
       ctxBlocks.push(
-        `<eval_notice>对方当前开启了召回评测检视模式，可能会查看本轮召回的记忆卡片清单并做标注。</eval_notice>`,
+        `<eval_notice>${userLabel}当前开启了召回评测检视模式，可能会查看本轮召回的记忆卡片清单并做标注。</eval_notice>`,
       );
     }
 
@@ -633,7 +660,7 @@ export class DirectEngine {
         const readStatus = s.openedAt ? `已点开看（${vagueWhen(s.openedAt, nowMs, tz)}）` : "还没打开";
         return `《${s.title}》（${vagueWhen(s.createdAt, nowMs, tz)}分享；${readStatus}）`;
       });
-      ctxBlocks.push(`<shared_items>我最近分享给对方的：${shareParts.join("；")}</shared_items>`);
+      ctxBlocks.push(`<shared_items>我最近分享给${userLabel}的：${shareParts.join("；")}</shared_items>`);
     }
 
     // Spec 02 §2.2：按 events_notice 游标注入未消费的系统事实（privacy.peeked / share.opened / request.decided）
@@ -646,10 +673,10 @@ export class DirectEngine {
         const meta = ev.metadata ?? {};
         const title = typeof meta.title === "string" ? meta.title : "";
         if (ev.kind === "privacy.peeked") {
-          return `- 系统事实：用户在${when}拆封查看了上锁抽屉中的「${title || ev.content}」`;
+          return `- 系统事实：${userLabel}在${when}拆封查看了上锁抽屉中的「${title || ev.content}」`;
         }
         if (ev.kind === "share.opened") {
-          return `- 系统事实：用户在${when}打开阅读了你分享的「${title || ev.content}」`;
+          return `- 系统事实：${userLabel}在${when}打开阅读了你分享的「${title || ev.content}」`;
         }
         return `- 系统事实（${when}）：${ev.content}`;
       });
@@ -935,6 +962,13 @@ export class DirectEngine {
     let injectedNoticeMaxId: string | null;
     let recallCount: number;
 
+    const identity = await readIdentityProfile(
+      this.deps.dataDir,
+      this.deps.clock.now(),
+      this.deps.clock.timeZone,
+    );
+    const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
+
     if (cp) {
       systemPrompt = cp.systemPrompt;
       messages = [...cp.messages];
@@ -945,12 +979,17 @@ export class DirectEngine {
     } else {
       await this.ensureContinuityFrozen();
       systemPrompt = await this.getOrBuildStaticPrefix();
-      const history = this.buildHistoryMessages(opts.userEventId, opts.historyBeforeSeq);
+      const history = this.buildHistoryMessages(
+        userLabel,
+        opts.userEventId,
+        opts.historyBeforeSeq,
+      );
       initialHistoryCount = history.length;
       const dynamic = await this.buildDynamicUserMessage({
         mode: opts.mode,
         turnId,
         userText: opts.userText ?? "",
+        userLabel,
         stickerId: opts.stickerId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,
@@ -976,6 +1015,7 @@ export class DirectEngine {
       expressionCount: cp?.expressions.length ?? 0,
       expressions: cp ? [...cp.expressions] : [],
       shares: cp ? [...cp.shares] : [],
+      pendingDoorUpdates: [],
       signal: opts.signal,
       onExpression: (p) => opts.callbacks?.onExpression?.(p),
       onDoorUpdated: (s, n) => opts.callbacks?.onDoorUpdated?.(s, n),
@@ -985,16 +1025,16 @@ export class DirectEngine {
 
     // wake 模式在前 16 字符确认非 [SILENT]（或产生实质工具调用）前暂缓广播
     let streamStarted = opts.mode !== "wake" || Boolean(cp);
-    let pendingThinking = "";
+    const pendingThinkingChunks: Array<{ delta: string; step: number }> = [];
     let pendingText = "";
     const flushWakeStart = () => {
       if (streamStarted) return;
       streamStarted = true;
       opts.callbacks?.onTurnStart?.({ turnId, mode: opts.mode });
-      if (pendingThinking) {
-        opts.callbacks?.onThinkingDelta?.(pendingThinking);
-        pendingThinking = "";
+      for (const item of pendingThinkingChunks) {
+        opts.callbacks?.onThinkingDelta?.(item.delta, item.step);
       }
+      pendingThinkingChunks.length = 0;
       if (pendingText) {
         opts.callbacks?.onTextDelta?.(pendingText);
         pendingText = "";
@@ -1005,8 +1045,14 @@ export class DirectEngine {
       opts.callbacks?.onTurnStart?.({ turnId, mode: opts.mode });
       if (cp) {
         // 断点续跑：先向客户端补推前序已完成步骤的思考链、工具手账进度与前缀正文
-        if (cp.fullThinking) {
-          opts.callbacks?.onThinkingDelta?.(cp.fullThinking);
+        if (cp.journalSteps && cp.journalSteps.length > 0) {
+          for (const js of cp.journalSteps) {
+            if (js.thinking) {
+              opts.callbacks?.onThinkingDelta?.(js.thinking, js.step);
+            }
+          }
+        } else if (cp.fullThinking) {
+          opts.callbacks?.onThinkingDelta?.(cp.fullThinking, 0);
         }
         for (const tp of cp.toolProgress) {
           opts.callbacks?.onToolProgress?.({ ...tp, turnId });
@@ -1032,6 +1078,21 @@ export class DirectEngine {
       kind: "general" | "screen";
     }> = cp ? [...cp.toolSummary] : [];
     const toolProgress: ToolProgressEvent[] = cp ? [...cp.toolProgress] : [];
+    const journalSteps: JournalStepRecord[] = cp?.journalSteps
+      ? cp.journalSteps.map((s) => ({
+          step: s.step,
+          ...(s.thinking ? { thinking: s.thinking } : {}),
+          tools: [...s.tools],
+        }))
+      : [];
+    const ensureJournalStep = (stepNum: number): JournalStepRecord => {
+      let existing = journalSteps.find((s) => s.step === stepNum);
+      if (!existing) {
+        existing = { step: stepNum, tools: [] };
+        journalSteps.push(existing);
+      }
+      return existing;
+    };
 
     const cfgForTurn = this.deps.getConfig();
     const effectiveThinkingLevel = resolveEffectiveThinkingLevel(cfgForTurn);
@@ -1088,6 +1149,11 @@ export class DirectEngine {
         recordedToolCalls: [...recordedToolCalls],
         toolSummary: [...toolSummary],
         toolProgress: [...toolProgress],
+        journalSteps: journalSteps.map((s) => ({
+          step: s.step,
+          ...(s.thinking ? { thinking: s.thinking } : {}),
+          tools: [...s.tools],
+        })),
         expressions: [...toolCtx.expressions],
         shares: [...(toolCtx.shares ?? [])],
         touchedMemoryPaths: Array.from(toolCtx.touchedMemoryPaths),
@@ -1141,15 +1207,20 @@ export class DirectEngine {
             if (chunk.type === "thinking_delta") {
               if (chunk.delta.length > 0) {
                 producedOutputInAttempt = true;
+                if (stepThinking.length === 0 && fullThinking.length > 0) {
+                  fullThinking += "\n\n";
+                }
                 stepThinking += chunk.delta;
                 fullThinking += chunk.delta;
+                const js = ensureJournalStep(step);
+                js.thinking = (js.thinking ?? "") + chunk.delta;
               }
               if (chunk.signature) stepThinkingSig = chunk.signature;
               if (chunk.delta.length > 0) {
                 if (streamStarted) {
-                  opts.callbacks?.onThinkingDelta?.(chunk.delta);
+                  opts.callbacks?.onThinkingDelta?.(chunk.delta, step);
                 } else {
-                  pendingThinking += chunk.delta;
+                  pendingThinkingChunks.push({ delta: chunk.delta, step });
                 }
               }
             } else if (chunk.type === "text_delta") {
@@ -1322,6 +1393,7 @@ export class DirectEngine {
                 label: toolLabel,
                 kind: toolKind,
                 status: "running",
+                step,
               });
             }
 
@@ -1334,12 +1406,14 @@ export class DirectEngine {
               output: result.output,
             });
             if (!isEmbodiedOnly) {
-              toolSummary.push({
+              const summaryEntry: JournalStepTool = {
                 name: innerName,
                 label: toolLabel,
                 ok: result.ok,
                 kind: toolKind,
-              });
+              };
+              toolSummary.push(summaryEntry);
+              ensureJournalStep(step).tools.push(summaryEntry);
               const doneProgress: ToolProgressEvent = {
                 turnId,
                 callId: tc.id,
@@ -1347,6 +1421,7 @@ export class DirectEngine {
                 label: toolLabel,
                 kind: toolKind,
                 status: result.ok ? "done" : "error",
+                step,
               };
               toolProgress.push(doneProgress);
               opts.callbacks?.onToolProgress?.(doneProgress);
@@ -1370,6 +1445,22 @@ export class DirectEngine {
         break;
       }
 
+      const flushPendingDoorUpdates = () => {
+        if (!toolCtx.pendingDoorUpdates || toolCtx.pendingDoorUpdates.length === 0) return;
+        for (const upd of toolCtx.pendingDoorUpdates) {
+          const { event: doorEv } = this.deps.events.append({
+            sessionId: turnSessionId,
+            turnId,
+            role: "system",
+            kind: "door.updated",
+            content: upd.content,
+            metadata: { from: upd.from, to: upd.to, note: upd.note },
+          });
+          opts.callbacks?.onSystemNoticePersisted?.(doorEv);
+        }
+        toolCtx.pendingDoorUpdates.length = 0;
+      };
+
       // 更新盘中 Static Prefix 文件的 <prefix_delta>（不回改本会话 Static Prefix 快照）
       if (!lastError) {
         for (const rel of toolCtx.touchedMemoryPaths) {
@@ -1384,6 +1475,14 @@ export class DirectEngine {
       const touched = Array.from(toolCtx.touchedMemoryPaths);
       if (!lastError && touched.length > 0) {
         await commitMemoryPaths(this.deps.dataDir, touched, `memory(turn): ${turnId}`);
+        if (touched.includes("self.md") || touched.includes("user.md")) {
+          const updatedIdentity = await readIdentityProfile(
+            this.deps.dataDir,
+            this.deps.clock.now(),
+            this.deps.clock.timeZone,
+          );
+          opts.callbacks?.onIdentityUpdated?.(updatedIdentity);
+        }
       }
 
       const shareCount = toolCtx.shares?.length ?? 0;
@@ -1402,6 +1501,7 @@ export class DirectEngine {
       }
 
       if (isSilent) {
+        flushPendingDoorUpdates();
         if (thresholdReached) {
           const roll = await this.performRollover({
             reason: "threshold",
@@ -1455,12 +1555,16 @@ export class DirectEngine {
           fullThinking.length > 0 ||
           aborted)
       ) {
+        const nonEmptyJournalSteps = journalSteps.filter(
+          (s) => (s.thinking && s.thinking.trim().length > 0) || s.tools.length > 0,
+        );
         const metadata: Record<string, unknown> = {};
         if (opts.userEventId) metadata.inReplyTo = opts.userEventId;
         if (toolCtx.expressions.length > 0) metadata.expressions = toolCtx.expressions;
         if (shareCount > 0 && toolCtx.shares) metadata.shares = toolCtx.shares;
         if (recordedToolCalls.length > 0) metadata.toolCalls = recordedToolCalls;
         if (toolSummary.length > 0) metadata.toolSummary = toolSummary;
+        if (nonEmptyJournalSteps.length > 0) metadata.journalSteps = nonEmptyJournalSteps;
         if (activeModelId) metadata.model = activeModelId;
         if (lastUsage) metadata.usage = lastUsage;
         if (recallCount > 0) metadata.recallCount = recallCount;
@@ -1482,6 +1586,9 @@ export class DirectEngine {
           this.lastAssistantModel = activeModelId;
         }
       }
+
+      // 门状态系统提示必须在当轮助手消息落盘之后写入，保证时间线时序为「思考/操作/回复 → 门状态变更」
+      flushPendingDoorUpdates();
 
       if (!lastError && thresholdReached) {
         const cutoffSeq =
@@ -1525,6 +1632,20 @@ export class DirectEngine {
         ...(lastError ? { checkpoint: buildCheckpoint() } : {}),
       };
     } catch (err) {
+      if (toolCtx.pendingDoorUpdates && toolCtx.pendingDoorUpdates.length > 0) {
+        for (const upd of toolCtx.pendingDoorUpdates) {
+          const { event: doorEv } = this.deps.events.append({
+            sessionId: turnSessionId,
+            turnId,
+            role: "system",
+            kind: "door.updated",
+            content: upd.content,
+            metadata: { from: upd.from, to: upd.to, note: upd.note },
+          });
+          opts.callbacks?.onSystemNoticePersisted?.(doorEv);
+        }
+        toolCtx.pendingDoorUpdates.length = 0;
+      }
       const message = err instanceof Error ? err.message || "生成过程中发生未预期异常" : "生成过程中发生未预期异常";
       lastError = { code: "PROVIDER_ERROR", message, retryable: true };
       opts.callbacks?.onTurnError?.({ turnId, ...lastError });

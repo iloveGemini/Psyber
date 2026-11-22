@@ -16,7 +16,7 @@
    - 全库严禁直接调用 `Date.now()`、`new Date()` 获取未注入的系统时间；
    - 所有生命周期（作息、到期、冷静期、Token 刷新、心跳、每日热备命名与轮转）必须通过 `Clock.now()` 与 `clock.timeZone` 驱动，保证能在单测中以微秒级“快进 10 天”或“跨越夏令时”验证演化逻辑。
 3. **数据目录单点闭环，随拷随走（本地优先零外部状态）**：
-   - 单住户实例的一切状态（SQLite、Git、封条日记、媒体、凭证）严格收敛于 `<dataDir>` 内部；
+   - 单 Psyber 实例的一切状态（SQLite、Git、封条日记、媒体、凭证）严格收敛于 `<dataDir>` 内部；
    - 绝不依赖系统全局注册表、外部数据库或隐藏后台服务；迁移或灾备只需对 `<dataDir>` 做一致性归档。
 4. **备份不阻塞读写，提交不误伤工作区（稳态生产准绳）**：
    - 数据库热备份强制采用 SQLite 原生 `VACUUM INTO`（先写临时文件再原子 `rename`），单飞串行执行，不阻塞前台读写事务；
@@ -344,7 +344,7 @@ export async function performSqliteBackup(db: Database, dataDir: string, clock: 
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `PSYBER_DATA_DIR` | `~/.psyber/default` | 单住户数据目录（**开发试跑与自动化测试一律使用 `~/.psyber/test`**，遵守 `AGENTS.md` 隔离红线） |
+| `PSYBER_DATA_DIR` | `~/.psyber/default` | 单个 Psyber 数据目录（**开发试跑与自动化测试一律使用 `~/.psyber/test`**，遵守 `AGENTS.md` 隔离红线） |
 | `PSYBER_PORT` | `3721` | Hono HTTP / SSE 监听端口 |
 | `PSYBER_HOST` | `0.0.0.0` | 监听地址（默认局域网可达供移动端扫码直连，仅本机使用可设为 `127.0.0.1`） |
 

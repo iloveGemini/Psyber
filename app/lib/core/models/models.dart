@@ -74,6 +74,56 @@ class ConnectionProfile {
 }
 
 @immutable
+class IdentityInfo {
+  const IdentityInfo({
+    this.residentName,
+    this.residentPronoun,
+    this.named = false,
+    this.userName,
+    this.userPronoun,
+  });
+
+  static const IdentityInfo empty = IdentityInfo();
+
+  final String? residentName;
+  final String? residentPronoun;
+  final bool named;
+  final String? userName;
+  final String? userPronoun;
+
+  String get displayResidentName =>
+      (residentName != null && residentName!.trim().isNotEmpty)
+          ? residentName!.trim()
+          : 'Psyber';
+
+  String get residentSubject => displayResidentName;
+
+  String get avatarInitial {
+    final name = residentName?.trim();
+    if (name != null && name.isNotEmpty) {
+      return String.fromCharCode(name.runes.first);
+    }
+    return 'P';
+  }
+
+  factory IdentityInfo.fromJson(Map<String, dynamic> json) {
+    String? clean(Object? v) {
+      if (v is! String) return null;
+      final t = v.trim();
+      return t.isEmpty ? null : t;
+    }
+
+    return IdentityInfo(
+      residentName: clean(json['residentName']),
+      residentPronoun: clean(json['residentPronoun']),
+      named: json['named'] == true,
+      userName: clean(json['userName']),
+      userPronoun: clean(json['userPronoun']),
+    );
+  }
+}
+
+@immutable
 class GenesisStatus {
   const GenesisStatus({
     required this.initialized,
@@ -82,6 +132,10 @@ class GenesisStatus {
     required this.timezone,
     required this.sleepStart,
     required this.sleepEnd,
+    this.residentName,
+    this.residentPronoun,
+    this.userName,
+    this.userPronoun,
   });
 
   static const GenesisStatus completedDefault = GenesisStatus(
@@ -99,10 +153,28 @@ class GenesisStatus {
   final String timezone;
   final String sleepStart;
   final String sleepEnd;
+  final String? residentName;
+  final String? residentPronoun;
+  final String? userName;
+  final String? userPronoun;
+
+  IdentityInfo toIdentityInfo() => IdentityInfo(
+        residentName: residentName,
+        residentPronoun: residentPronoun,
+        named: named,
+        userName: userName,
+        userPronoun: userPronoun,
+      );
 
   factory GenesisStatus.fromJson(Map<String, dynamic> json) {
     final sleep = json['sleepWindow'];
     final sleepMap = sleep is Map<String, dynamic> ? sleep : const <String, dynamic>{};
+    String? clean(Object? v) {
+      if (v is! String) return null;
+      final t = v.trim();
+      return t.isEmpty ? null : t;
+    }
+
     return GenesisStatus(
       initialized: json['initialized'] == true,
       named: json['named'] == true,
@@ -110,6 +182,10 @@ class GenesisStatus {
       timezone: json['timezone'] as String? ?? 'Asia/Shanghai',
       sleepStart: sleepMap['start'] as String? ?? '23:30',
       sleepEnd: sleepMap['end'] as String? ?? '07:30',
+      residentName: clean(json['residentName']),
+      residentPronoun: clean(json['residentPronoun']),
+      userName: clean(json['userName']),
+      userPronoun: clean(json['userPronoun']),
     );
   }
 }
@@ -344,6 +420,7 @@ class ToolProgressItem {
     required this.label,
     required this.status,
     this.kind = 'general',
+    this.step,
     this.screenshotUrl,
     this.reason,
   });
@@ -353,6 +430,7 @@ class ToolProgressItem {
   final String label;
   final String status;
   final String kind;
+  final int? step;
   final String? screenshotUrl;
   final String? reason;
 
@@ -365,8 +443,54 @@ class ToolProgressItem {
       label: json['label'] as String? ?? (json['name'] as String? ?? ''),
       status: json['status'] as String? ?? 'running',
       kind: json['kind'] as String? ?? 'general',
+      step: (json['step'] as num?)?.toInt(),
       screenshotUrl: json['screenshotUrl'] as String?,
       reason: json['reason'] as String?,
+    );
+  }
+}
+
+@immutable
+class TurnJournalStep {
+  const TurnJournalStep({
+    required this.step,
+    this.thinking = '',
+    this.progressTools = const <ToolProgressItem>[],
+    this.summaryTools = const <ToolSummaryItem>[],
+  });
+
+  final int step;
+  final String thinking;
+  final List<ToolProgressItem> progressTools;
+  final List<ToolSummaryItem> summaryTools;
+
+  TurnJournalStep copyWith({
+    String? thinking,
+    List<ToolProgressItem>? progressTools,
+    List<ToolSummaryItem>? summaryTools,
+  }) {
+    return TurnJournalStep(
+      step: step,
+      thinking: thinking ?? this.thinking,
+      progressTools: progressTools ?? this.progressTools,
+      summaryTools: summaryTools ?? this.summaryTools,
+    );
+  }
+
+  factory TurnJournalStep.fromJson(Map<String, dynamic> json) {
+    final rawTools = json['tools'];
+    final tools = <ToolSummaryItem>[];
+    if (rawTools is List<dynamic>) {
+      for (final item in rawTools) {
+        if (item is Map<String, dynamic>) {
+          tools.add(ToolSummaryItem.fromJson(item));
+        }
+      }
+    }
+    return TurnJournalStep(
+      step: (json['step'] as num?)?.toInt() ?? 0,
+      thinking: json['thinking'] as String? ?? '',
+      summaryTools: tools,
     );
   }
 }
@@ -572,6 +696,7 @@ class TimelineItem {
     this.expressions = const <ExpressionPayload>[],
     this.shares = const <ShareCardItem>[],
     this.toolSummary = const <ToolSummaryItem>[],
+    this.journalSteps = const <TurnJournalStep>[],
     this.model,
     this.videoClip,
     this.recallCount,
@@ -599,6 +724,7 @@ class TimelineItem {
   final List<ExpressionPayload> expressions;
   final List<ShareCardItem> shares;
   final List<ToolSummaryItem> toolSummary;
+  final List<TurnJournalStep> journalSteps;
   final String? model;
   final VideoClipInfo? videoClip;
   final int? recallCount;
@@ -640,6 +766,15 @@ class TimelineItem {
       for (final item in rawTools) {
         if (item is Map<String, dynamic>) {
           toolSummary.add(ToolSummaryItem.fromJson(item));
+        }
+      }
+    }
+    final rawJournalSteps = json['journalSteps'] ?? metaMap['journalSteps'];
+    final journalSteps = <TurnJournalStep>[];
+    if (rawJournalSteps is List<dynamic>) {
+      for (final item in rawJournalSteps) {
+        if (item is Map<String, dynamic>) {
+          journalSteps.add(TurnJournalStep.fromJson(item));
         }
       }
     }
@@ -698,6 +833,7 @@ class TimelineItem {
       expressions: retracted ? const <ExpressionPayload>[] : expressions,
       shares: retracted ? const <ShareCardItem>[] : shares,
       toolSummary: retracted ? const <ToolSummaryItem>[] : toolSummary,
+      journalSteps: retracted ? const <TurnJournalStep>[] : journalSteps,
       model: rawModel is String && rawModel.isNotEmpty ? rawModel : null,
       videoClip: retracted
           ? null
@@ -723,6 +859,7 @@ class HistoryPage {
     this.nextBefore,
     this.activeTurnId,
     this.rolloverInProgress = false,
+    this.identity,
     this.contextUsage,
   });
 
@@ -732,6 +869,7 @@ class HistoryPage {
   final int latestEventSeq;
   final String? activeTurnId;
   final bool rolloverInProgress;
+  final IdentityInfo? identity;
   final ContextUsageInfo? contextUsage;
 
   factory HistoryPage.fromJson(Map<String, dynamic> json) {
@@ -745,6 +883,7 @@ class HistoryPage {
       }
     }
     final rawUsage = json['contextUsage'];
+    final rawIdentity = json['identity'];
     return HistoryPage(
       items: items,
       hasMore: json['hasMore'] == true,
@@ -752,6 +891,9 @@ class HistoryPage {
       latestEventSeq: (json['latestEventSeq'] as num?)?.toInt() ?? 0,
       activeTurnId: json['activeTurnId'] as String?,
       rolloverInProgress: json['rolloverInProgress'] == true,
+      identity: rawIdentity is Map<String, dynamic>
+          ? IdentityInfo.fromJson(rawIdentity)
+          : null,
       contextUsage: rawUsage is Map<String, dynamic>
           ? ContextUsageInfo.fromJson(rawUsage)
           : null,
@@ -934,6 +1076,7 @@ class SettingsSnapshot {
     this.soloContextLimit,
     this.userAvatarUrl,
     this.residentAvatarUrl,
+    this.identity,
     this.circadian = const CircadianSettings(),
     this.desktopNotifyEnabled = true,
     this.webhookEnabled = false,
@@ -953,6 +1096,7 @@ class SettingsSnapshot {
   final int? soloContextLimit;
   final String? userAvatarUrl;
   final String? residentAvatarUrl;
+  final IdentityInfo? identity;
   final CircadianSettings circadian;
   final bool desktopNotifyEnabled;
   final bool webhookEnabled;
@@ -1010,6 +1154,7 @@ class SettingsSnapshot {
     final rawAvatars = json['avatars'] is Map<String, dynamic>
         ? json['avatars'] as Map<String, dynamic>
         : const <String, dynamic>{};
+    final rawIdentity = json['identity'];
 
     final rawCircadian = json['circadian'] is Map<String, dynamic>
         ? json['circadian'] as Map<String, dynamic>
@@ -1049,6 +1194,9 @@ class SettingsSnapshot {
       soloContextLimit: (rawLimits['solo'] as num?)?.toInt(),
       userAvatarUrl: rawAvatars['userUrl'] as String?,
       residentAvatarUrl: rawAvatars['residentUrl'] as String?,
+      identity: rawIdentity is Map<String, dynamic>
+          ? IdentityInfo.fromJson(rawIdentity)
+          : null,
       circadian: CircadianSettings.fromJson(rawCircadian),
       desktopNotifyEnabled: desktopMap['enabled'] != false,
       webhookEnabled: webhookMap['enabled'] == true,

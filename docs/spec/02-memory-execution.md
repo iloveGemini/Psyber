@@ -39,7 +39,7 @@
 | :--- | :--- | :--- | :--- |
 | **`glob`** | `auto` | `pattern: string` | 从 `card_index` 读取（并允许附带 `REGISTRY.yaml`），按 `updated_at DESC` 排序，先按 §8.1 计算 `effectiveStatus(row, Clock.now())`，每行输出 `<path> [status=<effectiveStatus> \| <vagueWhen(row.updated_at)>]`，单次上限 200 条并提示总数与截断。 |
 | **`grep`** | `auto` | `pattern: string`, `path?: string`, `include_archived?: boolean`（默认 `false`） | 在 `memory/` 内按 `effectiveStatus` 跳过 `resolved` / `archived` 卡片（`faded` 保留在字面精查范围内以便显式追问时可翻出；未入 `card_index` 的 `REGISTRY.yaml` 仍参与全文检索；设 `include_archived: true` 时覆盖全量）。若 `pattern` 不是合法正则，自动退化为大小写不敏感字面匹配并在首行提示；输出 `<path>:<line>: <excerpt>`，最多 50 条命中、每条截断至 200 字符。 |
-| **`read`** | `auto` | `path: string`, `offset?: number`（默认 `0`）, `limit?: number`（默认 `8000`） | 读 `<dataDir>/memory/<path>`。若该路径在 `card_index` 中且有效状态为 `faded`，在返回值首行附客观提示 `[索引状态: faded（已过短期 TTL）]`；仅当处于**主对话轮且 `offset === 0`** 成功读取 `card_index` 卡片时，异步更新 `access_count += 1`、`last_accessed = Clock.now()`（不改写磁盘文件；翻页续读与静默整理轮不重复累加）。文件不存在时返回近似文件名 Top-3 建议（按前缀与编辑距离匹配），引导住户自救。 |
+| **`read`** | `auto` | `path: string`, `offset?: number`（默认 `0`）, `limit?: number`（默认 `8000`） | 读 `<dataDir>/memory/<path>`。若该路径在 `card_index` 中且有效状态为 `faded`，在返回值首行附客观提示 `[索引状态: faded（已过短期 TTL）]`；仅当处于**主对话轮且 `offset === 0`** 成功读取 `card_index` 卡片时，异步更新 `access_count += 1`、`last_accessed = Clock.now()`（不改写磁盘文件；翻页续读与静默整理轮不重复累加）。文件不存在时返回近似文件名 Top-3 建议（按前缀与编辑距离匹配），引导Psyber自救。 |
 | **`write`** | `guarded` | `path: string`, `content: string` | ① 禁止覆盖已存在的 `self.md` / `user.md`（返还自救报错：`self.md / user.md 禁止整篇覆写，请先 read 后用 edit 局部修改`）；② 目标为 `activities/REGISTRY.yaml` 或 `entities/REGISTRY.yaml` 时走 §3.2 写前 Schema 校验；③ 目标为 `daily/` 且 frontmatter `kind === "state"` 时校验 `tags` 非空，缺失则拒写并提示补齐 `tags` 与 `ttl_days`；④ 在 `MemoryWriteMutex` 保护下先写入同文件系统暂存区 `<dataDir>/.tmp/<uuid>.tmp`，执行 `fsync` 后原子 `rename` 落盘（绝不在 `memory/` 内创建临时文件）；⑤ 写完立刻同步刷新单文件 `card_index` + `card_fts` 并异步补向量；若为 `daily/` `status === "active"` `state` 卡且计算后的 `expires_at <= Clock.now()` 则提醒更新期限或新建卡（Ring 1.5 另附 §6.1 实时 tag 重叠提醒）。 |
 | **`edit`** | `guarded` | `path: string`, `old_string: string`, `new_string: string` | 前置拦截 `old_string === ""`（直接返回自救报错），其余与 `write` 共用全部前置守卫（允许局部编辑 `self.md` / `user.md`），落盘前执行两阶段唯一匹配替换（见 §1.3）。替换完成后同样校验 `REGISTRY.yaml` 与 `daily/` `state` `tags`，立即刷新单文件增量索引并检查上述过期提醒（Ring 1.5 另附 tag 重叠提醒）。 |
 
@@ -81,12 +81,12 @@ PSYBER-SEALED-V1
 2. **SQLite 零明文零向量**：`card_index`、`card_fts`、`card_embeddings`、`recall_traces`、`recall_feedback` 严禁出现任何 `private/` 记录，彻底杜绝向量检索或评测浮条意外透出私密日记。
 3. **拆封留痕边界与通知游标**：
    - AI 本人通过 Ring 1.5 独立工具 `drawer_read` / `drawer_write` 在内存中透明读写 `private/<name>.md`：**不写** `privacy.peeked` 事件；
-   - 用户通过 `POST /api/v1/drawer/:id/open` 或 CLI `psyber export --include-private` 拆封：**先**在同一事务内写入 `events (role='system', kind='privacy.peeked', session_id=activeSessionId || 'system', content='用户在 ' + channel + ' 拆封了上锁抽屉「' + title + '」', metadata={ drawerId, title, channel: 'app' | 'cli' })`，**再**返回解封正文；
-   - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind IN ('privacy.peeked', 'share.opened', 'request.decided') AND id > lastNoticedId` 组装 `<events_notice>`（例如 `系统事实：用户在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`、`系统事实：用户在 <vagueWhen> 打开阅读了你分享的「<title>」`；若用户开启了评测透明告知，则按状态每轮客观注明`系统事实：用户当前开启了召回评测检视模式`），绝不替住户预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
+   - 用户通过 `POST /api/v1/drawer/:id/open` 或 CLI `psyber export --include-private` 拆封：**先**在同一事务内写入 `events (role='system', kind='privacy.peeked', session_id=activeSessionId || 'system', content='拆封了上锁抽屉「' + title + '」'（CLI 为 '在备份导出时拆封了上锁抽屉「' + title + '」'）, metadata={ drawerId, title, channel: 'app' | 'cli' })`，**再**返回解封正文；
+   - **消费游标（`task_cursors['events_notice']`）**：每次 `chat` 或 `wake` 轮读取 `kind IN ('privacy.peeked', 'share.opened', 'request.decided') AND id > lastNoticedId` 组装 `<events_notice>`（以 `user.md` 中的称呼/代词填充主语，例如 `系统事实：<userLabel>在 <vagueWhen> 拆封查看了上锁抽屉中的「<title>」`、`系统事实：<userLabel>在 <vagueWhen> 打开阅读了你分享的「<title>」`；若用户开启了评测透明告知，则按状态每轮客观注明`系统事实：<userLabel>当前开启了召回评测检视模式`），绝不替Psyber预设情绪判断；仅当该轮**非静默结束**（即正常发送了回复/具身表达，或调用了 `door` 等工具；`wake` 纯 `[SILENT]` 且无工具调用时不推进）才将 `task_cursors['events_notice']` 推进至已注入的最大 `event.id`。
 
 ### 2.3 多尺度自传连续性 `<continuity>` 读取与拼装规程
 
-承接 `Spec 01` §2.5 与 `MEMORY.md` §2.1，`<continuity>` 是住户亲笔滚动的自传时间骨架 + 未入日梗概的近期日常笔记正文 + 上一段末尾原话，在新会话首轮开口前由 Direct Engine 调用 `server/src/memory/gist.ts` 组装并落盘定格至 `task_cursors['active_session']`：
+承接 `Spec 01` §2.5 与 `MEMORY.md` §2.1，`<continuity>` 是Psyber亲笔滚动的自传时间骨架 + 未入日梗概的近期日常笔记正文 + 上一段末尾原话，在新会话首轮开口前由 Direct Engine 调用 `server/src/memory/gist.ts` 组装并落盘定格至 `task_cursors['active_session']`：
 
 1. **分期磁盘结构与不重叠金字塔**：
    - `memory/gist/days/YYYY-MM.md`（每日 `### YYYY-MM-DD`，≲ 300 字）、`memory/gist/weeks/YYYY.md`（每周 `### YYYY-Www`，≲ 500 字）、`memory/gist/months/YYYY.md`（每月 `### YYYY-MM`，≲ 800 字）与 `memory/gist/years/YYYY.md`（每年 ≲ 1000 字）；
@@ -118,11 +118,12 @@ PSYBER-SEALED-V1
 | `date_kind` | 缺省 `ordinary` | `ordinary \| celebrate \| gentle \| deadline` |
 | `tags` | 字符串自动包为单元素数组，缺省 `[]`；`daily/` `kind: state` 写时必填非空 | `string[]`（归一化去重后以 JSON 存入 `card_index.tags`） |
 | `source` | 缺省 `live` | `live \| import` |
-| `named` | 仅 `self.md` 读取；**缺省视为 `true`**（向后兼容已有实例） | `boolean` |
+| `name` | 仅 `self.md` / `user.md` 读取；`self.md` 显式为空 `""` 时判定为未定名（注入 `genesis.md`），无该键的旧版档案兼容视为已定名 | `string` |
+| `pronoun` | 仅 `self.md` / `user.md` 读取；可选（`self.md` 初始为 `""`，不于创世页预设，由后续相处自主填写或留空） | `string` |
 
 ### 3.2 两份 `REGISTRY.yaml` 写前严格校验钩子
 
-任意 `write`/`edit` 触碰以下两个注册表文件时，沙箱在**落盘前**执行严格 YAML（禁重复键）+ Schema 校验，失败立即拒写并返还精确错误位置让住户自修：
+任意 `write`/`edit` 触碰以下两个注册表文件时，沙箱在**落盘前**执行严格 YAML（禁重复键）+ Schema 校验，失败立即拒写并返还精确错误位置让Psyber自修：
 
 1. **`activities/REGISTRY.yaml`**：
    ```ts
@@ -328,7 +329,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 ### 5.2 单队列游标查询（Ring 1 极简版；`digested_activity_spans` 于 Ring 1.5 启用）
 
-- **Ring 1 单队列连续消费**：`daily_wrapup`（75% 自动异步换段或 Ring 1.5 手动「存记忆换段」触发）与 `bedtime`（每日睡眠窗触发）共享同一单调游标 `task_cursors['daily_wrapup']`，按 `seq ASC` 连续拉取 `status = 'active'`（Ring 1.5 对 `status = 'retracted'` 执行不对称转录：用户撤回的仅转录为`（对方撤回了一条消息）`不露原文，住户撤回的保留原话并标注`[我随后撤回了这条消息]`）的 `chat / wake / door_note`（显式标注门缝纸条且**绝不推进 `door_notes_read`**），按 `TASK_BUDGET = 10_000` 字分批提交推进游标；**Ring 1 暂不建 `digested_activity_spans`、不做进行中活动前沿截断**，待 Ring 1.5 接入 `ActivityPlugin` 时启用下列完整 span 过滤 SQL：
+- **Ring 1 单队列连续消费**：`daily_wrapup`（75% 自动异步换段或 Ring 1.5 手动「存记忆换段」触发）与 `bedtime`（每日睡眠窗触发）共享同一单调游标 `task_cursors['daily_wrapup']`，按 `seq ASC` 连续拉取 `status = 'active'`（Ring 1.5 对 `status = 'retracted'` 执行不对称转录：用户撤回的仅转录为`（<userLabel>撤回了一条消息）`不露原文，Psyber撤回的保留原话并标注`[我随后撤回了这条消息]`）的 `chat / wake / door_note`（显式标注门缝纸条且**绝不推进 `door_notes_read`**），按 `TASK_BUDGET = 10_000` 字分批提交推进游标；**Ring 1 暂不建 `digested_activity_spans`、不做进行中活动前沿截断**，待 Ring 1.5 接入 `ActivityPlugin` 时启用下列完整 span 过滤 SQL：
   ```sql
   SELECT * FROM events e
   WHERE e.status = 'active'
@@ -346,7 +347,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 - **`bedtime` 执行顺序**：
   1. 先循环调用 `daily_wrapup` 排空游标之后剩余未整理对话；
   2. 提取**上次 `bedtime` 以来（`updated_at >= meta.last_run_at`，首次取当日零点）**新写/修改的卡片摘要，以及**当日关键双向反馈链（`prev → acts → next`）**：筛选自 `last_run_at` 以来包含 `tool_calls`、`express`、`door` 状态变化或连续多轮呼应的关键 `(user → assistant → next_user)` 片段（每条仅取正文与工具动作摘要，总预算上限 `4000` 字符）；
-  3. 若当日恰逢 ISO 周末（周日）、月末或年末，自动一并注入当月 `gist/days/YYYY-MM.md`（或当年 `gist/months/YYYY.md`）供住户滚动汇总；
+  3. 若当日恰逢 ISO 周末（周日）、月末或年末，自动一并注入当月 `gist/days/YYYY-MM.md`（或当年 `gist/months/YYYY.md`）供Psyber滚动汇总；
   4. 成功后将 `task_cursors['bedtime']` 推进至当前最新 `event.id`，并在 `meta_json` 记下 `{ last_gist_date, last_run_at, last_commit_sha }`（保证同日不重复触发且不错过昨日深夜睡前后的新增卡片）。
 
 ### 5.3 异常回滚与崩溃自愈
@@ -360,7 +361,7 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 ## 6. C2.7 冲突对账与写后独立复核协议（Ring 1 仅注入未关闭 `state` 清单；下列细则于 Ring 1.5 按实测按需启用）
 
-> **Ring 1 极简边界**：Ring 1 整理轮默认注入全部未关闭的 `daily/` `state` 卡清单供住户第一人称改 `resolved`，**暂不启用写时 tag 重叠拦截与 B/C 复核修订轮**；Ring 1.5 若启用复核，复核异常仅记告警日志，**绝不回滚阶段 A 已落盘的合法卡片**。
+> **Ring 1 极简边界**：Ring 1 整理轮默认注入全部未关闭的 `daily/` `state` 卡清单供Psyber第一人称改 `resolved`，**暂不启用写时 tag 重叠拦截与 B/C 复核修订轮**；Ring 1.5 若启用复核，复核异常仅记告警日志，**绝不回滚阶段 A 已落盘的合法卡片**。
 
 ### 6.1 `daily/` `state` 冲突对账算法（Ring 1.5）
 
@@ -427,7 +428,7 @@ const FILLER_EXACT = new Set([
 
 ### 7.2 候选过滤、时间衰减与向量拼接口径
 
-- **全局排除集合**：`private/*`（物理不在库）、已常驻静态前缀/历史锚点的文件（`self.md`、`user.md`、`shelf/*`、`gist/*`），以及 `status IN ('resolved', 'archived', 'faded')`（`faded` 仅退出自动召回，用户显式追问时住户仍可通过 `grep`/`read` 翻出）；
+- **全局排除集合**：`private/*`（物理不在库）、已常驻静态前缀/历史锚点的文件（`self.md`、`user.md`、`shelf/*`、`gist/*`），以及 `status IN ('resolved', 'archived', 'faded')`（`faded` 仅退出自动召回，用户显式追问时Psyber仍可通过 `grep`/`read` 翻出）；
 - **单卡向量文本拼接口径**（保证 `card_embeddings` 一行一卡）：
   ```text
   标题：<title>
@@ -488,7 +489,7 @@ const FILLER_EXACT = new Set([
 3. **字符预算控制与状态/忌日客观标记（默认 `RECALL_CHAR_BUDGET = 3200` 字符）**：
    - 按固定优先级依次装填：`轨道 1 主卡 > 轨道 1 兄弟卡 > 轨道 2 跨活动互文 > 日常近因兜底`；
    - 单卡完整正文若超出剩余预算（且剩余预算 `≥ 160` 字符），按「保留前 70%（受总剩余预算扣除省略号与末句上限约束）+ 省略号 `…（正文略，如需细节可 read 全文）` + 保留末句」截断，保证拼接后总长严格 `≤` 剩余预算；剩余 `< 160` 字符则停止装填后续卡片；
-   - 客观附加标记（不替住户下心理判断）：若卡片 `status === 'disputed'`，标题行附加 `[待确认/有分歧]` 并附一行客观核实提示；若 `date_kind === 'gentle'`，标题行附加 `[敏感忌日·轻声对待]`（严禁自动欢庆）。
+   - 客观附加标记（不替Psyber下心理判断）：若卡片 `status === 'disputed'`，标题行附加 `[待确认/有分歧]` 并附一行客观核实提示；若 `date_kind === 'gentle'`，标题行附加 `[敏感忌日·轻声对待]`（严禁自动欢庆）。
 
 ### 7.6 真实 Dynamic Tail 注入样例（严守「系统只报事实、不代下心理判断」红线）
 
@@ -516,24 +517,24 @@ const FILLER_EXACT = new Set([
 ### 8.1 `daily/` 短期状态生命周期状态机
 
 ```text
-                用户说"好了"/亲口纠正（住户改卡）
+                用户说"好了"/亲口纠正（Psyber改卡）
              ┌───────────────────────────────────────┐
              ▼                                       │
-          [resolved] ◄── 后续核实定论 ── [disputed] ◄─┴── 对账发现矛盾（住户标卡+挂 shelf/threads.md）
+          [resolved] ◄── 后续核实定论 ── [disputed] ◄─┴── 对账发现矛盾（Psyber标卡+挂 shelf/threads.md）
              ▲                              ▲
              │                              │
         [active] ───────────────────────────┘
              │
              │ 到达 expires_at（系统仅更新索引层 card_index.status，绝不后台代改 Markdown）
              ▼
-          [faded] ── 复发/重提时由住户主动延后 expires_at 或新建卡 ──► [active]
+          [faded] ── 复发/重提时由Psyber主动延后 expires_at 或新建卡 ──► [active]
              │
-             └── 长期封存（住户改卡）──► [archived]
+             └── 长期封存（Psyber改卡）──► [archived]
 ```
 
 - **有效状态函数**：`effectiveStatus(row, nowMs) = (row.space === 'daily' && row.kind === 'state' && row.status === 'active' && row.expires_at !== null && row.expires_at <= nowMs) ? 'faded' : row.status`；
-- **不代笔铁律落地**：到达 `expires_at` 后，系统**只将 `card_index.status` 置为 `faded`**，使其立刻退出常规召回与近期背景，**绝不偷偷修改 `<dataDir>/memory/daily/*.md` 的磁盘正文**（保住 C2.1 第一人称主权与零后台代写）；若后续旧伤复发或重提需在原卡续用，`read` 会附带 `[索引状态: faded]` 提示，由住户自行 `edit` 更新 `expires_at`（或 `created` / `ttl_days`）或改建新卡。
-- **分歧卡无过期**：`status === 'disputed'` 的卡不设 `expires_at`（见 §3.1，写时自动清除），因此永不参与 `expireOverdueStateCards` 巡逻；由 `disputed` 回到 `active` 时，住户可显式填写 `expires_at`，未填则按 §3.1 以当日（`updated` 本地日期）`+ ttl_days` 重新计时（不沿用旧 `created` 导致立刻过期）。
+- **不代笔铁律落地**：到达 `expires_at` 后，系统**只将 `card_index.status` 置为 `faded`**，使其立刻退出常规召回与近期背景，**绝不偷偷修改 `<dataDir>/memory/daily/*.md` 的磁盘正文**（保住 C2.1 第一人称主权与零后台代写）；若后续旧伤复发或重提需在原卡续用，`read` 会附带 `[索引状态: faded]` 提示，由Psyber自行 `edit` 更新 `expires_at`（或 `created` / `ttl_days`）或改建新卡。
+- **分歧卡无过期**：`status === 'disputed'` 的卡不设 `expires_at`（见 §3.1，写时自动清除），因此永不参与 `expireOverdueStateCards` 巡逻；由 `disputed` 回到 `active` 时，Psyber可显式填写 `expires_at`，未填则按 §3.1 以当日（`updated` 本地日期）`+ ttl_days` 重新计时（不沿用旧 `created` 导致立刻过期）。
 
 ### 8.2 `vagueWhen(targetMs, nowMs, timeZone)` 确定性渲染规程
 

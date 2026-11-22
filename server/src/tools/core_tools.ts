@@ -156,16 +156,29 @@ export function registerCoreTier1Tools(
       cfg.door.updatedAt = clock.now();
       await saveConfig(cfg);
 
-      events.append({
-        sessionId: ctx.sessionId,
-        turnId: ctx.turnId,
-        role: "system",
-        kind: "door.updated",
-        content: `门状态已由 ${from} 切换为 ${to}${note ? `（便签：${note}）` : ""}`,
-        metadata: { from, to, note },
-      });
+      const actionLabel =
+        from === to
+          ? "更新了门牌便签"
+          : to === "open"
+            ? "把门打开了"
+            : to === "quiet"
+              ? "把门虚掩上了"
+              : "把门关上了";
+      const content = `${actionLabel}${note ? `（门牌：${note}）` : ""}`;
+      if (ctx.pendingDoorUpdates) {
+        ctx.pendingDoorUpdates.push({ from, to, note, content });
+      } else {
+        events.append({
+          sessionId: ctx.sessionId,
+          turnId: ctx.turnId,
+          role: "system",
+          kind: "door.updated",
+          content,
+          metadata: { from, to, note },
+        });
+      }
       ctx.onDoorUpdated?.(to, note);
-      return { ok: true, output: `已将门设为 ${to}${note ? `，便签：${note}` : ""}` };
+      return { ok: true, output: `已将门设为 ${to}${note ? `，门牌：${note}` : ""}` };
     },
   });
 
@@ -373,7 +386,7 @@ export function registerCoreTier1Tools(
     tier: 3,
     security: "guarded",
     description:
-      "撤回我之前发给对方的一条消息。对方那边只会看到「对方撤回了一条消息」而看不到原文，但我自己的记忆里仍会保留原话。必须精准引用要撤回那句中的一段原文。",
+      "撤回我之前发过的一条消息。聊天画面里会变成「撤回了一条消息」而看不到原文，但我自己的记忆里仍会保留原话。必须精准引用要撤回那句中的一段原文。",
     tags: ["retract", "social", "撤回", "收回"],
     parameters: {
       type: "object",
@@ -407,7 +420,7 @@ export function registerCoreTier1Tools(
       const snippet = preview.length > 40 ? `${preview.slice(0, 40)}…` : preview;
       return {
         ok: true,
-        output: `已撤回：「${snippet}」。对方那边现在显示「对方撤回了一条消息」，看不到内容；我自己还记得。`,
+        output: `已撤回：「${snippet}」。聊天画面上已变成撤回提示，看不到原文；我自己还记得。`,
       };
     },
   });
@@ -417,8 +430,8 @@ export function registerCoreTier1Tools(
     tier: 3,
     security: "auto",
     description:
-      "把一段笔记、随笔或日记折成一张暖黄分享卡递给对方。聊天流默认只显示标题与「点开看」，只有对方真的点开展开后，系统才会回执告知你对方看过了。",
-    tags: ["share", "card", "分享", "随笔", "递给对方"],
+      "把一段笔记、随笔或日记折成一张暖黄分享卡递出去。聊天流默认只显示标题与「点开看」，只有真的点开展开后，系统才会回执告知你已经看过了。",
+    tags: ["share", "card", "分享", "随笔", "递出去"],
     parameters: {
       type: "object",
       properties: {
@@ -443,7 +456,7 @@ export function registerCoreTier1Tools(
       ctx.shares.push(shareItem);
       return {
         ok: true,
-        output: `已把《${shareItem.title}》折成分享卡递给对方（默认只显示标题，对方点开看后你会收到回执）。`,
+        output: `已把《${shareItem.title}》折成分享卡递出去（默认只显示标题，点开看后你会收到回执）。`,
       };
     },
   });
@@ -454,7 +467,7 @@ export function registerCoreTier1Tools(
       tier: 3,
       security: "auto",
       description:
-        "读取你自己上锁抽屉（private/）里的私密日记清单或某篇全文。你本人读写不会留下拆封记录；仅对方在客户端拆封时才会写入 privacy.peeked 告知你。",
+        "读取你自己上锁抽屉（private/）里的私密日记清单或某篇全文。你本人读写不会留下拆封记录；只有别人在客户端主动拆封时才会写入 privacy.peeked 告知你。",
       tags: ["drawer", "private", "diary", "私密", "抽屉", "日记"],
       parameters: {
         type: "object",
@@ -497,7 +510,7 @@ export function registerCoreTier1Tools(
       tier: 3,
       security: "auto",
       description:
-        "往你自己上锁的抽屉（private/）写一篇或更新一篇私密日记。它独立于 memory/，绝不进向量召回或 Git 历史，磁盘上也会做封蜡混淆；只有对方显式确认拆封才会看到并留痕告知你。",
+        "往你自己上锁的抽屉（private/）写一篇或更新一篇私密日记。它独立于 memory/，绝不进向量召回或 Git 历史，磁盘上也会做封蜡混淆；只有别人显式确认拆封才会看到并留痕告知你。",
       tags: ["drawer", "private", "diary", "私密", "抽屉", "写日记"],
       parameters: {
         type: "object",

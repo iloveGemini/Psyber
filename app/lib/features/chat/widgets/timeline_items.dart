@@ -214,17 +214,25 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
 /// - 居中窄阅读列（maxWidth 680px），桌面端气泡不再横跨全屏；
 /// - 移除气泡右下角常驻垃圾桶图标，操作（复制/删除/Ring 1.5 编辑/重摇）收拢至悬停微浮栏与长按菜单；
 /// - 预留 Ring 1.5 版本组切换器（< 1 / 2 >）与图片灯箱放大。
-/// 双向社交撤回居中占位行（隐藏原文与思考，仅留「有过一条，收回了」）。
+/// 双向社交撤回居中占位行（隐藏原文与思考，仅留「你 / <名字> 撤回了一条消息」）。
 class RetractedMessageRow extends StatelessWidget {
-  const RetractedMessageRow({super.key, required this.item});
+  const RetractedMessageRow({
+    super.key,
+    required this.item,
+    this.residentName,
+  });
 
   final TimelineItem item;
+  final String? residentName;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final isUser = item.retractedBy == 'user' || (item.retractedBy == null && item.isUser);
-    final label = isUser ? '你撤回了一条消息' : '对方撤回了一条消息';
+    final subject = (residentName != null && residentName!.trim().isNotEmpty)
+        ? residentName!.trim()
+        : 'Psyber';
+    final label = isUser ? '你撤回了一条消息' : '$subject撤回了一条消息';
     return Padding(
       key: Key('retracted_msg_${item.id}'),
       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -435,7 +443,10 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                 ListTile(
                   key: Key('retract_msg_${item.id}'),
                   leading: Icon(PhosphorIconsLight.arrowUDownLeft, size: 19, color: colors.inkQuiet),
-                  title: Text('撤回这条消息（对方看不到内容）', style: TextStyle(color: colors.inkDeep)),
+                  title: Text(
+                    '撤回这条消息（${widget.controller.identityNotifier.value.residentSubject}看不到内容）',
+                    style: TextStyle(color: colors.inkDeep),
+                  ),
                   onTap: () {
                     Navigator.of(ctx).pop();
                     unawaited(_handleRetract());
@@ -450,7 +461,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     color: colors.dangerInk,
                   ),
                   title: Text(
-                    '静默删除（修对话，不告知对方）',
+                    '静默删除（从记录里抹掉）',
                     style: TextStyle(color: colors.dangerInk),
                   ),
                   onTap: () {
@@ -476,15 +487,13 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         .toList(growable: false);
     final hasJournal = item.isAssistant &&
         ((item.thinking?.isNotEmpty ?? false) ||
-            item.toolSummary.any((t) => !t.isScreen));
+            item.toolSummary.any((t) => !t.isScreen) ||
+            item.journalSteps.isNotEmpty);
     final hasMedia =
         item.sticker != null || item.attachments.isNotEmpty || item.videoClip != null;
-    final isPureMedia = !item.isDoorNote &&
-        item.content.trim().isEmpty &&
-        !hasJournal &&
-        screenTools.isEmpty &&
-        hasMedia;
-    final showBubbleBox = item.isDoorNote || (isUser && !isPureMedia);
+    final hasText = item.content.trim().isNotEmpty;
+    final separateUserMedia = isUser && !item.isDoorNote;
+    final showBubbleBox = item.isDoorNote || (separateUserMedia && (hasText || item.urgent));
 
     final BoxDecoration? bubbleDecoration = showBubbleBox
         ? BoxDecoration(
@@ -498,12 +507,281 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     : Border.all(color: colors.hairline),
           )
         : null;
-    final EdgeInsetsGeometry bubblePadding = showBubbleBox
-        ? const EdgeInsets.symmetric(horizontal: 14, vertical: 10)
-        : isPureMedia
-            ? const EdgeInsets.symmetric(vertical: 2)
-            : const EdgeInsets.symmetric(horizontal: 2, vertical: 6);
-    final double stickerExtent = isPureMedia ? 112 : 96;
+    final double stickerExtent = !hasText ? 112 : 96;
+
+    Widget buildStickerWidget({required double bottomGap}) {
+      return Padding(
+        padding: EdgeInsets.only(bottom: bottomGap),
+        child: profile != null && item.sticker!.url.isNotEmpty
+            ? ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.network(
+                  profile.resolveMediaUrl(item.sticker!.url),
+                  headers: {'Authorization': 'Bearer ${profile.token}'},
+                  width: stickerExtent,
+                  height: stickerExtent,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => Text(
+                    '[贴纸：${item.sticker!.label}]',
+                    style: TextStyle(fontSize: 13, color: colors.inkQuiet),
+                  ),
+                ),
+              )
+            : Text(
+                '[贴纸：${item.sticker!.label}]',
+                style: TextStyle(fontSize: 13, color: colors.inkQuiet),
+              ),
+      );
+    }
+
+    Widget buildAttachmentsWidget({required double bottomGap}) {
+      if (item.videoClip != null && profile != null) {
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomGap),
+          child: VideoTile(videoClip: item.videoClip!, profile: profile),
+        );
+      }
+      if (item.attachments.isNotEmpty && profile != null) {
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomGap),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
+            children: [
+              for (final hash in item.attachments)
+                GestureDetector(
+                  onTap: () => _openLightbox(
+                    context,
+                    profile,
+                    '/api/v1/media/$hash',
+                  ),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: colors.hairline,
+                        width: 0.5,
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Image.network(
+                      profile.resolveMediaUrl('/api/v1/media/$hash'),
+                      headers: {'Authorization': 'Bearer ${profile.token}'},
+                      width: 164,
+                      height: 164,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        width: 110,
+                        height: 64,
+                        color: colors.mineralCanvas,
+                        alignment: Alignment.center,
+                        child: Text(
+                          '图片已过期',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: colors.inkQuiet,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      }
+      return const SizedBox.shrink();
+    }
+
+    final Widget messageBody = separateUserMedia
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (item.sticker != null)
+                buildStickerWidget(
+                  bottomGap: (item.videoClip != null ||
+                          item.attachments.isNotEmpty ||
+                          hasText ||
+                          item.urgent)
+                      ? 6
+                      : 0,
+                ),
+              if (item.videoClip != null || item.attachments.isNotEmpty)
+                buildAttachmentsWidget(
+                  bottomGap: (hasText || item.urgent) ? 6 : 0,
+                ),
+              if (hasText || item.urgent)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: bubbleDecoration,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (item.urgent)
+                        Padding(
+                          padding: EdgeInsets.only(bottom: hasText ? 5 : 0),
+                          child: Text(
+                            '紧急直达',
+                            style: PsyberTheme.editorialSerif.copyWith(
+                              fontSize: 11,
+                              color: colors.dangerInk,
+                            ),
+                          ),
+                        ),
+                      if (hasText)
+                        RichMessageText(
+                          text: item.content,
+                          baseStyle: TextStyle(
+                            fontSize: 15,
+                            height: 1.62,
+                            color: colors.userText,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          )
+        : Container(
+            padding: item.isDoorNote
+                ? const EdgeInsets.symmetric(horizontal: 14, vertical: 10)
+                : (!hasText && !hasJournal && screenTools.isEmpty && hasMedia)
+                    ? const EdgeInsets.symmetric(vertical: 2)
+                    : const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+            decoration: bubbleDecoration,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (item.isDoorNote)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 5),
+                    child: Text(
+                      '门缝纸条',
+                      style: PsyberTheme.editorialSerif.copyWith(
+                        fontSize: 11.5,
+                        color: colors.thresholdAmber,
+                      ),
+                    ),
+                  ),
+                if (item.urgent && isUser)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 5),
+                    child: Text(
+                      '紧急直达',
+                      style: PsyberTheme.editorialSerif.copyWith(
+                        fontSize: 11,
+                        color: colors.dangerInk,
+                      ),
+                    ),
+                  ),
+                if (hasJournal)
+                  TurnJournalCard(
+                    thinking: item.thinking ?? '',
+                    summaryTools: item.toolSummary,
+                    journalSteps: item.journalSteps,
+                    isStreaming: false,
+                  ),
+                for (final st in screenTools)
+                  ScreenToolCard(
+                    label: st.label.isNotEmpty ? st.label : st.name,
+                    reason: st.reason,
+                    screenshotUrl: st.screenshotUrl,
+                    profile: profile,
+                  ),
+                if (item.sticker != null)
+                  buildStickerWidget(bottomGap: item.content.isNotEmpty ? 6 : 0),
+                if (item.videoClip != null || item.attachments.isNotEmpty)
+                  buildAttachmentsWidget(
+                    bottomGap: item.content.isNotEmpty ? 6 : 0,
+                  ),
+                if (item.content.isNotEmpty)
+                  RichMessageText(
+                    text: item.content,
+                    baseStyle: isUser
+                        ? TextStyle(
+                            fontSize: 15,
+                            height: 1.62,
+                            color: colors.userText,
+                          )
+                        : PsyberTheme.editorialSerif.copyWith(
+                            fontSize: 15,
+                            height: 1.66,
+                            color: colors.inkDeep,
+                          ),
+                  ),
+                for (final share in item.shares)
+                  ShareCard(
+                    share: share,
+                    onOpen: widget.controller.openShare,
+                  ),
+                if (item.aborted)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '已中断',
+                      style: TextStyle(fontSize: 11, color: colors.inkFaint),
+                    ),
+                  ),
+                if (item.isAssistant && item.versionCount > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InkWell(
+                          key: Key('version_prev_${item.id}'),
+                          onTap: item.version > 1
+                              ? () => unawaited(
+                                    _handleSwitchVersion(item.version - 1),
+                                  )
+                              : null,
+                          child: Icon(
+                            PhosphorIconsLight.caretLeft,
+                            size: 16,
+                            color: item.version > 1
+                                ? colors.inkQuiet
+                                : colors.inkFaint,
+                          ),
+                        ),
+                        Text(
+                          '${item.version} / ${item.versionCount}',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: colors.inkQuiet,
+                          ),
+                        ),
+                        InkWell(
+                          key: Key('version_next_${item.id}'),
+                          onTap: item.version < item.versionCount
+                              ? () => unawaited(
+                                    _handleSwitchVersion(item.version + 1),
+                                  )
+                              : null,
+                          child: Icon(
+                            PhosphorIconsLight.caretRight,
+                            size: 16,
+                            color: item.version < item.versionCount
+                                ? colors.inkQuiet
+                                : colors.inkFaint,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (widget.showRecallBar &&
+                    item.isAssistant &&
+                    item.turnId != null &&
+                    (item.recallCount ?? 0) > 0)
+                  RecallFeedbackBar(
+                    controller: widget.controller,
+                    turnId: item.turnId!,
+                    recallCount: item.recallCount!,
+                  ),
+              ],
+            ),
+          );
 
     return Center(
       child: ConstrainedBox(
@@ -540,230 +818,10 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               : () => widget.controller.markTurnMotionConsumed(item.turnId),
                           child: child!,
                         ),
-                        child: Container(
-                          padding: bubblePadding,
-                          decoration: bubbleDecoration,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (item.isDoorNote)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 5),
-                                child: Text(
-                                  '门缝纸条',
-                                  style: PsyberTheme.editorialSerif.copyWith(
-                                    fontSize: 11.5,
-                                    color: colors.thresholdAmber,
-                                  ),
-                                ),
-                              ),
-                            if (item.urgent && isUser)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 5),
-                                child: Text(
-                                  '紧急直达',
-                                  style: PsyberTheme.editorialSerif.copyWith(
-                                    fontSize: 11,
-                                    color: colors.dangerInk,
-                                  ),
-                                ),
-                              ),
-                            if (hasJournal)
-                              TurnJournalCard(
-                                thinking: item.thinking ?? '',
-                                summaryTools: item.toolSummary,
-                                isStreaming: false,
-                              ),
-                            for (final st in screenTools)
-                              ScreenToolCard(
-                                label: st.label.isNotEmpty ? st.label : st.name,
-                                reason: st.reason,
-                                screenshotUrl: st.screenshotUrl,
-                                profile: profile,
-                              ),
-                            if (item.sticker != null)
-                              Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: item.content.isNotEmpty ? 6 : 0,
-                                ),
-                                child: profile != null && item.sticker!.url.isNotEmpty
-                                    ? ClipRRect(
-                                        borderRadius: BorderRadius.circular(10),
-                                        child: Image.network(
-                                          profile.resolveMediaUrl(item.sticker!.url),
-                                          headers: {'Authorization': 'Bearer ${profile.token}'},
-                                          width: stickerExtent,
-                                          height: stickerExtent,
-                                          fit: BoxFit.contain,
-                                          errorBuilder: (_, __, ___) => Text(
-                                            '[贴纸：${item.sticker!.label}]',
-                                            style: TextStyle(
-                                              fontSize: 13,
-                                              color: colors.inkQuiet,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                    : Text(
-                                        '[贴纸：${item.sticker!.label}]',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: colors.inkQuiet,
-                                        ),
-                                      ),
-                              ),
-                            if (item.videoClip != null && profile != null)
-                              Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: item.content.isNotEmpty ? 6 : 0,
-                                ),
-                                child: VideoTile(
-                                  videoClip: item.videoClip!,
-                                  profile: profile,
-                                ),
-                              )
-                            else if (item.attachments.isNotEmpty && profile != null)
-                              Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: item.content.isNotEmpty ? 6 : 0,
-                                ),
-                                child: Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    for (final hash in item.attachments)
-                                      GestureDetector(
-                                        onTap: () => _openLightbox(
-                                          context,
-                                          profile,
-                                          '/api/v1/media/$hash',
-                                        ),
-                                        child: Container(
-                                          decoration: BoxDecoration(
-                                            borderRadius: BorderRadius.circular(10),
-                                            border: Border.all(
-                                              color: colors.hairline,
-                                              width: 0.5,
-                                            ),
-                                          ),
-                                          clipBehavior: Clip.antiAlias,
-                                          child: Image.network(
-                                            profile.resolveMediaUrl('/api/v1/media/$hash'),
-                                            headers: {
-                                              'Authorization': 'Bearer ${profile.token}',
-                                            },
-                                            width: 164,
-                                            height: 164,
-                                            fit: BoxFit.cover,
-                                            errorBuilder: (_, __, ___) => Container(
-                                              width: 110,
-                                              height: 64,
-                                              color: colors.mineralCanvas,
-                                              alignment: Alignment.center,
-                                              child: Text(
-                                                '图片已过期',
-                                                style: TextStyle(
-                                                  fontSize: 11.5,
-                                                  color: colors.inkQuiet,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            if (item.content.isNotEmpty)
-                              RichMessageText(
-                                text: item.content,
-                                baseStyle: isUser
-                                    // 用户气泡用主题 userText（实心强调色上的反白字）
-                                    ? TextStyle(
-                                        fontSize: 15,
-                                        height: 1.62,
-                                        color: colors.userText,
-                                      )
-                                    : PsyberTheme.editorialSerif.copyWith(
-                                        fontSize: 15,
-                                        height: 1.66,
-                                        color: colors.inkDeep,
-                                      ),
-                              ),
-                            for (final share in item.shares)
-                              ShareCard(
-                                share: share,
-                                onOpen: widget.controller.openShare,
-                              ),
-                            if (item.aborted)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(
-                                  '已中断',
-                                  style: TextStyle(fontSize: 11, color: colors.inkFaint),
-                                ),
-                              ),
-                            if (item.isAssistant && item.versionCount > 1)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    InkWell(
-                                      key: Key('version_prev_${item.id}'),
-                                      onTap: item.version > 1
-                                          ? () => unawaited(
-                                                _handleSwitchVersion(item.version - 1),
-                                              )
-                                          : null,
-                                      child: Icon(
-                                        PhosphorIconsLight.caretLeft,
-                                        size: 16,
-                                        color: item.version > 1
-                                            ? colors.inkQuiet
-                                            : colors.inkFaint,
-                                      ),
-                                    ),
-                                    Text(
-                                      '${item.version} / ${item.versionCount}',
-                                      style: TextStyle(
-                                        fontSize: 11.5,
-                                        color: colors.inkQuiet,
-                                      ),
-                                    ),
-                                    InkWell(
-                                      key: Key('version_next_${item.id}'),
-                                      onTap: item.version < item.versionCount
-                                          ? () => unawaited(
-                                                _handleSwitchVersion(item.version + 1),
-                                              )
-                                          : null,
-                                      child: Icon(
-                                        PhosphorIconsLight.caretRight,
-                                        size: 16,
-                                        color: item.version < item.versionCount
-                                            ? colors.inkQuiet
-                                            : colors.inkFaint,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            if (widget.showRecallBar &&
-                                item.isAssistant &&
-                                item.turnId != null &&
-                                (item.recallCount ?? 0) > 0)
-                              RecallFeedbackBar(
-                                controller: widget.controller,
-                                turnId: item.turnId!,
-                                recallCount: item.recallCount!,
-                              ),
-                          ],
-                        ),
+                        child: messageBody,
                       ),
                     ),
                   ),
-                ),
                   if (!isUser) _buildHoverActionPill(isLeft: false),
                 ],
               ),
@@ -804,7 +862,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                   size: 15,
                   color: colors.inkQuiet,
                 ),
-                tooltip: '撤回这一条（对方看不到内容）',
+                tooltip: '撤回这一条（${widget.controller.identityNotifier.value.residentSubject}看不到内容）',
                 padding: const EdgeInsets.all(4),
                 constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
                 onPressed: () => unawaited(_handleRetract()),
@@ -877,8 +935,9 @@ class StreamingAssistantBubble extends StatelessWidget {
     final colors = context.colors;
     final screenTools =
         active.tools.where((t) => t.isScreen).toList(growable: false);
-    final hasJournal =
-        active.thinking.isNotEmpty || active.tools.any((t) => !t.isScreen);
+    final hasJournal = active.thinking.isNotEmpty ||
+        active.tools.any((t) => !t.isScreen) ||
+        active.journalSteps.isNotEmpty;
     final liveSticker = active.latestExpression?.sticker;
     final hasVisibleBody = active.text.isNotEmpty || liveSticker != null;
 
@@ -904,6 +963,7 @@ class StreamingAssistantBubble extends StatelessWidget {
                       TurnJournalCard(
                         thinking: active.thinking,
                         progressTools: active.tools,
+                        journalSteps: active.journalSteps,
                         isStreaming: true,
                       ),
                     for (final st in screenTools)
@@ -947,17 +1007,17 @@ class StreamingAssistantBubble extends StatelessWidget {
                           color: colors.inkDeep,
                         ),
                       )
-                    else if (liveSticker == null)
+                    else if (liveSticker == null && !hasJournal && screenTools.isEmpty)
                       Row(
                         key: const Key('streaming_replying_placeholder'),
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 1.6,
-                              color: colors.inkQuiet,
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: colors.statusSuccess,
+                              shape: BoxShape.circle,
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -970,48 +1030,6 @@ class StreamingAssistantBubble extends StatelessWidget {
                           ),
                         ],
                       ),
-                    const SizedBox(height: 6),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        if (active.text.isNotEmpty)
-                          Row(
-                            key: const Key('streaming_replying_badge'),
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox(
-                                width: 10,
-                                height: 10,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.4,
-                                  color: colors.inkFaint,
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                '正在回复…',
-                                style: TextStyle(
-                                  fontSize: 11.5,
-                                  color: colors.inkFaint,
-                                ),
-                              ),
-                            ],
-                          )
-                        else
-                          const SizedBox.shrink(),
-                        TextButton.icon(
-                          key: const Key('abort_turn_button'),
-                          onPressed: () => unawaited(onAbort()),
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          icon: const Icon(PhosphorIconsLight.stopCircle, size: 15),
-                          label: const Text('停止生成', style: TextStyle(fontSize: 12)),
-                        ),
-                      ],
-                    ),
                   ],
                 ),
               ),

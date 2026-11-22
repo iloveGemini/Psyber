@@ -274,7 +274,7 @@ export class EventStore {
 
   /**
    * 双向社交撤回（Spec 04 §4）：只允许撤回自己的活跃消息，标记 status = 'retracted'，
-   * 保留原文在数据库列中以实现不对称可见性（用户撤回对住户隐藏，住户撤回仅对前端隐藏）。
+   * 保留原文在数据库列中以实现不对称可见性（用户撤回对Psyber隐藏，Psyber撤回仅对前端隐藏）。
    */
   retract(
     id: string,
@@ -313,7 +313,7 @@ export class EventStore {
   }
 
   /**
-   * 按精准原文子串查找住户可撤回的活跃消息（防止模型幻觉乱撤）：
+   * 按精准原文子串查找Psyber可撤回的活跃消息（防止模型幻觉乱撤）：
    * 必须匹配且仅匹配 1 条；0 条或多条均拒绝撤回。
    */
   findRetractableAssistantMessage(
@@ -756,7 +756,7 @@ export class EventStore {
   }
 
   /**
-   * 标记住户主动分享卡首次被用户点开拆阅（幂等保留首次 openedAt，并写入 share.opened 系统事件）。
+   * 标记Psyber主动分享卡首次被用户点开拆阅（幂等保留首次 openedAt，并写入 share.opened 系统事件）。
    */
   openShare(
     shareId: string,
@@ -828,7 +828,7 @@ export class EventStore {
         sessionId: "system",
         role: "system",
         kind: "share.opened",
-        content: `对方点开看了你分享的《${result.title}》`,
+        content: `点开看了你分享的《${result.title}》`,
         metadata: {
           shareId: result.shareId,
           title: result.title,
@@ -839,7 +839,7 @@ export class EventStore {
     return result;
   }
 
-  /** 列举近期住户递出的分享卡及拆阅状态（供 <runtime_context> 客观回执给住户） */
+  /** 列举近期Psyber递出的分享卡及拆阅状态（供 <runtime_context> 客观回执给Psyber） */
   listRecentShares(
     sinceMs: number,
     limit = 5,
@@ -1217,7 +1217,7 @@ export class EventStore {
     return map;
   }
 
-  /** 查询尚未经 events_notice 游标告知住户的系统事实事件（privacy.peeked / share.opened / request.decided） */
+  /** 查询尚未经 events_notice 游标告知Psyber的系统事实事件（privacy.peeked / share.opened / request.decided） */
   listUnnoticedEvents(limit = 20): StoredEvent[] {
     const cursor = this.getCursor("events_notice") ?? "";
     const rows = this.db

@@ -507,60 +507,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                       ),
                     Column(
                       children: [
-                    ValueListenableBuilder<DoorStatus>(
-                      valueListenable: widget.controller.doorNotifier,
-                      builder: (context, door, _) => ValueListenableBuilder<bool>(
-                        valueListenable: widget.controller.showReconnectingHintNotifier,
-                        builder: (context, showHint, _) =>
-                            ValueListenableBuilder<SettingsSnapshot?>(
-                          valueListenable: widget.controller.settingsNotifier,
-                          builder: (context, settings, _) =>
-                              ValueListenableBuilder<ActivitySessionView?>(
-                            valueListenable: widget.controller.activeActivityNotifier,
-                            builder: (context, activity, _) =>
-                                ValueListenableBuilder<ActiveTurnState?>(
-                              valueListenable: widget.controller.activeTurnNotifier,
-                              builder: (context, activeTurn, _) => DoorThresholdBar(
-                                door: door,
-                                showReconnectingHint: showHint,
-                                settings: settings,
-                                activeActivity: activity,
-                                isReplying: activeTurn != null,
-                                isWide: isWide,
-                                sidebarOpen: isWide && _showDesktopSidebar,
-                                rightButtonKey: _rightActivityAnchorKey,
-                                onOpenLeftDrawer: () {
-                                  if (isWide) {
-                                    setState(
-                                      () => _showDesktopSidebar = !_showDesktopSidebar,
-                                    );
-                                  } else {
-                                    _scaffoldKey.currentState?.openDrawer();
-                                  }
-                                },
-                                onOpenRightDrawer: () {
-                                  if (isWide) {
-                                    unawaited(
-                                      showActivityPopover(
-                                        context,
-                                        anchorKey: _rightActivityAnchorKey,
-                                        controller: widget.controller,
-                                      ),
-                                    );
-                                  } else {
-                                    _scaffoldKey.currentState?.openEndDrawer();
-                                  }
-                                },
-                                onOpenSettings: _toggleSettings,
-                                onOpenRhythmSettings: () => _openSettings(
-                                  initialSection: SettingsSection.rhythmNotify,
-                                ),
-                              ),
-                            ),
-                          ),
+                if (isWide)
+                  ValueListenableBuilder<bool>(
+                    valueListenable: widget.controller.showReconnectingHintNotifier,
+                    builder: (context, showHint, _) {
+                      if (!showHint) return const SizedBox.shrink();
+                      return Container(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        alignment: Alignment.center,
+                        child: Text(
+                          '正在重新连接…',
+                          key: const Key('gentle_reconnecting_hint'),
+                          style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                         ),
-                      ),
-                    ),
+                      );
+                    },
+                  ),
                 ValueListenableBuilder<ActivitySessionView?>(
                   valueListenable: widget.controller.activeActivityNotifier,
                   builder: (context, activity, _) {
@@ -646,14 +608,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     builder: (context, evalEnabled, _) {
                                       return ValueListenableBuilder<DoorStatus>(
                                         valueListenable: widget.controller.doorNotifier,
-                                        builder: (context, door, _) {
-                                          return ListView.builder(
-                                            controller: _scrollController,
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 16,
-                                              vertical: 14,
-                                            ),
-                                            itemCount: headerCount + items.length + 1,
+                                        builder: (context, door, _) =>
+                                            ValueListenableBuilder<IdentityInfo>(
+                                          valueListenable: widget.controller.identityNotifier,
+                                          builder: (context, identity, _) {
+                                            final topListPad = isWide
+                                                ? 18.0
+                                                : (MediaQuery.paddingOf(context).top + 68.0);
+                                            return ListView.builder(
+                                              controller: _scrollController,
+                                              padding: EdgeInsets.fromLTRB(
+                                                16,
+                                                topListPad,
+                                                16,
+                                                14,
+                                              ),
+                                              itemCount: headerCount + items.length + 1,
                                             itemBuilder: (context, index) {
                                               if (hasMore && index == 0) {
                                                 return Center(
@@ -749,6 +719,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                               ),
                                                               child: _EmptyRoomState(
                                                                 door: door,
+                                                                residentName: identity.residentName,
                                                               ),
                                                             );
                                                           }
@@ -824,7 +795,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                               if (item.isShareOpened) {
                                                 entry = const SizedBox.shrink();
                                               } else if (item.retracted) {
-                                                entry = RetractedMessageRow(item: item);
+                                                entry = RetractedMessageRow(
+                                                  item: item,
+                                                  residentName: identity.residentName,
+                                                );
                                               } else if (item.isMemoryTask) {
                                                 entry = MemoryTaskRow(item: item);
                                               } else if (item.isSilence) {
@@ -865,7 +839,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                               );
                                             },
                                           );
-                                        },
+                                          },
+                                        ),
                                       );
                                     },
                                   );
@@ -1093,13 +1068,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                             builder: (context, activeTurn, _) =>
                                 ValueListenableBuilder<SettingsSnapshot?>(
                               valueListenable: widget.controller.settingsNotifier,
-                              builder: (context, settingsSnap, _) {
-                                final slot = settingsSnap?.chatSlot;
-                                final modelLabel = (slot != null && slot.model.isNotEmpty)
-                                    ? '${slot.provider} · ${slot.model}'
-                                    : null;
-                                return AdaptiveComposer(
-                                  door: door,
+                              builder: (context, settingsSnap, _) =>
+                                  ValueListenableBuilder<IdentityInfo>(
+                                valueListenable: widget.controller.identityNotifier,
+                                builder: (context, identity, _) {
+                                  final slot = settingsSnap?.chatSlot;
+                                  final modelLabel = (slot != null && slot.model.isNotEmpty)
+                                      ? '${slot.provider} · ${slot.model}'
+                                      : null;
+                                  return AdaptiveComposer(
+                                    door: door,
+                                    residentName: identity.residentName,
                                   controller: _inputController,
                                   pendingAttachments: _pendingAttachments,
                                   pendingVideoClip: _pendingVideoClip,
@@ -1150,10 +1129,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   },
                                   onAbort: () =>
                                       unawaited(widget.controller.abortActiveTurn()),
-                                  onSend: ({bool urgent = false}) =>
-                                      unawaited(_send(urgent: urgent)),
-                                );
-                              },
+                                    onSend: ({bool urgent = false}) =>
+                                        unawaited(_send(urgent: urgent)),
+                                  );
+                                },
+                              ),
                             ),
                           ),
                         ),
@@ -1163,6 +1143,108 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                 ),
               ],
             ),
+                    if (!isWide)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: ValueListenableBuilder<DoorStatus>(
+                          valueListenable: widget.controller.doorNotifier,
+                          builder: (context, door, _) => ValueListenableBuilder<bool>(
+                            valueListenable: widget.controller.showReconnectingHintNotifier,
+                            builder: (context, showHint, _) =>
+                                ValueListenableBuilder<SettingsSnapshot?>(
+                              valueListenable: widget.controller.settingsNotifier,
+                              builder: (context, settings, _) =>
+                                  ValueListenableBuilder<ActivitySessionView?>(
+                                valueListenable: widget.controller.activeActivityNotifier,
+                                builder: (context, activity, _) =>
+                                    ValueListenableBuilder<IdentityInfo>(
+                                  valueListenable: widget.controller.identityNotifier,
+                                  builder: (context, identity, _) => MobileFloatingHeader(
+                                    door: door,
+                                    showReconnectingHint: showHint,
+                                    settings: settings,
+                                    identity: identity,
+                                    profile: widget.controller.profileNotifier.value,
+                                    activeActivity: activity,
+                                    rightButtonKey: _rightActivityAnchorKey,
+                                    onOpenLeftDrawer: () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                                    onOpenRightDrawer: () =>
+                                        _scaffoldKey.currentState?.openEndDrawer(),
+                                    onOpenRhythmSettings: () => _openSettings(
+                                      initialSection: SettingsSection.rhythmNotify,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (isWide && !_showDesktopSidebar)
+                      Positioned(
+                        top: 10,
+                        left: isMacOs ? 76 : 12,
+                        child: IconButton(
+                          key: const Key('left_drawer_button'),
+                          tooltip: '展开侧边栏 (⌘\\)',
+                          icon: Icon(
+                            PhosphorIconsLight.sidebarSimple,
+                            size: 19,
+                            color: colors.inkQuiet,
+                          ),
+                          onPressed: () => setState(() => _showDesktopSidebar = true),
+                        ),
+                      ),
+                    if (isWide)
+                      Positioned(
+                        top: 10,
+                        right: 12,
+                        child: KeyedSubtree(
+                          key: _rightActivityAnchorKey,
+                          child: ValueListenableBuilder<ActivitySessionView?>(
+                            valueListenable: widget.controller.activeActivityNotifier,
+                            builder: (context, activity, _) => IconButton(
+                              key: const Key('right_drawer_button'),
+                              tooltip: '常用活动',
+                              icon: Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  Icon(
+                                    activity != null
+                                        ? PhosphorIconsLight.filmStrip
+                                        : PhosphorIconsLight.squaresFour,
+                                    size: 19,
+                                    color: colors.inkQuiet,
+                                  ),
+                                  if (activity != null)
+                                    Positioned(
+                                      right: -2,
+                                      top: -2,
+                                      child: Container(
+                                        width: 7,
+                                        height: 7,
+                                        decoration: BoxDecoration(
+                                          color: colors.statusSuccess,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              onPressed: () => unawaited(
+                                showActivityPopover(
+                                  context,
+                                  anchorKey: _rightActivityAnchorKey,
+                                  controller: widget.controller,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1175,13 +1257,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 }
 
 class _EmptyRoomState extends StatelessWidget {
-  const _EmptyRoomState({required this.door});
+  const _EmptyRoomState({required this.door, this.residentName});
 
   final DoorStatus door;
+  final String? residentName;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
+    final subject = (residentName != null && residentName!.trim().isNotEmpty)
+        ? residentName!.trim()
+        : 'Psyber';
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -1198,7 +1284,7 @@ class _EmptyRoomState extends StatelessWidget {
             const SizedBox(height: 6),
             Text(
               door.state.isDoorNoteMode
-                  ? '可以在下方塞一张纸条，等对方想看的时候再看。'
+                  ? '可以在下方塞一张纸条，等$subject想看的时候再看。'
                   : '随便打个招呼，或者先送一张贴纸开始认识。',
               style: TextStyle(fontSize: 13, color: colors.inkFaint),
               textAlign: TextAlign.center,

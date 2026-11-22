@@ -65,11 +65,11 @@ function setupHarness(c: TestContext) {
 }
 
 describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与双人状态签", () => {
-  test("双向社交撤回：用户撤回隐藏原文，住户 retract_message 精确引文防幻觉且自身上下文与整理保留原话", async () => {
+  test("双向社交撤回：用户撤回隐藏原文，Psyber retract_message 精确引文防幻觉且自身上下文与整理保留原话", async () => {
     ctx = await createTestContext();
     const { app, authHeaders, mockChat, frames, engine } = setupHarness(ctx);
 
-    // 1. 用户发第一条消息，住户回复
+    // 1. 用户发第一条消息，Psyber回复
     mockChat.queueStream(() => [
       { type: "thinking_delta", delta: "心里想说点什么" },
       { type: "text_delta", delta: "刚才说漏嘴了，其实我偷偷买了个小蛋糕。" },
@@ -101,7 +101,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
       frames.some((f) => f.event === "message.updated" && f.data.action === "retract"),
     ).toBe(true);
 
-    // 3. 下一轮：住户上下文中看不到用户原话，只看到占位；同时住户通过 Tier 3 retract_message 撤回自己上一句
+    // 3. 下一轮：Psyber上下文中看不到用户原话，只看到占位；同时Psyber通过 Tier 3 retract_message 撤回自己上一句
     mockChat.queueStream(() => [
       {
         type: "tool_call",
@@ -127,7 +127,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
       .filter((m) => m.role === "user")
       .map((m) => (typeof m.content === "string" ? m.content : ""));
     expect(historyUsers.some((t) => t.includes("123456"))).toBe(false);
-    expect(historyUsers.some((t) => t.includes("（对方撤回了一条消息）"))).toBe(true);
+    expect(historyUsers.some((t) => t.includes("（TA撤回了一条消息）"))).toBe(true);
 
     // 校验工具结果：错误引文被拒、精准引文撤回成功
     const req3 = mockChat.requests[2];
@@ -157,7 +157,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
     }
     expect(retractedItems.map((i) => i.retractedBy).sort()).toEqual(["resident", "user"]);
 
-    // 5. 下一轮住户自己上下文里仍记得自己撤回过的原话；记忆整理转录亦保持同样不对称
+    // 5. 下一轮Psyber自己上下文里仍记得自己撤回过的原话；记忆整理转录亦保持同样不对称
     mockChat.queueStream(() => [{ type: "text_delta", delta: "没事没事。" }]);
     await engine.runTurn({ mode: "chat", userText: "真没事？" });
     const req4 = mockChat.requests[3];
@@ -184,7 +184,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
     expect(tidyRes.ok).toBe(true);
     const tidyPromptText = String(tidyModel.requests[0].messages[0].content);
     expect(tidyPromptText).not.toContain("123456");
-    expect(tidyPromptText).toContain("（对方撤回了一条消息）");
+    expect(tidyPromptText).toContain("（TA撤回了一条消息）");
     expect(tidyPromptText).toContain("偷偷买了个小蛋糕");
   });
 
@@ -192,7 +192,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
     ctx = await createTestContext();
     const { app, authHeaders, mockChat, frames, engine } = setupHarness(ctx);
 
-    // 1. 住户调用 Tier 3 share 工具递出分享卡
+    // 1. Psyber调用 Tier 3 share 工具递出分享卡
     mockChat.queueStream(() => [
       {
         type: "tool_call",
@@ -269,7 +269,7 @@ describe("Ring 1.5: 双向社交撤回、主动分享卡、关门紧急通道与
     expect(urgentJson.turnId).not.toBeNull();
     await new Promise((r) => setTimeout(r, 60));
 
-    // 门仍然保持关着（仅放行那一条），且住户同时看到 <urgent_channel> 与分享卡已读回执 <shared_items>
+    // 门仍然保持关着（仅放行那一条），且Psyber同时看到 <urgent_channel> 与分享卡已读回执 <shared_items>
     expect(ctx.config.door.state).toBe("closed");
     const lastReq = mockChat.requests[mockChat.requests.length - 1];
     const lastUserMsg = lastReq.messages[lastReq.messages.length - 1];

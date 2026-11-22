@@ -80,7 +80,7 @@ class _DrawerModalState extends State<DrawerModal> {
           style: TextStyle(fontSize: 17, color: colors.inkDeep),
         ),
         content: Text(
-          '「${entry.title}」上面贴着封条。拆开阅读会立即写入记录并如实告知对方，确认要打开吗？',
+          '「${entry.title}」上面贴着封条。拆开阅读会立即写入记录并让${widget.controller.identityNotifier.value.residentSubject}知道，确认要打开吗？',
           style: TextStyle(fontSize: 14, color: colors.inkQuiet, height: 1.5),
         ),
         actions: [
@@ -164,9 +164,12 @@ class _DrawerModalState extends State<DrawerModal> {
                 ],
               ),
               const SizedBox(height: 6),
-              Text(
-                '这里放着对方自己留下的私密日记。未经拆封不会外泄，一旦拆封必定留痕。',
-                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet, height: 1.45),
+              ValueListenableBuilder<IdentityInfo>(
+                valueListenable: widget.controller.identityNotifier,
+                builder: (context, identity, _) => Text(
+                  '这里放着${identity.displayResidentName}自己留下的私密日记。未经拆封不会外泄，一旦拆封必定留痕。',
+                  style: TextStyle(fontSize: 12.5, color: colors.inkQuiet, height: 1.45),
+                ),
               ),
               const SizedBox(height: 14),
               Flexible(

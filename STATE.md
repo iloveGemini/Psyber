@@ -1,11 +1,13 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-22（同步收尾换段、`<continuity>` 金字塔与前端收拢提示落地；用户气泡跟随主题强调色、消息字号收至 15px，全量测试通过）。
+> 最后更新：2026-11-22（去 `named` 开关、`self.md` 可选 `pronoun`、全仓术语与未定名默认称呼统一为 `Psyber`，全量测试通过）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（同步换段与连续性重构完成）
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（身份模型简化与术语统一完成）
 
 ### 已完成
+- **身份简化、可选代词与全仓去「住户」统一（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：移除 `self.md` 冗余 `named` 布尔字段（以 `name` 非空为唯一真相并兼容无 `name` 键旧档案），`self.md` 增加初始为空的可选 `pronoun`（不于创世页预设）；透传 `residentPronoun`；全仓 `docs/`、`prompts/`、`server/` 与 UI 默认兜底统一称 `Psyber`（不再用「住户」或「TA」），保留「我的头像」，`SettingsPanel` 与 `DrawerModal` 实时监听 `identityNotifier`。
+- **身份档案、多步日志、消息/门牌时序与顶栏重构（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：`self.md`/`user.md` 引入结构化 Frontmatter（`name`/`pronoun`）与 `identity` 接口、`identity.updated` SSE 及创世页代词选择；对话流按 `step` 拆分多步思考与工具日志（`journalSteps`）；用户贴图/图片独立无气泡渲染；`door` 状态事件延后至助手持久化后落库；移除后台/提示词/UI 中机械服务口吻与多余「对方」；桌面移除顶栏并流式区去重复徽标/停止按钮，手机端改为头像+状态色点+状态词居中胶囊与顶部透明渐隐。
 - **iOS 客户端骨架、沙盒存储兼容与抽屉底栏适配（`app/`，2026-11-22）**：补齐 `app/ios/` 工程并配置 `NSAppTransportSecurity` / `NSLocalNetworkUsageDescription` 放行本地 HTTP 后端；修复 iOS 无 `HOME` 环境变量导致 `FileSessionStorage` 启动抛错白屏的问题，改由原生 `psyber/storage` MethodChannel 读取沙盒 `Application Support/psyber`，并在 `main.dart` 为 `initialize()` 兜底防白屏；修复 iOS 左抽屉底部 `SafeArea` 露底留缝问题。
 - **同步收尾换段、`sessionId` 持久化与 `<continuity>` 升级（`docs/` + `server/` + `app/`，2026-11-22）**：
   - **契约与同步换段**：否掉异步先切段，75% 阈值 / `CONTEXT_OVERFLOW` / 手动 `POST /api/v1/chat/wrap-up` 均先同步排空 `daily_wrapup`（`turnMutex -> tidyMutex` 单向锁、`bedtime` 完成回调挪至释放 `tidyMutex` 后零死锁），成功后再切新 `sessionId`；整理失败保留原段不硬切；`CONTEXT_OVERFLOW` 有历史时换段后当轮自动重试一次；排队消息自动重绑新 `sessionId` 绝不双发。
@@ -20,7 +22,7 @@
 - **阅读系主题色板与无字纸纹质感升级（2026-11-22）**：
   - 保留「暖纸白」「曜夜暖黑」，移除原先较随意的「暮色晚霞」「秋日暖咖」「复古庄园」，新增 **「旧书暖纸（`#EAE4DA` + `#313131` + `#A2644C`）」**、**「岸线·晨（`#E2DDD6` + `#3B4B54` + `#8C9BA5`）」** 与 **「岸线·夜（`#222B33` + `#E2DDD6` + `#8C9BA5`）」**。
   - 新增 `PaperGrainOverlay`（`256×256` 高频单像素均匀微粒 + 中央聊天页边柔光暗角 `pageEdgeTint`），并为阅读系色板启用书页章节时间线、引用摘录底色与门楣印章呼应；全量清理静态 `PsyberTheme.*` 硬编码与开关固定绿/警告固定橙漏色，弹窗/菜单/开关全部跟随当前色板；同步更新 `docs/CAPABILITIES.md` 与 `docs/spec/04-api-and-flutter.md`。
-- **用户气泡跟随主题强调色 + 消息字号收至 15px（`app/`，2026-11-22）**：旧书暖纸/岸线·晨/岸线·夜 3 套的 `userBubble` 改为该套 `accent`（实心气泡）、`userText` 改为 `onAccent`，不描边；暖纸白/曜夜暖黑 2 套因强调色太强改回原色浅灰气泡并保留细边（浅色气泡无边会糊进背景）；用户气泡文字改用 `userText`；住户消息字号由 15.5px 收至 15px，与用户消息一致。
+- **用户气泡跟随主题强调色 + 消息字号收至 15px（`app/`，2026-11-22）**：旧书暖纸/岸线·晨/岸线·夜 3 套的 `userBubble` 改为该套 `accent`（实心气泡）、`userText` 改为 `onAccent`，不描边；暖纸白/曜夜暖黑 2 套因强调色太强改回原色浅灰气泡并保留细边（浅色气泡无边会糊进背景）；用户气泡文字改用 `userText`；Psyber 消息字号由 15.5px 收至 15px，与用户消息一致。
 - **SSE 流式显示与工具轮次稳定性修复（2026-11-21）**：
   - **后端**：`Bun.serve` 显式配置 `idleTimeout: 0` 根治 10s 强断长连接；`SseHub` 与 `/api/v1/stream` 落地 `streamSeq` 500 帧环形缓冲（支持 `Last-Event-ID` 补帧与 `sync.reset`）；`dispatchChatTurn` 助手落盘同步广播 `message.created`、`GET /api/v1/chat/history` 返回 `activeTurnId`；`PiAiChatClient` 捕获流异常与 `thinking_end` 签名；`DirectEngine` 为 `MAX_TOOL_STEPS` 达上限补跑无工具收尾步、非静默思考/工具轮次兜底落盘、捕获未预期异常广播 `turn.error`，并支持多步工具调用中途失败后的 `TurnCheckpoint` 断点续跑（`POST /api/v1/turns/:turnId/retry` 不重复执行前序已完成工具）。
   - **前端（`app/`）**：`AppController` 重连保留仍在服务端进行的 `activeTurnNotifier`、对错过 `turn.start` 的增量事件自动恢复流式气泡、`message.created` 无缝衔接落盘；`ChatPage` 在停留在底部附近时随流式输出自动轻滑贴底；修复「编辑并重发」等弹窗在退出动画期提前 `dispose` `TextEditingController` 导致 `_dependents.isEmpty` 红屏断言的缺陷（全部改由独立 `StatefulWidget` 弹窗托管控制器生命周期）。
@@ -34,5 +36,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-22 终改后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 49 用例 / 591 断言）全部通过。
-- **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（24 用例）全部通过。
+- **`server/`（2026-11-22 终改后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 50 用例 / 606 断言）全部通过。
+- **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（25 用例）全部通过。

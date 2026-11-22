@@ -36,6 +36,13 @@ export interface ShareCardRecord {
   openedAt?: number;
 }
 
+export interface PendingDoorUpdate {
+  from: DoorState;
+  to: DoorState;
+  note: string | null;
+  content: string;
+}
+
 export interface ToolExecutionContext {
   turnId: string;
   sessionId: string;
@@ -44,6 +51,7 @@ export interface ToolExecutionContext {
   expressionCount: number;
   expressions: ExpressionPayload[];
   shares?: ShareCardRecord[];
+  pendingDoorUpdates?: PendingDoorUpdate[];
   signal?: AbortSignal;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;

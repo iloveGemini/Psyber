@@ -78,6 +78,7 @@ abstract class PsyberApiClient {
     ConnectionProfile profile, {
     String? residentName,
     String? userName,
+    String? userPronoun,
     required String timezone,
     String? sleepStart,
     String? sleepEnd,
@@ -143,10 +144,10 @@ abstract class PsyberApiClient {
 
   Future<void> deleteMessage(ConnectionProfile profile, String messageId);
 
-  /// Ring 1.5：双向社交撤回（用户撤回自己的消息，住户仅见占位不知原文）。
+  /// Ring 1.5：双向社交撤回（用户撤回自己的消息，Psyber 仅见占位不知原文）。
   Future<TimelineItem> retractMessage(ConnectionProfile profile, String messageId);
 
-  /// Ring 1.5：首次点开住户分享卡上报拆阅回执。
+  /// Ring 1.5：首次点开 Psyber 分享卡上报拆阅回执。
   Future<int?> openShare(ConnectionProfile profile, String shareId);
 
   /// Ring 1.5：读取用户双人状态签（心绪短句 + 勿扰开关）。
@@ -374,6 +375,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     ConnectionProfile profile, {
     String? residentName,
     String? userName,
+    String? userPronoun,
     required String timezone,
     String? sleepStart,
     String? sleepEnd,
@@ -389,6 +391,9 @@ class HttpPsyberApiClient implements PsyberApiClient {
     }
     if (userName != null && userName.trim().isNotEmpty) {
       payload['userName'] = userName.trim();
+    }
+    if (userPronoun != null && userPronoun.trim().isNotEmpty) {
+      payload['userPronoun'] = userPronoun.trim();
     }
     if (sleepStart != null && sleepEnd != null) {
       payload['sleepWindow'] = {'start': sleepStart, 'end': sleepEnd};

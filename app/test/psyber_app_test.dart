@@ -163,6 +163,7 @@ class FakePsyberApiClient implements PsyberApiClient {
     ConnectionProfile profile, {
     String? residentName,
     String? userName,
+    String? userPronoun,
     required String timezone,
     String? sleepStart,
     String? sleepEnd,
@@ -174,6 +175,9 @@ class FakePsyberApiClient implements PsyberApiClient {
     genesis = GenesisStatus(
       initialized: true,
       named: residentName != null && residentName.trim().isNotEmpty,
+      residentName: residentName?.trim().isEmpty == true ? null : residentName?.trim(),
+      userName: userName?.trim().isEmpty == true ? null : userName?.trim(),
+      userPronoun: userPronoun?.trim().isEmpty == true ? null : userPronoun?.trim(),
       hasChatProvider: apiKey != null && apiKey.trim().isNotEmpty,
       timezone: timezone,
       sleepStart: sleepStart ?? '23:30',
@@ -723,12 +727,13 @@ void main() {
     await tester.pump();
 
     expect(find.text('门关着'), findsOneWidget);
-    expect(find.text('先歇会儿'), findsOneWidget);
     expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('door_threshold_toggle')));
     await tester.pumpAndSettle();
     expect(find.textContaining('门牌便签：先歇会儿'), findsOneWidget);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
 
     await tester.enterText(find.byKey(const Key('chat_input_field')), '晚点再聊，放门口啦');
     await tester.pump();
@@ -781,20 +786,21 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('chat_voice_button')), findsOneWidget);
 
-    // AI 开始回复（未出字前）：门楣、气泡与输入台均明确显示正在回复 / 停止按钮
+    // AI 开始回复（未出字前）：气泡与输入台均明确显示正在回复 / 停止按钮（顶栏不再重复「正在回复」）
     api.emitSse('turn.start', {'turnId': 'turn_live', 'mode': 'chat'});
     await tester.pump();
-    expect(find.byKey(const Key('door_replying_indicator')), findsOneWidget);
+    expect(find.byKey(const Key('door_replying_indicator')), findsNothing);
     expect(find.byKey(const Key('streaming_replying_placeholder')), findsOneWidget);
     expect(find.byKey(const Key('chat_stop_button')), findsOneWidget);
 
-    api.emitSse('turn.thinking', {'turnId': 'turn_live', 'delta': '先确认对方刚刚提到的事情'});
+    api.emitSse('turn.thinking', {'turnId': 'turn_live', 'delta': '先确认对方刚刚提到的事情', 'step': 0});
     api.emitSse('turn.tool', {
       'turnId': 'turn_live',
       'callId': 'c1',
       'name': 'memory_read',
       'label': '翻看日记',
       'status': 'running',
+      'step': 0,
     });
     api.emitSse('turn.expression', {
       'turnId': 'turn_live',
@@ -808,7 +814,8 @@ void main() {
     expect(find.text('思考中…'), findsOneWidget);
     expect(find.text('翻看日记 · 进行中'), findsOneWidget);
     expect(find.text('先确认对方刚刚提到的事情'), findsNothing);
-    expect(find.byKey(const Key('streaming_replying_badge')), findsOneWidget);
+    expect(find.byKey(const Key('streaming_replying_badge')), findsNothing);
+    expect(find.byKey(const Key('abort_turn_button')), findsNothing);
 
     await tester.tap(find.byKey(const Key('thinking_toggle')));
     await tester.pump();
@@ -1336,7 +1343,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('door_threshold_toggle')), findsOneWidget);
-      expect(find.text('Psyber'), findsOneWidget);
+      // 移动端中心胶囊只保留头像 + 状态色点 + 状态提示，不再显示冗余 Psyber 标题
+      expect(find.text('Psyber'), findsNothing);
       expect(find.text('门开着'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
@@ -1653,7 +1661,7 @@ void main() {
     expect(find.text('发错窗口的一句话'), findsNothing);
     expect(find.text('你撤回了一条消息'), findsOneWidget);
 
-    // 3. 住户侧撤回通过 SSE 同步 -> 显示「对方撤回了一条消息」
+    // 3. Psyber 侧撤回通过 SSE 同步 -> 默认显示「Psyber撤回了一条消息」；定名后更新为名字
     api.emitSse('message.updated', {
       'action': 'retract',
       'retractedId': 'ev_a2',
@@ -1670,7 +1678,17 @@ void main() {
       },
     });
     await tester.pumpAndSettle();
-    expect(find.text('对方撤回了一条消息'), findsOneWidget);
+    expect(find.text('Psyber撤回了一条消息'), findsOneWidget);
+
+    api.emitSse('identity.updated', {
+      'residentName': '阿序',
+      'residentPronoun': '她',
+      'named': true,
+      'userName': '小川',
+      'userPronoun': '他',
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('阿序撤回了一条消息'), findsOneWidget);
   });
 
   testWidgets('折叠分享卡首次点开上报拆阅回执 + 关门态二次确认一次性紧急直达', (tester) async {
@@ -2281,6 +2299,104 @@ void main() {
 
     expect(find.byKey(const Key('rollover_wrapping_banner')), findsNothing);
     expect(controller.contextUsageNotifier.value?.usedTokens, 0);
+  });
+
+  testWidgets('多步 journalSteps 按步分段渲染、用户贴图与文字气泡分离、桌面端无顶栏', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final api = FakePsyberApiClient()
+      ..history = [
+        const TimelineItem(
+          id: 'ev_u_mix',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'user',
+          kind: 'chat',
+          content: '今天看到这只猫',
+          sticker: StickerView(id: 'stk_hi', label: '挥手', url: ''),
+          createdAt: 1795046401000,
+        ),
+        const TimelineItem(
+          id: 'ev_a_steps',
+          seq: 2,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'chat',
+          content: '我也看到了，真可爱。',
+          thinking: '第一步思考\n\n第二步思考',
+          journalSteps: [
+            TurnJournalStep(
+              step: 0,
+              thinking: '第一步思考',
+              summaryTools: [
+                ToolSummaryItem(name: 'read', label: '翻开看了一篇记忆', ok: true),
+              ],
+            ),
+            TurnJournalStep(
+              step: 1,
+              thinking: '第二步思考',
+              summaryTools: [
+                ToolSummaryItem(name: 'edit', label: '修改了记忆片段', ok: true),
+              ],
+            ),
+          ],
+          toolSummary: [
+            ToolSummaryItem(name: 'read', label: '翻开看了一篇记忆', ok: true),
+            ToolSummaryItem(name: 'edit', label: '修改了记忆片段', ok: true),
+          ],
+          createdAt: 1795046402000,
+        ),
+      ];
+
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 1. 宽屏桌面端彻底移除顶栏（无 door_threshold_toggle）
+    expect(find.byKey(const Key('door_threshold_toggle')), findsNothing);
+    expect(find.byKey(const Key('desktop_left_sidebar')), findsOneWidget);
+
+    // 2. 用户贴图与文字气泡分离：贴图不在带 userBubble decoration 的文字 Container 内
+    final stickerFinder = find.text('[贴纸：挥手]');
+    final textFinder = find.text('今天看到这只猫');
+    expect(stickerFinder, findsOneWidget);
+    expect(textFinder, findsOneWidget);
+    final stickerContainer = find
+        .ancestor(of: stickerFinder, matching: find.byType(Container))
+        .evaluate()
+        .where((e) => (e.widget as Container).decoration != null);
+    expect(stickerContainer, isEmpty);
+
+    // 3. 展开多步手账折卡：按第 1 步 / 第 2 步分段渲染
+    await tester.tap(find.byKey(const Key('thinking_toggle')));
+    await tester.pumpAndSettle();
+    expect(find.text('第 1 步'), findsOneWidget);
+    expect(find.text('第 2 步'), findsOneWidget);
+    expect(find.text('第一步思考'), findsOneWidget);
+    expect(find.text('第二步思考'), findsOneWidget);
+    // 第 1 步的思考与工具位置严格早于第 2 步的思考
+    expect(
+      tester.getTopLeft(find.text('翻开看了一篇记忆')).dy,
+      lessThan(tester.getTopLeft(find.text('第二步思考')).dy),
+    );
   });
 }
 

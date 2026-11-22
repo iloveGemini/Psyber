@@ -129,7 +129,7 @@ function unsealFile(raw: string, instanceId: string): { manifest: DrawerManifest
 /**
  * 上锁抽屉存储层（Spec 02 §2 & Spec 03 §1.2）：
  * - 物理落盘于 <dataDir>/private/*.sealed（独立于 memory/，绝不进 memory/.git 与 SQLite 记忆索引）；
- * - 住户通过 drawer_read / drawer_write 透明读写，不产生 privacy.peeked；
+ * - Psyber通过 drawer_read / drawer_write 透明读写，不产生 privacy.peeked；
  * - 用户通过 openEntryForUser 拆封时严格执行「写 privacy.peeked 先于返回明文」。
  */
 export class DrawerStore {
@@ -149,7 +149,7 @@ export class DrawerStore {
     return path.join(this.privateDir, `${id}.sealed`);
   }
 
-  /** 仅读取第 1–2 行明文清单，绝不解封正文（供 GET /api/v1/drawer 与住户列目录共用） */
+  /** 仅读取第 1–2 行明文清单，绝不解封正文（供 GET /api/v1/drawer 与Psyber列目录共用） */
   async listEntries(events?: EventStore): Promise<DrawerEntrySummary[]> {
     let filenames: string[];
     try {
@@ -187,7 +187,7 @@ export class DrawerStore {
     return results;
   }
 
-  /** 住户写入或更新私密抽屉条目（保留原 createdAt，原子落盘，绝不写 privacy.peeked） */
+  /** Psyber写入或更新私密抽屉条目（保留原 createdAt，原子落盘，绝不写 privacy.peeked） */
   async writeEntry(opts: {
     id: string;
     title: string;
@@ -243,7 +243,7 @@ export class DrawerStore {
     return manifest;
   }
 
-  /** 住户本人透明阅读私密抽屉条目（绝不写入 privacy.peeked） */
+  /** Psyber 本人透明阅读私密抽屉条目（绝不写入 privacy.peeked） */
   async readEntryForResident(id: string): Promise<DrawerEntryContent | null> {
     const cleanId = id.trim();
     if (!isValidDrawerId(cleanId)) {
@@ -290,11 +290,15 @@ export class DrawerStore {
     const channel = opts.channel ?? "app";
 
     // 写先于读：事件落盘失败直接抛错中止，绝不返回明文
+    const contentText =
+      channel === "cli"
+        ? `在备份导出时拆封了上锁抽屉「${manifest.title}」`
+        : `拆封了上锁抽屉「${manifest.title}」`;
     const { event: peekedEvent } = opts.events.append({
       sessionId: opts.sessionId || "system",
       role: "system",
       kind: "privacy.peeked",
-      content: `用户在 ${channel} 拆封了上锁抽屉「${manifest.title}」`,
+      content: contentText,
       metadata: {
         drawerId: manifest.id,
         title: manifest.title,

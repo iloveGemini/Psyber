@@ -24,6 +24,7 @@ class ActiveTurnState {
     this.text = '',
     this.latestExpression,
     this.tools = const <ToolProgressItem>[],
+    this.journalSteps = const <TurnJournalStep>[],
   });
 
   final String turnId;
@@ -32,12 +33,14 @@ class ActiveTurnState {
   final String text;
   final ExpressionPayload? latestExpression;
   final List<ToolProgressItem> tools;
+  final List<TurnJournalStep> journalSteps;
 
   ActiveTurnState copyWith({
     String? thinking,
     String? text,
     ExpressionPayload? latestExpression,
     List<ToolProgressItem>? tools,
+    List<TurnJournalStep>? journalSteps,
   }) {
     return ActiveTurnState(
       turnId: turnId,
@@ -46,6 +49,7 @@ class ActiveTurnState {
       text: text ?? this.text,
       latestExpression: latestExpression ?? this.latestExpression,
       tools: tools ?? this.tools,
+      journalSteps: journalSteps ?? this.journalSteps,
     );
   }
 }
@@ -79,6 +83,8 @@ class AppController {
       ValueNotifier<ConnectionProfile?>(null);
   final ValueNotifier<GenesisStatus?> genesisNotifier =
       ValueNotifier<GenesisStatus?>(null);
+  final ValueNotifier<IdentityInfo> identityNotifier =
+      ValueNotifier<IdentityInfo>(IdentityInfo.empty);
   final ValueNotifier<ConnectionPhase> connectionNotifier =
       ValueNotifier<ConnectionPhase>(ConnectionPhase.unpaired);
   final ValueNotifier<bool> showReconnectingHintNotifier =
@@ -268,6 +274,7 @@ class AppController {
   Future<void> completeGenesis({
     String? residentName,
     String? userName,
+    String? userPronoun,
     required String timezone,
     String? sleepStart,
     String? sleepEnd,
@@ -282,6 +289,7 @@ class AppController {
       profile,
       residentName: residentName,
       userName: userName,
+      userPronoun: userPronoun,
       timezone: timezone,
       sleepStart: sleepStart,
       sleepEnd: sleepEnd,
@@ -291,7 +299,9 @@ class AppController {
       apiKey: apiKey,
     );
     if (_disposed) return;
-    genesisNotifier.value = await _api.getGenesis(profile);
+    final genesis = await _api.getGenesis(profile);
+    genesisNotifier.value = genesis;
+    identityNotifier.value = genesis.toIdentityInfo();
     await refreshSnapshot();
     unawaited(loadSettings());
   }
@@ -301,7 +311,12 @@ class AppController {
     if (profile == null) return null;
     try {
       final snap = await _api.getSettings(profile);
-      if (!_disposed) settingsNotifier.value = snap;
+      if (!_disposed) {
+        settingsNotifier.value = snap;
+        if (snap.identity != null) {
+          identityNotifier.value = snap.identity!;
+        }
+      }
       return snap;
     } on ApiException {
       return settingsNotifier.value;
@@ -371,6 +386,7 @@ class AppController {
     if (_disposed) return;
     profileNotifier.value = null;
     genesisNotifier.value = null;
+    identityNotifier.value = IdentityInfo.empty;
     connectionNotifier.value = ConnectionPhase.unpaired;
     showReconnectingHintNotifier.value = false;
     timelineNotifier.value = const <TimelineItem>[];
@@ -413,6 +429,7 @@ class AppController {
       final genesis = await _api.getGenesis(profile);
       if (_disposed || _isPaused) return;
       genesisNotifier.value = genesis;
+      identityNotifier.value = genesis.toIdentityInfo();
 
       await refreshSnapshot();
       if (_disposed || _isPaused) return;
@@ -456,6 +473,9 @@ class AppController {
     doorNotifier.value = results[0] as DoorStatus;
     userStatusNotifier.value = results[2] as UserStatus;
     final page = results[1] as HistoryPage;
+    if (page.identity != null) {
+      identityNotifier.value = page.identity!;
+    }
     if (page.contextUsage != null) {
       contextUsageNotifier.value = page.contextUsage;
     }
@@ -991,6 +1011,9 @@ class AppController {
           farewell: frame.data['farewell'] as String?,
         );
         return;
+      case 'identity.updated':
+        identityNotifier.value = IdentityInfo.fromJson(frame.data);
+        return;
       case 'user_status.updated':
         userStatusNotifier.value = UserStatus.fromJson(frame.data);
         return;
@@ -1014,8 +1037,30 @@ class AppController {
         if (delta.isNotEmpty) {
           final current = _ensureActiveTurn(frame.data['turnId'] as String?);
           if (current != null) {
+            final rawStep = (frame.data['step'] as num?)?.toInt();
+            final steps = List<TurnJournalStep>.from(current.journalSteps);
+            final targetStep = rawStep ??
+                (steps.isEmpty
+                    ? 0
+                    : (steps.last.progressTools.isNotEmpty
+                        ? steps.last.step + 1
+                        : steps.last.step));
+            final idx = steps.indexWhere((s) => s.step == targetStep);
+            if (idx >= 0) {
+              steps[idx] = steps[idx].copyWith(
+                thinking: steps[idx].thinking + delta,
+              );
+            } else {
+              steps.add(TurnJournalStep(step: targetStep, thinking: delta));
+            }
+            final sep = (current.thinking.isNotEmpty &&
+                    idx < 0 &&
+                    !current.thinking.endsWith('\n\n'))
+                ? '\n\n'
+                : '';
             activeTurnNotifier.value = current.copyWith(
-              thinking: current.thinking + delta,
+              thinking: '${current.thinking}$sep$delta',
+              journalSteps: List<TurnJournalStep>.unmodifiable(steps),
             );
           }
         }
@@ -1033,7 +1078,36 @@ class AppController {
           } else {
             nextTools.add(tool);
           }
-          activeTurnNotifier.value = current.copyWith(tools: nextTools);
+          final steps = List<TurnJournalStep>.from(current.journalSteps);
+          if (!tool.isScreen) {
+            final targetStep = tool.step ?? (steps.isEmpty ? 0 : steps.last.step);
+            final sIdx = steps.indexWhere((s) => s.step == targetStep);
+            if (sIdx >= 0) {
+              final stTools = List<ToolProgressItem>.from(steps[sIdx].progressTools);
+              final tIdx = stTools.indexWhere(
+                (t) => t.callId.isNotEmpty && t.callId == tool.callId,
+              );
+              if (tIdx >= 0) {
+                stTools[tIdx] = tool;
+              } else {
+                stTools.add(tool);
+              }
+              steps[sIdx] = steps[sIdx].copyWith(
+                progressTools: List<ToolProgressItem>.unmodifiable(stTools),
+              );
+            } else {
+              steps.add(
+                TurnJournalStep(
+                  step: targetStep,
+                  progressTools: <ToolProgressItem>[tool],
+                ),
+              );
+            }
+          }
+          activeTurnNotifier.value = current.copyWith(
+            tools: nextTools,
+            journalSteps: List<TurnJournalStep>.unmodifiable(steps),
+          );
         }
         return;
       case 'turn.text':
@@ -1281,6 +1355,7 @@ class AppController {
     _cancelSseAndTimers();
     profileNotifier.dispose();
     genesisNotifier.dispose();
+    identityNotifier.dispose();
     connectionNotifier.dispose();
     showReconnectingHintNotifier.dispose();
     doorNotifier.dispose();

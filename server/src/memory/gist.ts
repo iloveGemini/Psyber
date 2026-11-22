@@ -3,6 +3,7 @@ import path from "node:path";
 import { localDay, vagueWhen } from "../core/clock.ts";
 import { stripFrontmatter } from "../core/prompts.ts";
 import type { StoredEvent } from "../store/events.ts";
+import { readIdentityProfile } from "./genesis.ts";
 import type { MemoryIndex } from "./index.ts";
 
 export const DEFAULT_GIST_CHAR_BUDGET = 16_000;
@@ -171,12 +172,14 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
   const today = localDay(opts.nowMs, opts.timeZone);
   const shortDay = (day: string) => (day.startsWith(today.slice(0, 5)) ? day.slice(5) : day);
 
-  const [allDays, allWeeks, allMonths, allYears] = await Promise.all([
+  const [allDays, allWeeks, allMonths, allYears, identity] = await Promise.all([
     readGistEntries(path.join(gistDir, "days"), "day"),
     readGistEntries(path.join(gistDir, "weeks"), "week"),
     readGistEntries(path.join(gistDir, "months"), "month"),
     readGistEntries(path.join(gistDir, "years"), "year"),
+    readIdentityProfile(opts.dataDir, opts.nowMs, opts.timeZone),
   ]);
+  const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
 
   // 严格不重叠金字塔：天（近 7） -> 周（早于最旧那天，近 4） -> 月（早于最旧那周，近 12） -> 年（早于最旧那月，近 5）
   const candDays = allDays.slice(-7);
@@ -266,20 +269,20 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
     if (ev.role === "user") {
       const content =
         ev.status === "retracted"
-          ? "（对方撤回了一条消息）"
+          ? `（${userLabel}撤回了一条消息）`
           : opts.formatUserEvent
             ? opts.formatUserEvent(ev)
             : ev.content;
       const trimmed = content.trim();
       if (!trimmed) continue;
-      const prefix = ev.kind === "door_note" ? "对方（门缝纸条）：" : "对方：";
+      const prefix = ev.kind === "door_note" ? `${userLabel}（门缝纸条）：` : `${userLabel}：`;
       rawTailItems.push({ at: ev.createdAt, line: `${prefix}${trimmed}` });
     } else if (ev.role === "assistant") {
       const base = ev.content.trim();
       if (!base && ev.status !== "retracted") continue;
       const text =
         ev.status === "retracted"
-          ? `${base}（我后来撤回了这条消息，对方看不到内容）`
+          ? `${base}（我后来撤回了这条消息，${userLabel}看不到内容）`
           : base;
       rawTailItems.push({ at: ev.createdAt, line: `我：${text}` });
     }

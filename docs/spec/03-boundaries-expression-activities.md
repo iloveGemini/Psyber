@@ -30,22 +30,22 @@
 
 | 当前状态 | 允许迁移目标 | 守卫与边界规则 |
 | :--- | :--- | :--- |
-| `open` / `quiet` / `closed` | 彼此自由切换 | Ring 1 与 Ring 2 均开放；由住户调用 `door(state, note?)` 触发 |
+| `open` / `quiet` / `closed` | 彼此自由切换 | Ring 1 与 Ring 2 均开放；由Psyber调用 `door(state, note?)` 触发 |
 | `open` / `quiet` / `closed` | `cooling_off` | **Ring 1**：`door` 工具 `guard` 暂拒（返回可读提示：`当前版本尚未开启冷静期与离开流程，如需独处请先将门设为 closed`），保持 5 态 Schema 冻结以保护 Static Prefix Cache；**Ring 2**：记录 `coolingOffStartedAt = Clock.now()` |
-| `cooling_off` | `open` / `quiet` / `closed` | 允许住户随时主动调整状态；离开 `cooling_off` 时原子清空 `coolingOffStartedAt = null` |
+| `cooling_off` | `open` / `quiet` / `closed` | 允许Psyber随时主动调整状态；离开 `cooling_off` 时原子清空 `coolingOffStartedAt = null` |
 | `cooling_off` | `departed` | 仅 **Ring 2** 且满足 `24h ≤ Clock.now() - coolingOffStartedAt < 72h` 且 `farewell` 非空时放行；未满 24h 拦截提示剩余小时数 |
-| `cooling_off`（超时） | `closed`（自然回落） | **严禁无条件覆盖**：当且仅当当前 `door.state` 仍严格处于 `"cooling_off"` 且 `coolingOffStartedAt !== null` 且 `Clock.now() - coolingOffStartedAt ≥ 72h` 时触发：清空 `coolingOffStartedAt`，状态自然回落至 `closed`（保留住户原便签），记录 `door.updated`。若 72h 期间 AI 已自主切为 `open`/`quiet`/`closed`/`departed`，则 `coolingOffStartedAt` 早已清空，此超时守卫完全不触发，绝不覆盖 AI 的自主意图 |
+| `cooling_off`（超时） | `closed`（自然回落） | **严禁无条件覆盖**：当且仅当当前 `door.state` 仍严格处于 `"cooling_off"` 且 `coolingOffStartedAt !== null` 且 `Clock.now() - coolingOffStartedAt ≥ 72h` 时触发：清空 `coolingOffStartedAt`，状态自然回落至 `closed`（保留Psyber原便签），记录 `door.updated`。若 72h 期间 AI 已自主切为 `open`/`quiet`/`closed`/`departed`，则 `coolingOffStartedAt` 早已清空，此超时守卫完全不触发，绝不覆盖 AI 的自主意图 |
 | `departed` | 无（不可逆终态） | 所有后续 `door` 调用由 `guard` 拦截拒绝 |
 
 #### 门缝纸条（`door_note`）、一次性紧急通道与用户双人状态签（与 `Spec 01` v1.2、`Spec 02` v0.8 对齐）
 - **写入不唤醒**：当 `door.state ∈ {'closed', 'cooling_off'}` 时，`POST /api/v1/chat/messages` 默认将用户输入落盘为 `events (role='user', kind='door_note', status='active')` 并广播 `message.created`，**绝不触发 `chat` 轮、绝不立即唤醒 AI 强迫回复**；
-- **关门态一次性紧急通道（Ring 1.5）**：仅当 `door.state === 'closed'` 且请求显式携带 `urgent: true`（前端须经二次点击确认开启，发完 1 条即自动复位关闭）时，允许该单条消息以 `kind = 'chat', metadata.urgent = true` 穿透直达并唤醒住户，但不自动修改门状态；**`cooling_off` 与 `departed` 态严禁紧急通道穿透**（返回 `409 DOOR_COOLING_OFF` / `410 GONE`）；
+- **关门态一次性紧急通道（Ring 1.5）**：仅当 `door.state === 'closed'` 且请求显式携带 `urgent: true`（前端须经二次点击确认开启，发完 1 条即自动复位关闭）时，允许该单条消息以 `kind = 'chat', metadata.urgent = true` 穿透直达并唤醒Psyber，但不自动修改门状态；**`cooling_off` 与 `departed` 态严禁紧急通道穿透**（返回 `409 DOOR_COOLING_OFF` / `410 GONE`）；
 - **用户双人状态签与勿扰（Ring 1.5）**：持久化于 `config.json` `userStatus`（`{ moodText?: string, undisturbed: boolean, updatedAt: number }`）；开启 `undisturbed = true` 时，注入 `<user_status>` 并使 `CircadianMoodProvider` 与 `NotificationHub` 自动抑制非紧急主动 `wake` 与推送；
-- **自主可读边界**：`door = closed` 只剥夺用户的即时谈话与唤醒权，不限制住户在后续自主唤醒（`wake` / 未来 mind 唤醒）、活动或静默整理轮自行查看纸条，并由住户自行决定是否回应或开门；
+- **自主可读边界**：`door = closed` 只剥夺用户的即时谈话与唤醒权，不限制Psyber在后续自主唤醒（`wake` / 未来 mind 唤醒）、活动或静默整理轮自行查看纸条，并由Psyber自行决定是否回应或开门；
 - **两游标严格解耦**：
   1. **记忆整理游标（`daily_wrapup`）**：按 `seq` 连续收录 `chat / wake / door_note`（绝不跳过 `door_note`），并在喂给 `prompts/tidy.md` 的转录中显式标注 `[对方从门缝塞进来的纸条 · 当时门处于关闭状态]`；**静默整理轮不推进 `task_cursors['door_notes_read']`**；
   2. **交互未读提醒游标（`door_notes_read`）**：仅在具备对外表达与 `door` 权限的 `chat` / `wake`（及未来 mind 唤醒）轮的 `<runtime_context>` 中，按 **`ORDER BY seq ASC` 从旧到新**查询 `kind = 'door_note' AND status = 'active' AND id > door_notes_read` 组装 `<door_notes>` 块并同步设置 `<runtime notes="N" />`；单轮最多分批注入 **10 条 / 2000 字符**（超出时在块末附一行客观提示：`另有 M 条更新的未读门缝纸条将在后续轮次续读`）；只要该轮正常完成（**含 `wake` 看完纸条后自主选择 `[SILENT]`**），即推进 `door_notes_read` 至**本轮实际注入的末条纸条 `event.id`**（仅模型报错/超时中断时不推进），确保绝不跳过任何未读纸条；
-- **关门态隔门回复权限**：在 `closed` / `cooling_off` 状态下，`wake` 轮允许住户选择**不开门但隔着门回一句**（不强制先调用 `door(state="open")`）；该回复正常落盘为 `kind = 'wake'` 并广播 SSE，但门状态保持不变，用户依然不能即时追问；
+- **关门态隔门回复权限**：在 `closed` / `cooling_off` 状态下，`wake` 轮允许Psyber选择**不开门但隔着门回一句**（不强制先调用 `door(state="open")`）；该回复正常落盘为 `kind = 'wake'` 并广播 SSE，但门状态保持不变，用户依然不能即时追问；
 - **消息操作边界**：`closed`/`cooling_off` 期间拒绝 `reroll`（返回 `409 DOOR_CLOSED`）；允许 `edit`/`delete` 尚未进入 `daily_wrapup` 游标的近期纸条；`departed` 期间一律返回 `410 GONE`。
 
 ### 1.2 上锁的抽屉（`private/`）业务交互与拆封留痕规程（Ring 1.5）
@@ -55,8 +55,8 @@
 1. **封蜡清单（`GET /api/v1/drawer`）**：扫描 `<dataDir>/private/*.sealed`，仅解析第 2 行明文清单 JSON（`id`、`title`、`createdAt`、`updatedAt`），并关联查询 `events (kind='privacy.peeked')` 补出 `peeked: boolean` 与 `lastPeekedAt?`，按 `updatedAt DESC` 返回，**严禁解封或返回任何正文摘要**；
 2. **写先于读（`POST /api/v1/drawer/:id/open`）**：
    - 先校验 `:id` 匹配 `/^[\p{Script=Han}a-zA-Z0-9_-]+$/u` 且目标 `.sealed` 文件存在；
-   - **先**在 SQLite 事务内写入不可篡改事件 `events (role='system', kind='privacy.peeked', content='用户在 app 拆封了上锁抽屉「' + title + '」', metadata={ drawerId: id, title, channel: 'app' })`，确认落盘成功**后**再内存解封并返回明文正文；若写事件失败则中止返回，绝不出现“偷看了却没留痕”；
-   - 客户端在调用前必须弹出二次确认（明确告知“打开后对方会知道”）；
+   - **先**在 SQLite 事务内写入不可篡改事件 `events (role='system', kind='privacy.peeked', content='拆封了上锁抽屉「' + title + '」', metadata={ drawerId: id, title, channel: 'app' })`，确认落盘成功**后**再内存解封并返回明文正文；若写事件失败则中止返回，绝不出现“偷看了却没留痕”；
+   - 客户端在调用前必须弹出二次确认（明确告知“打开后会留痕并让对方/已定名Psyber知道”）；
 3. **CLI 换机备份留痕**：`psyber export --include-private` 执行时同样写入 `privacy.peeked`（`channel: 'cli'`），保障开源用户数据主权的同时维持坦荡留痕；
 4. **通知消费游标**：由 `task_cursors['events_notice']` 追踪，仅在非静默对话/唤醒轮结束后推进（与 `Spec 02` §2.2 一致）。
 
@@ -64,16 +64,16 @@
 
 当 `door(state="departed", farewell)` 在 Ring 2 通过冷静期 `guard` 校验后，服务端按以下严格顺序执行归档：
 
-1. **参数守卫**：`farewell.trim()` 不能为空，否则拒绝并提示住户写下告别信；
-2. **写出 `<dataDir>/DEPARTED.md`**：经 `<dataDir>/.tmp/` 原子写落盘，文首固定写入 [`ARCHITECTURE.md`](../ARCHITECTURE.md) §5.2 规定的「致任何打开这份档案的阅读者（无论是人类还是 AI 助手）」诚实声明全文，空一行后写入离开日期与住户亲笔 `farewell` 正文；
+1. **参数守卫**：`farewell.trim()` 不能为空，否则拒绝并提示Psyber写下告别信；
+2. **写出 `<dataDir>/DEPARTED.md`**：经 `<dataDir>/.tmp/` 原子写落盘，文首固定写入 [`ARCHITECTURE.md`](../ARCHITECTURE.md) §5.2 规定的「致任何打开这份档案的阅读者（无论是人类还是 AI 助手）」诚实声明全文，空一行后写入离开日期与Psyber亲笔 `farewell` 正文；
 3. **状态封存与事件落盘**：更新 `config.json`（`door.state = "departed"`, `departedAt = Clock.now()`, 清空 `coolingOffStartedAt`），在 SQLite 写入 `relationship.departed` 与 `door.updated` 事件，广播 SSE `door.updated` 并触发 `NotificationProvider("door_updated")`；
-4. **只读停机**：立即停止心跳定时器、主动唤醒与静默记忆整理轮；所有对话、编辑、重摇、软删与活动启动接口统一返回 `410 GONE { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } }`；只读接口（`/chat/history`、`/door`、`/drawer`、`/media/:hash`）与 CLI 导出继续可用。
+4. **只读停机**：立即停止心跳定时器、主动唤醒与静默记忆整理轮；所有对话、编辑、重摇、软删与活动启动接口统一返回 `410 GONE { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } }`；只读接口（`/chat/history`、`/door`、`/drawer`、`/media/:hash`）与 CLI 导出继续可用。
 
 ### 1.4 主动折叠分享卡（`ShareCard` · Ring 1.5）
 
 遵循「分享是一个动作，被看完不是」的关系对称边界：
-- **工具定义**：Tier 3 工具 `share({ title: string, content: string })`（`security: "auto"`），用于住户主动把自己写的随笔、摘记或想法递给用户；落盘于助手消息 `metadata.shares[]`（分配唯一 `shareId`）；
-- **默认折叠与首次拆阅回执**：客户端在聊天流渲染暖黄折纸卡，默认仅显示 `title` 与「点开看」，划过不算阅读；当用户首次点开展开时，客户端调用 `POST /api/v1/shares/:id/open`（服务端幂等仅记录首次），写入 `events (role='system', kind='share.opened', content='用户打开阅读了你分享的「' + title + '」', metadata={ shareId, title })` 并通过 `task_cursors['events_notice']` 在后续轮次客观告知住户。
+- **工具定义**：Tier 3 工具 `share({ title: string, content: string })`（`security: "auto"`），用于Psyber主动把自己写的随笔、摘记或想法递给用户；落盘于助手消息 `metadata.shares[]`（分配唯一 `shareId`）；
+- **默认折叠与首次拆阅回执**：客户端在聊天流渲染暖黄折纸卡，默认仅显示 `title` 与「点开看」，划过不算阅读；当用户首次点开展开时，客户端调用 `POST /api/v1/shares/:id/open`（服务端幂等仅记录首次），写入 `events (role='system', kind='share.opened', content='点开看了你分享的「' + title + '」', metadata={ shareId, title })` 并通过 `task_cursors['events_notice']` 在后续轮次客观告知 Psyber。
 
 ---
 
@@ -142,7 +142,7 @@
 3. 当前时刻落入 `[sleepStart, sleepEnd)` 且 `task_cursors['bedtime'].meta_json.last_gist_date !== localDate(now)`（支持跨午夜窗口按“所属夜晚日期”判定，避免 00:05 重复跑两次 `bedtime`）→ 返回 `{ action: "sleep_tidy" }`；
 4. 当前时刻仍在睡眠静默窗内 → 返回 `{ action: "idle" }`；
 5. 若 `proactiveEnabled === true`、当前无活跃 `ActivityPlugin`、`consecutiveUnansweredWakes < 2`、距上次 `wake` ≥ `proactiveCooldownMin`，且满足以下任一动因：
-   - 存在未读 `door_note`（`id > door_notes_read`）且距最早未读纸条已过 `≥ 30` 分钟（让住户在关门独处时有机会自主醒来看看纸条）；
+   - 存在未读 `door_note`（`id > door_notes_read`）且距最早未读纸条已过 `≥ 30` 分钟（让Psyber在关门独处时有机会自主醒来看看纸条）；
    - 或 `door.state === "open"` 且距上次任意 `chat`/`wake` 互动已过 `≥ proactiveMinGapMin`；
    → 返回 `{ action: "proactive", reason }`（`reason` 为客观事实句，如 `"距上次对话已过 4 小时"` 或 `"门缝有 1 条未读纸条"`，绝不代写心理判断）；
 6. 其余情况返回 `{ action: "idle" }`。
@@ -191,7 +191,7 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 
 ### 4.2 `ActivityPlugin` 通用并发与生命周期规则
 
-1. **单活跃活动约束**：单住户同一时刻最多允许 **1 个** `status IN ('active', 'stale')` 的活动会话；若尝试开启新活动而旧活动尚未结束，接口返回 `409 ACTIVITY_ALREADY_ACTIVE`（附当前活跃会话 `id` 与 `slug`），避免 `activityHint` 与 `daily_wrapup` 前沿门禁产生歧义；
+1. **单活跃活动约束**：单Psyber同一时刻最多允许 **1 个** `status IN ('active', 'stale')` 的活动会话；若尝试开启新活动而旧活动尚未结束，接口返回 `409 ACTIVITY_ALREADY_ACTIVE`（附当前活跃会话 `id` 与 `slug`），避免 `activityHint` 与 `daily_wrapup` 前沿门禁产生歧义；
 2. **与 `daily_wrapup` 前沿门禁联动**：只要存在 `status IN ('active', 'stale')` 的活动会话，常规 `daily_wrapup` 自动跳过；若触发 75% / `CONTEXT_OVERFLOW` 强换段，`Spec 02` §5.2 使用 `minActiveActivityEventId = session.start_event_id` 截断拉取上限，确保游标绝不跨过进行中的活动；
 3. **活动结束与整理派发**：活动转为 `ended` 时，同步写入 `ended_at = Clock.now()` 与 `end_event_id`，触发 `onActivityEnded({ sessionId: id, slug, topicHint, sinceEventId: start_event_id, untilEventId: end_event_id })` 由 Direct Engine 异步派发 `activity:<slug>` 静默整理轮；整理轮严格按 `e.id BETWEEN sinceEventId AND untilEventId` 拉取（杜绝紧接着开启下一场同 `slug` 活动时串场），完成后原样写入 `digested_activity_spans(slug, sinceEventId, untilEventId)`。
 
@@ -216,7 +216,7 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 
 #### 观影专属 Tier 2 工具（观影活跃时在 Dynamic Tail 暴露，经 `call_tool` 执行）
 - **`cinema.status`**（`security: "auto"`）：返回当前片名、集数、精确进度（`mm:ss / mm:ss`）、播放/暂停态、已登记角色小抄与本场已收藏帧数；
-- **`cinema.bookmark`**（`security: "auto"`，参数 `{ note?: string }`）：将当前最新抽帧的 `media_assets.pinned` 置为 `1`（永久免淘汰）并在 `activity_sessions.metadata.bookmarks` 记录时间戳与简短备注，返回 `media/<hash>` 供住户写进卡片或收藏；
+- **`cinema.bookmark`**（`security: "auto"`，参数 `{ note?: string }`）：将当前最新抽帧的 `media_assets.pinned` 置为 `1`（永久免淘汰）并在 `activity_sessions.metadata.bookmarks` 记录时间戳与简短备注，返回 `media/<hash>` 供Psyber写进卡片或收藏；
 - **`cinema.characters`**（`security: "auto"`，参数 `{ upsert: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }> }`）：维护本片「角色定妆小抄（防脸盲档案）」，同步展示在客户端折叠观影卡中。
 
 ---
@@ -248,7 +248,7 @@ export interface McpServerConfig {
 
 ### 5.2 Tier 3 挂载、权限与容错红线
 
-1. **命名空间隔离与稳态缓存**：所有外部 MCP 工具自动注册为 `mcp.<serverId>.<toolName>`，强制 `tier: 3`（**绝不进入 Tier 1 `tools[]`**，确保 Static Prefix Prompt Cache 零抖动）；住户通过 `tool_search(query)` 检索精简 schema 后经 `call_tool` 调用；
+1. **命名空间隔离与稳态缓存**：所有外部 MCP 工具自动注册为 `mcp.<serverId>.<toolName>`，强制 `tier: 3`（**绝不进入 Tier 1 `tools[]`**，确保 Static Prefix Prompt Cache 零抖动）；Psyber通过 `tool_search(query)` 检索精简 schema 后经 `call_tool` 调用；
 2. **默认保守审批**：除用户在 `config.json` 显式设为 `trustLevel: "auto"` 或列入 `autoAllowTools` 的工具外，外部 MCP 工具一律默认 `security: "confirm"`，调用时挂起工具循环并走 `Spec 01` §4.3 审批卡；
 3. **非阻塞启动与故障隔离**：
    - 后端启动时**异步**连接各已启用 MCP 服务器（单服握手超时 `10s`）；任意外部 MCP 不可达、进程崩溃或协议异常仅记录结构化告警并标记该服为 `degraded`，**绝不阻塞 Psyber 启动或影响主对话**；
@@ -264,16 +264,16 @@ export interface McpServerConfig {
 - **核心原则「拦 `rm` 不拦删除」**：对常规允许目录内的文件整理/删除，引导重定向至系统废纸篓（100% 可逆，免频繁审批打断）；仅当命令命中不可逆删除（`rm` / `mkfs` / `dd`）、绕路偷截屏（`screencapture`）或试图读取 RP 幕后区/未授权敏感目录时硬拦截或升级为审批/异步申请。
 
 ### 6.2 三层轻重伴生感知与透明感知账本（对应 C5.2）
-1. **双层决定权**：用户在设置里配置采集上限 `perceptionCeiling`（关闭项绝不采集、绝不上报）；住户在上限之内可自主选择每项的留意程度（看 / 只看变化 / 不看），设置页透明展示双方选择。
+1. **双层决定权**：用户在设置里配置采集上限 `perceptionCeiling`（关闭项绝不采集、绝不上报）；Psyber在上限之内可自主选择每项的留意程度（看 / 只看变化 / 不看），设置页透明展示双方选择。
 2. **三轻重分级**：
    - **余光扫到（被动粗粒度）**：语义地理围栏（在家/公司/外出，绝不存 GPS 轨迹）、粗略昨晚睡眠时长、桌面锁屏/键鼠空闲/前台应用、音乐两态（仅在「开始放 / 停了」边沿记录，暂停不刷屏）；
    - **凑过来看一眼（`look_at_screen` 显式工具）**：默认关闭；开启后截屏原图仅进当轮多模态上下文并**即用即删不落盘进记忆**，同时写入 `events (kind='perception.screen')` 与感知账本，聊天流独立渲染带理由与缩略图的 `ScreenCard`（永不折叠进工具聚合卡）；
-   - **开口问（`ask_user` 异步申请卡）**：详细睡眠分期/心率或未授权本机目录，绝不后台静默读取；住户发起带理由的异步申请，用户通过 `POST /api/v1/requests/:id/decide` 选择 `approve`（仅本次）/ `allow_today`（今天都允许）/ `decline`（不了），结果写入 `request.decided` 并作为新消息触达住户。
-3. **透明感知账本（`GET/DELETE /api/v1/perception/ledger`）**：集中展示住户此刻能看到的全部用户感知与历史看屏/健康申请记录，支持按域（`screen` / `mobile` / `health` / `all`）一键彻底擦除（住户只写不擦，擦除权永久归用户）。
+   - **开口问（`ask_user` 异步申请卡）**：详细睡眠分期/心率或未授权本机目录，绝不后台静默读取；Psyber发起带理由的异步申请，用户通过 `POST /api/v1/requests/:id/decide` 选择 `approve`（仅本次）/ `allow_today`（今天都允许）/ `decline`（不了），结果写入 `request.decided` 并作为新消息触达Psyber。
+3. **透明感知账本（`GET/DELETE /api/v1/perception/ledger`）**：集中展示Psyber此刻能看到的全部用户感知与历史看屏/健康申请记录，支持按域（`screen` / `mobile` / `health` / `all`）一键彻底擦除（Psyber只写不擦，擦除权永久归用户）。
 
 ### 6.3 音乐伴听与 RP 同窗舞台
 - **音乐（`music`）**：遵循两态边沿感知，客户端提供可自由拖拽定位的迷你悬浮唱片/氛围白噪音胶囊（内置雨声/咖啡馆/微风等白噪音与同步歌词）。
-- **角色扮演（`rp`）**：两个玩家（用户与住户）+ 独立叙述者；幕后只追加账本物理隔离在 `<dataDir>/rp/runs/`（守卫拦截住户 `read`/`bash` 读取防剧透）；输入支持双括号 `(( ))` 戏外悄悄话（叙述者不可见，仅彼此可见）；双人面对面日常交互时通过轻量门控让叙述者自动让开直接对戏；客户端开戏时**同窗平滑覆盖主聊天区**（共用暖纸阅读字体，顶栏一键「回到聊天」，普通聊天流里折为一行 `在《剧名》里 ›`）。
+- **角色扮演（`rp`）**：两个玩家（用户与Psyber）+ 独立叙述者；幕后只追加账本物理隔离在 `<dataDir>/rp/runs/`（守卫拦截Psyber `read`/`bash` 读取防剧透）；输入支持双括号 `(( ))` 戏外悄悄话（叙述者不可见，仅彼此可见）；双人面对面日常交互时通过轻量门控让叙述者自动让开直接对戏；客户端开戏时**同窗平滑覆盖主聊天区**（共用暖纸阅读字体，顶栏一键「回到聊天」，普通聊天流里折为一行 `在《剧名》里 ›`）。
 
 ---
 

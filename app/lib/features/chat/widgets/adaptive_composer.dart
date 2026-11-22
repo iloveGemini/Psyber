@@ -47,6 +47,7 @@ class AdaptiveComposer extends StatefulWidget {
   const AdaptiveComposer({
     super.key,
     required this.door,
+    this.residentName,
     required this.controller,
     required this.pendingAttachments,
     this.pendingVideoClip,
@@ -72,6 +73,7 @@ class AdaptiveComposer extends StatefulWidget {
   });
 
   final DoorStatus door;
+  final String? residentName;
   final TextEditingController controller;
   final List<PendingAttachment> pendingAttachments;
   final PendingVideoClip? pendingVideoClip;
@@ -511,7 +513,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                   Padding(
                     padding: const EdgeInsets.only(left: 8, bottom: 6),
                     child: Text(
-                      '对方此刻在忙自己的事，留言会先安静放着',
+                      '${(widget.residentName != null && widget.residentName!.trim().isNotEmpty) ? widget.residentName!.trim() : 'Psyber'}此刻在忙自己的事，留言会先安静放着',
                       style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                     ),
                   ),

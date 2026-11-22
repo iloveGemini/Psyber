@@ -72,7 +72,7 @@ describe("T04+T06: CJK 2-gram FTS5 检索与 daily/ state 10 天过期生命周�
     expect(grepRes.output).toContain("daily/2026-11-18-ankle.md");
   });
 
-  test("住户主动改为 resolved 后立即退出召回与默认 grep", async () => {
+  test("Psyber主动改为 resolved 后立即退出召回与默认 grep", async () => {
     ctx = await createTestContext();
 
     const md = [

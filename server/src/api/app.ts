@@ -11,6 +11,7 @@ import type { McpManager } from "../extensions/mcp.ts";
 import type { ChatModelClient } from "../llm/client.ts";
 import type { ResolvedByokSlot } from "../llm/router.ts";
 import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
+import { readIdentityProfile } from "../memory/genesis.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
@@ -77,6 +78,7 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     : exprSticker;
   const recallCount = typeof meta.recallCount === "number" ? meta.recallCount : undefined;
   const toolSummary = Array.isArray(meta.toolSummary) ? meta.toolSummary : undefined;
+  const journalSteps = Array.isArray(meta.journalSteps) ? meta.journalSteps : undefined;
   const model = typeof meta.model === "string" ? meta.model : undefined;
   const usage = meta.usage && typeof meta.usage === "object" ? meta.usage : undefined;
   const videoClip =
@@ -91,6 +93,7 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     versionCount,
     ...(recallCount !== undefined ? { recallCount } : {}),
     ...(toolSummary !== undefined ? { toolSummary } : {}),
+    ...(journalSteps !== undefined ? { journalSteps } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(usage !== undefined ? { usage } : {}),
     ...(videoClip !== undefined ? { videoClip } : {}),
@@ -202,8 +205,12 @@ export function createApp(deps: AppDeps): Hono {
         signal: ac.signal,
         callbacks: {
           onTurnStart: (info) => deps.sse?.emit("turn.start", info),
-          onThinkingDelta: (delta) =>
-            deps.sse?.emit("turn.thinking", { turnId: activeTurnId, delta }),
+          onThinkingDelta: (delta, step) =>
+            deps.sse?.emit("turn.thinking", {
+              turnId: activeTurnId,
+              delta,
+              ...(step !== undefined ? { step } : {}),
+            }),
           onToolProgress: (info) => deps.sse?.emit("turn.tool", { ...info }),
           onTextDelta: (delta) => deps.sse?.emit("turn.text", { turnId: activeTurnId, delta }),
           onExpression: (payload) =>
@@ -228,6 +235,12 @@ export function createApp(deps: AppDeps): Hono {
             } else {
               deps.sse?.emit("message.created", { message: item });
             }
+          },
+          onSystemNoticePersisted: (ev) => {
+            deps.sse?.emit("message.created", { message: toTimelineItem(ev, deps.events) });
+          },
+          onIdentityUpdated: (identity) => {
+            deps.sse?.emit("identity.updated", { ...identity });
           },
           onModelSwitched: (info) => deps.sse?.emit("turn.model_switched", info),
           onRequestApproval: (req) => {
@@ -362,7 +375,7 @@ export function createApp(deps: AppDeps): Hono {
     });
   });
 
-  app.get("/api/v1/chat/history", (c) => {
+  app.get("/api/v1/chat/history", async (c) => {
     const beforeId = c.req.query("before") ?? undefined;
     const rawLimit = c.req.query("limit");
     const limit = rawLimit ? Number(rawLimit) : 50;
@@ -373,11 +386,15 @@ export function createApp(deps: AppDeps): Hono {
     const contextUsage = deps.engine?.getContextUsage();
     const activeTurnId = activeAborts.keys().next().value ?? null;
     const rolloverInProgress = deps.engine?.isRolloverInProgress() ?? false;
+    const identity = deps.dataDir
+      ? await readIdentityProfile(deps.dataDir, deps.clock.now(), deps.getConfig().timezone)
+      : undefined;
     return c.json({
       ...page,
       items: page.items.map((ev) => toTimelineItem(ev, deps.events)),
       activeTurnId,
       rolloverInProgress,
+      ...(identity ? { identity } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     });
   });
@@ -442,7 +459,7 @@ export function createApp(deps: AppDeps): Hono {
     const doorState = cfg.door.state as string;
     if (doorState === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
@@ -521,7 +538,7 @@ export function createApp(deps: AppDeps): Hono {
     const cfg = deps.getConfig();
     if ((cfg.door.state as string) === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
@@ -559,13 +576,13 @@ export function createApp(deps: AppDeps): Hono {
     const cfg = deps.getConfig();
     if ((cfg.door.state as string) === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
     if (cfg.door.state === "closed" || (cfg.door.state as string) === "cooling_off") {
       return c.json(
-        { error: { code: "DOOR_CLOSED", message: "门正关着，暂不唤醒对方" } },
+        { error: { code: "DOOR_CLOSED", message: "门正关着，暂不打扰" } },
         409,
       );
     }
@@ -646,7 +663,7 @@ export function createApp(deps: AppDeps): Hono {
     const cfg = deps.getConfig();
     if ((cfg.door.state as string) === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
@@ -666,13 +683,13 @@ export function createApp(deps: AppDeps): Hono {
     const cfg = deps.getConfig();
     if ((cfg.door.state as string) === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
     if (activeAborts.size > 0) {
       return c.json(
-        { error: { code: "TURN_IN_PROGRESS", message: "对方正在回复中，稍后再撤回" } },
+        { error: { code: "TURN_IN_PROGRESS", message: "当前正在回复中，稍后再撤回" } },
         409,
       );
     }
@@ -709,7 +726,7 @@ export function createApp(deps: AppDeps): Hono {
     const doorState = cfg.door.state as string;
     if (doorState === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
@@ -773,7 +790,7 @@ export function createApp(deps: AppDeps): Hono {
     const doorState = cfg.door.state as string;
     if (doorState === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }
@@ -842,7 +859,7 @@ export function createApp(deps: AppDeps): Hono {
     const cfg = deps.getConfig();
     if ((cfg.door.state as string) === "departed") {
       return c.json(
-        { error: { code: "RELATIONSHIP_DEPARTED", message: "这位住户已正式告别，本档案已转为只读纪念态。" } },
+        { error: { code: "RELATIONSHIP_DEPARTED", message: "Psyber 已正式告别，本档案已转为只读纪念态。" } },
         410,
       );
     }

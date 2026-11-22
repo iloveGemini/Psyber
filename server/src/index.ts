@@ -35,6 +35,7 @@ import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import type { ChatModelClient } from "./llm/client.ts";
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
+import { readIdentityProfile } from "./memory/genesis.ts";
 import { MemoryIndex } from "./memory/index.ts";
 import { MemoryTools, isAllowedWritePath } from "./memory/tools.ts";
 import {
@@ -283,6 +284,13 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
             },
             { taskType, nightDate: targetNight },
           );
+          if (
+            res.ok &&
+            (res.touchedMemoryPaths.includes("self.md") || res.touchedMemoryPaths.includes("user.md"))
+          ) {
+            const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
+            sse.emit("identity.updated", { ...identity });
+          }
           if (taskType === "bedtime" && res.ok && targetNight) {
             lastBedtimeNightDate = targetNight;
             // Spec 05 §4.1：bedtime 睡前整理完成后自动触发一次 VACUUM INTO 本地日原子热备
@@ -367,10 +375,17 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           turnId: wakeTurnId,
           callbacks: {
             onTurnStart: (info) => sse.emit("turn.start", info),
-            onThinkingDelta: (delta) => sse.emit("turn.thinking", { turnId: wakeTurnId, delta }),
+            onThinkingDelta: (delta, step) =>
+              sse.emit("turn.thinking", {
+                turnId: wakeTurnId,
+                delta,
+                ...(step !== undefined ? { step } : {}),
+              }),
             onToolProgress: (info) => sse.emit("turn.tool", { ...info }),
             onTextDelta: (delta) => sse.emit("turn.text", { turnId: wakeTurnId, delta }),
             onExpression: (payload) => sse.emit("turn.expression", { turnId: wakeTurnId, ...payload }),
+            onSystemNoticePersisted: (ev) => sse.emit("message.created", { message: ev }),
+            onIdentityUpdated: (identity) => sse.emit("identity.updated", { ...identity }),
             onDoorUpdated: (state, note) => {
               sse.emit("door.updated", { state, note, updatedAt: clock.now() });
               void notifications.notify({
@@ -394,9 +409,10 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
         if (!wakeRes.silent && !wakeRes.error && wakeRes.message) {
           consecutiveUnansweredWakes += 1;
           sse.emit("message.created", { message: wakeRes.message });
+          const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
           await notifications.notify({
             kind: "wake",
-            title: "Psyber",
+            title: identity.residentName || "Psyber",
             body: wakeRes.text.trim().slice(0, 140) || "有一条新消息",
             turnId: wakeRes.turnId,
           });

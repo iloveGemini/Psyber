@@ -6,6 +6,7 @@ import { localDateStartMs, localDay, localWeekday } from "../core/clock.ts";
 import { commitMemoryPaths } from "../core/git.ts";
 import { readPrompt } from "../core/prompts.ts";
 import type { ChatMessage, ChatModelClient, ChatToolCall } from "../llm/client.ts";
+import { readIdentityProfile } from "../memory/genesis.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import {
   isAllowedWritePath,
@@ -45,9 +46,9 @@ const MAX_TIDY_STEPS = 12;
 
 const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
   daily_wrapup:
-    "我整理游标后的近期对话：在 daily/ 记录值得留存的切片或短期状态（state 必填 tags 与 ttl_days），完成旧 state 卡的 resolved 对账；若对方明说了新的规矩、承诺或重要原话，按需同步到 shelf/ 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。",
+    "我整理游标后的近期对话：在 daily/ 记录值得留存的切片或短期状态（state 必填 tags 与 ttl_days），完成旧 state 卡的 resolved 对账；若聊天中明说了新的规矩、承诺或重要原话，按需同步到 shelf/ 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。",
   bedtime:
-    "我回顾今日已整理的卡片摘要与剩余未整理片段：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步更新 gist/weeks/）；② 若对方明说了新的规矩或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或对方有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md。",
+    "我回顾今日已整理的卡片摘要与剩余未整理片段：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步更新 gist/weeks/）；② 若对话中明说了新的规矩或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或 user.md 里的朋友有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md（定名、自定代词或明确称呼/代词时同步更新 frontmatter 的 name / pronoun）。",
 };
 
 async function readOptional(absPath: string): Promise<string | null> {
@@ -109,7 +110,7 @@ async function executeSingleTidyPass(
   const memoryDir = path.join(dataDir, "memory");
   const cursorId = events.getCursor("daily_wrapup") ?? "";
 
-  const [selfMd, userMd, tidyPrompt, actReg, entReg] = await Promise.all([
+  const [selfMd, userMd, tidyPrompt, actReg, entReg, identity] = await Promise.all([
     readOptional(path.join(memoryDir, "self.md")),
     readOptional(path.join(memoryDir, "user.md")),
     readPrompt(promptsDir, "tidy.md", {
@@ -117,7 +118,9 @@ async function executeSingleTidyPass(
     }),
     readOptional(path.join(memoryDir, "activities/REGISTRY.yaml")),
     readOptional(path.join(memoryDir, "entities/REGISTRY.yaml")),
+    readIdentityProfile(dataDir, clock.now(), clock.timeZone),
   ]);
+  const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
 
   const sysSections: string[] = [];
   if (selfMd) sysSections.push(`<self>\n${selfMd}\n</self>`);
@@ -132,14 +135,14 @@ async function executeSingleTidyPass(
   const transcriptLines = opts.batch.map((e) => {
     if (e.status === "retracted") {
       if (e.role === "user") {
-        return "对方: （对方撤回了一条消息）";
+        return `${userLabel}: （${userLabel}撤回了一条消息）`;
       }
-      return `我: ${e.content}（已撤回，对方看不到内容）`;
+      return `我: ${e.content}（已撤回，${userLabel}看不到内容）`;
     }
     if (e.kind === "door_note") {
-      return `[对方从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}`;
+      return `[${userLabel}从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}`;
     }
-    return `${e.role === "user" ? "对方" : "我"}: ${e.content}`;
+    return `${e.role === "user" ? userLabel : "我"}: ${e.content}`;
   });
 
   const materialParts: string[] = [

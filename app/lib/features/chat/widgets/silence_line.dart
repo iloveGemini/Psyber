@@ -23,7 +23,7 @@ String pickSilencePhrase(String seed, {required bool ownTime}) {
   return pool[hash % pool.length];
 }
 
-/// 住户主动选择沉默（Spec 04 §5.4）：
+/// Psyber 主动选择沉默（Spec 04 §5.4）：
 /// 视觉语域与系统故障中断严格隔离——仅一条极轻的横线与斜体短语，无边框、无警示色。
 class SilenceLine extends StatelessWidget {
   const SilenceLine({

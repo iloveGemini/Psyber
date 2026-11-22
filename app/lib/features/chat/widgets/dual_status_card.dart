@@ -10,7 +10,7 @@ import '../../../core/state/app_controller.dart';
 import '../../../shared/theme.dart';
 
 /// 左侧栏顶部「双人状态卡」：
-/// - 上方：住户头像（点击可更换）、门状态/回复状态与门牌心绪短句；
+/// - 上方：Psyber 头像（点击可更换）、门状态/回复状态与门牌心绪短句；
 /// - 下方：用户头像（点击可更换）、主动挂出的心绪短句与一键「勿扰」开关。
 class DualStatusCard extends StatefulWidget {
   const DualStatusCard({
@@ -118,11 +118,12 @@ class _DualStatusCardState extends State<DualStatusCard> {
         mimeType: picked.mimeType,
       );
       if (!mounted) return;
+      final residentLabel = widget.controller.identityNotifier.value.residentSubject;
       ScaffoldMessenger.maybeOf(context)
         ?..hideCurrentSnackBar()
         ..showSnackBar(
           SnackBar(
-            content: Text(who == 'resident' ? '住户头像已更新' : '我的头像已更新'),
+            content: Text(who == 'resident' ? '$residentLabel头像已更新' : '我的头像已更新'),
             duration: const Duration(seconds: 2),
           ),
         );
@@ -152,66 +153,74 @@ class _DualStatusCardState extends State<DualStatusCard> {
           valueListenable: widget.controller.activeTurnNotifier,
           builder: (context, activeTurn, _) => ValueListenableBuilder<UserStatus>(
             valueListenable: widget.controller.userStatusNotifier,
-            builder: (context, userStatus, _) {
-              final profile = widget.controller.profileNotifier.value;
-              final isReplying = activeTurn != null;
-              final doorLabel = _describeDoor(door, isReplying);
-              final residentDotColor = door.state == DoorState.open
-                  ? colors.statusSuccess
-                  : (door.state == DoorState.departed
-                      ? colors.inkFaint
-                      : colors.thresholdAmber);
-              final residentNote = door.note?.trim();
+            builder: (context, userStatus, _) => ValueListenableBuilder<IdentityInfo>(
+              valueListenable: widget.controller.identityNotifier,
+              builder: (context, identity, _) {
+                final profile = widget.controller.profileNotifier.value;
+                final isReplying = activeTurn != null;
+                final doorLabel = _describeDoor(door, isReplying);
+                final residentName = identity.displayResidentName;
+                final userDisplay = identity.userName ?? '我';
+                final residentDotColor = door.state == DoorState.open
+                    ? colors.statusSuccess
+                    : (door.state == DoorState.departed
+                        ? colors.inkFaint
+                        : colors.thresholdAmber);
+                final residentNote = door.note?.trim();
 
-              return Container(
-                key: const Key('dual_status_card'),
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Row 1: 住户（头像在左，门牌心绪气泡在右）
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _StatusAvatar(
-                          key: const Key('quick_resident_avatar'),
-                          tooltip: '点击更换住户头像',
-                          icon: PhosphorIconsLight.sparkle,
-                          bgColor: colors.celadonWash,
-                          iconColor: colors.inkDeep,
-                          dotColor: residentDotColor,
-                          imageUrl: settingsSnap?.residentAvatarUrl,
-                          profile: profile,
-                          onTap: _uploadingAvatar
-                              ? null
-                              : () => unawaited(_pickAndUploadAvatar('resident')),
-                        ),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Text(
-                                  '住户',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: colors.inkDeep,
+                return Container(
+                  key: const Key('dual_status_card'),
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Row 1: Psyber（头像在左，门牌心绪气泡在右）
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _StatusAvatar(
+                            key: const Key('quick_resident_avatar'),
+                            tooltip: '点击更换$residentName头像',
+                            icon: PhosphorIconsLight.sparkle,
+                            bgColor: colors.celadonWash,
+                            iconColor: colors.inkDeep,
+                            dotColor: residentDotColor,
+                            imageUrl: settingsSnap?.residentAvatarUrl,
+                            profile: profile,
+                            onTap: _uploadingAvatar
+                                ? null
+                                : () => unawaited(_pickAndUploadAvatar('resident')),
+                          ),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      residentName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: colors.inkDeep,
+                                      ),
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '· $doorLabel',
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: colors.inkQuiet,
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '· $doorLabel',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      color: colors.inkQuiet,
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
+                                ],
+                              ),
                             const SizedBox(height: 4),
                             Container(
                               padding: const EdgeInsets.symmetric(
@@ -319,7 +328,7 @@ class _DualStatusCardState extends State<DualStatusCard> {
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  '我',
+                                  userDisplay,
                                   style: TextStyle(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
@@ -477,7 +486,8 @@ class _DualStatusCardState extends State<DualStatusCard> {
                 ],
               ),
             );
-            },
+              },
+            ),
           ),
         ),
       ),

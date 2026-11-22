@@ -7,7 +7,7 @@ import '../../../core/models/models.dart';
 import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
 
-/// 住户主动递出的暖黄折叠分享卡（ShareCard）：
+/// Psyber 主动递出的暖黄折叠分享卡（ShareCard）：
 /// - 默认只显示标题与「点开看」，划过去不算看过；
 /// - 只有用户真的点击展开时，才触发一次拆阅回执（onOpen），让“分享”与“拆阅”成为完整的双向关系动作。
 class ShareCard extends StatefulWidget {

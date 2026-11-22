@@ -8,7 +8,7 @@ import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
-/// 配对入口页：连接常驻在后台的住户服务，支持终端一次性配对码绑定长期令牌。
+/// 配对入口页：连接常驻在后台的 Psyber 空间，支持终端一次性配对码绑定长期令牌。
 class PairingPage extends StatefulWidget {
   const PairingPage({
     super.key,
@@ -130,7 +130,7 @@ class _PairingPageState extends State<PairingPage> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '连接到常驻在后台的住户空间，窗口只是推开那扇门的地方。',
+                    '连接到常驻在后台的 Psyber 空间，窗口只是推开那扇门的地方。',
                     style: TextStyle(fontSize: 13.5, color: colors.inkQuiet, height: 1.5),
                   ),
                   const SizedBox(height: 20),

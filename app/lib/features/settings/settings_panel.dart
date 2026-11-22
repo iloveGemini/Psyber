@@ -1089,9 +1089,11 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
         mimeType: picked.mimeType,
       );
       if (!mounted) return;
+      final residentLabel =
+          widget.controller.identityNotifier.value.displayResidentName;
       setState(() {
         _uploadingAvatar = false;
-        _avatarHint = who == 'resident' ? '住户头像已更新' : '我的头像已更新';
+        _avatarHint = who == 'resident' ? '$residentLabel头像已更新' : '我的头像已更新';
       });
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -1596,13 +1598,19 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
                 Row(
                   children: [
                     Expanded(
-                      child: OutlinedButton.icon(
-                        key: const Key('upload_resident_avatar_button'),
-                        onPressed: _uploadingAvatar
-                            ? null
-                            : () => unawaited(_handleUploadAvatar('resident')),
-                        icon: const Icon(PhosphorIconsLight.sparkle, size: 15),
-                        label: const Text('住户头像', style: TextStyle(fontSize: 12)),
+                      child: ValueListenableBuilder<IdentityInfo>(
+                        valueListenable: widget.controller.identityNotifier,
+                        builder: (context, identity, _) => OutlinedButton.icon(
+                          key: const Key('upload_resident_avatar_button'),
+                          onPressed: _uploadingAvatar
+                              ? null
+                              : () => unawaited(_handleUploadAvatar('resident')),
+                          icon: const Icon(PhosphorIconsLight.sparkle, size: 15),
+                          label: Text(
+                            '${identity.displayResidentName}头像',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -1751,15 +1759,18 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
                 ),
                 if (enabled) ...[
                   Divider(height: 1, color: colors.hairline),
-                  _QuietSwitchTile(
-                    key: const Key('recall_eval_notice_switch'),
-                    title: '评测检视对住户透明',
-                    subtitle: '开启后如实告知住户当前处于召回评测检视中',
-                    value: snap?.recallEvalNoticeResident ?? false,
-                    onChanged: (v) => unawaited(
-                      widget.controller.patchSettings({
-                        'recallEvalNoticeResident': v,
-                      }),
+                  ValueListenableBuilder<IdentityInfo>(
+                    valueListenable: widget.controller.identityNotifier,
+                    builder: (context, identity, _) => _QuietSwitchTile(
+                      key: const Key('recall_eval_notice_switch'),
+                      title: '评测检视对${identity.displayResidentName}透明',
+                      subtitle: '开启后如实告知${identity.displayResidentName}当前处于召回评测检视中',
+                      value: snap?.recallEvalNoticeResident ?? false,
+                      onChanged: (v) => unawaited(
+                        widget.controller.patchSettings({
+                          'recallEvalNoticeResident': v,
+                        }),
+                      ),
                     ),
                   ),
                 ],

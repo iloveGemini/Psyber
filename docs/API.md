@@ -25,7 +25,7 @@
 | `POST /api/v1/auth/oauth/:provider/start` | Ring 1.5 | 发起 `pi-ai` 订阅 OAuth 登录（PKCE 或 Device Code，Ring 1 先用 BYOK / 本机凭证） |
 | `POST /api/v1/auth/oauth/:provider/exchange` | Ring 1.5 | 提交回调授权码或轮询 Device Code 完成 OAuth Token 落盘 |
 | `GET /api/v1/door` | **Ring 1** | 获取当前门状态（Ring 1 为 `open`/`quiet`/`closed`，Ring 2 扩展后两态）、门牌便签与未读门缝纸条数 |
-| `GET /api/v1/genesis` | **Ring 1** | 查询住户初始化状态（凭证、基础称呼、作息窗） |
+| `GET /api/v1/genesis` | **Ring 1** | 查询Psyber初始化状态（凭证、基础称呼、作息窗） |
 | `POST /api/v1/genesis` | **Ring 1** | 提交初始化配置（支持空白中性开局，前几轮对话自然定名） |
 
 ### 2.2 聊天、门缝留言、消息生命周期与工具审批
@@ -34,15 +34,15 @@
 | :--- | :--- | :--- |
 | `GET /api/v1/chat/history?before=<id>&limit=50` | **Ring 1** | 分页拉取时间线（含对话、门缝留言、具身表达元数据、可折叠 `✦ 整理记忆` 静默任务卡；媒体仅返回 URL，**严禁内联 base64**；断线重连可直接拉取补齐） |
 | `POST /api/v1/chat/messages` | **Ring 1** | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `attachments`、`stickerId`、Ring 1.5 可选 `urgent: true` 仅于 `closed` 态一次性紧急直达）；门为 `closed` 且非紧急时自动作为「门缝纸条」落盘不唤醒回复；上下文达阈值时先同步整理旧会话再切新会话（期间新消息仍 `202` 排队落盘，切段后自动归属新段） |
-| `DELETE /api/v1/chat/messages/:id` | **Ring 1** | 静默软删消息（修对话，标记 `deleted`，绝不告知住户，不污染后续记忆整理） |
+| `DELETE /api/v1/chat/messages/:id` | **Ring 1** | 静默软删消息（修对话，标记 `deleted`，绝不告知Psyber，不污染后续记忆整理） |
 | `POST /api/v1/turns/:turnId/abort` | **Ring 1** | 主动中止正在生成的对话轮或工具循环（保留已落盘的部分内容） |
 | `POST /api/v1/turns/:turnId/retry` | Ring 1.5 | 失败轮次原地无痕重试（不重复插入用户消息，避免聊天流出现重复气泡） |
 | `POST /api/v1/chat/messages/:id/edit` | Ring 1.5 | 静默编辑最后一条用户消息并重新生成（`closed`/`cooling_off` 时仅允许编辑 `door_note` 不唤醒） |
-| `POST /api/v1/chat/messages/:id/reroll` | Ring 1.5 | 静默重摇助手回复（保留版本组，可切版本，绝不告知住户） |
+| `POST /api/v1/chat/messages/:id/reroll` | Ring 1.5 | 静默重摇助手回复（保留版本组，可切版本，绝不告知Psyber） |
 | `POST /api/v1/chat/messages/:id/version` | Ring 1.5 | 切换同一 `group_id` 的历史版本 |
-| `POST /api/v1/chat/messages/:id/retract` | Ring 1.5 | 双向社交撤回（用户撤回自己的消息，置 `status='retracted'`，住户仅见占位不知原文；与静默 `DELETE` 严格区分） |
+| `POST /api/v1/chat/messages/:id/retract` | Ring 1.5 | 双向社交撤回（用户撤回自己的消息，置 `status='retracted'`，Psyber仅见占位不知原文；与静默 `DELETE` 严格区分） |
 | `POST /api/v1/chat/wrap-up` | Ring 1.5 | 用户手动触发「存记忆换段」：先同步完成旧会话 `daily_wrapup` 整理再切新 `session_id`（前端显示「正在收拢这段记忆…」） |
-| `POST /api/v1/shares/:id/open` | Ring 1.5 | 用户首次点开住户递出的折叠分享卡（`ShareCard`）时上报拆阅回执，写入 `share.opened` 并告知住户 |
+| `POST /api/v1/shares/:id/open` | Ring 1.5 | 用户首次点开Psyber递出的折叠分享卡（`ShareCard`）时上报拆阅回执，写入 `share.opened` 并告知Psyber |
 | `POST /api/v1/turns/:turnId/approval` | Ring 2 | 响应同步高风险工具审批（`bash` / `browser` / 外部 MCP 120s 实时确认卡） |
 | `GET /api/v1/requests` | Ring 2 | 获取待处理与近期的异步申请卡列表（高敏健康数据、未授权本机目录访问等） |
 | `POST /api/v1/requests/:id/decide` | Ring 2 | 响应异步申请卡（`approve` 仅本次 / `allow_today` 今天都允许 / `decline` 不了） |
@@ -91,8 +91,8 @@
 | `GET /api/v1/llm/models` / `POST /api/v1/llm/test` | Ring 1.5 | 按已配置 Provider 自动发现可用模型（含上下文窗口、思考档位能力）并一键测试连通性 |
 | `GET /api/v1/usage/stats` | Ring 1.5 | 设置页消耗统计（今日/累计/按日/按模型 Token 消耗、估算费用与 Prompt Cache 命中率；绝不常驻主聊天面） |
 | `GET /api/v1/user-status` / `PATCH /api/v1/user-status` | Ring 1.5 | 读取或更新用户侧双人状态签（手动心绪短句 + 勿扰开关，勿扰态抑制非紧急 `wake`） |
-| `POST /api/v1/avatars/:who` | Ring 1.5 | 上传用户或住户头像（`:who` 为 `user` 或 `resident`，SHA-256 落盘 `media/`） |
-| `GET /api/v1/perception/ledger` | Ring 2 | 读取「透明感知账本」（列出住户此刻可见的全部感知快照、看屏次数/理由、健康申请历史与双方留意程度） |
+| `POST /api/v1/avatars/:who` | Ring 1.5 | 上传用户或Psyber头像（`:who` 为 `user` 或 `resident`，SHA-256 落盘 `media/`） |
+| `GET /api/v1/perception/ledger` | Ring 2 | 读取「透明感知账本」（列出Psyber此刻可见的全部感知快照、看屏次数/理由、健康申请历史与双方留意程度） |
 | `DELETE /api/v1/perception/ledger/:scope` | Ring 2 | 分项一键彻底擦除感知账本（`screen` / `mobile` / `health` / `all`；擦除权永久归用户） |
 
 ---
