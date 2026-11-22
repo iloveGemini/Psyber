@@ -103,8 +103,8 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     thresholdAmberSoft: Color(0xFFFAF2E4),
     dangerInk: Color(0xFFC27A51),      // Roxy Light --danger
     dangerSoft: Color(0xFFF9EDE8),
-    userBubble: Color(0xFFF0F0EC),     // Roxy Light --user-bubble
-    userText: Color(0xFF30302D),       // Roxy Light --user-text
+    userBubble: Color(0xFF3C3C38),     // 跟随 accent（实心气泡）
+    userText: Color(0xFFFFFFFF),       // onAccent（气泡内白字）
     isDark: false,
   );
 
@@ -129,8 +129,8 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     thresholdAmberSoft: Color(0xFF3A3020),
     dangerInk: Color(0xFFD97D64),      // Roxy Dark --danger
     dangerSoft: Color(0xFF3D2A26),
-    userBubble: Color(0xFF343431),     // Roxy Dark --user-bubble
-    userText: Color(0xFFF1F1ED),       // Roxy Dark --user-text
+    userBubble: Color(0xFFDEDED7),     // 跟随 accent（实心气泡）
+    userText: Color(0xFF292927),       // onAccent（气泡内深字）
     isDark: true,
   );
 
@@ -156,8 +156,8 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     thresholdAmberSoft: Color(0xFFF2E7D5),
     dangerInk: Color(0xFF9E4B3A),
     dangerSoft: Color(0xFFF2E1DC),
-    userBubble: Color(0xFFE2DBD0),
-    userText: Color(0xFF313131),
+    userBubble: Color(0xFFA2644C),     // 跟随 accent（实心陶土红气泡）
+    userText: Color(0xFFFAF7F2),       // onAccent（气泡内暖白字）
     isDark: false,
     hasPaperGrain: true,
     useReadingChrome: true,
@@ -186,8 +186,8 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     thresholdAmberSoft: Color(0xFFEBE3D4),
     dangerInk: Color(0xFF8E5258),
     dangerSoft: Color(0xFFEBDDE0),
-    userBubble: Color(0xFFD8D5CE),
-    userText: Color(0xFF28343B),
+    userBubble: Color(0xFF3B4B54),     // 跟随 accent（实心气泡）
+    userText: Color(0xFFF2EFEA),       // onAccent
     isDark: false,
     hasPaperGrain: true,
     useReadingChrome: true,
@@ -216,8 +216,8 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     thresholdAmberSoft: Color(0xFF342E25),
     dangerInk: Color(0xFFC48486),
     dangerSoft: Color(0xFF3A292C),
-    userBubble: Color(0xFF2F3B45),
-    userText: Color(0xFFE2DDD6),
+    userBubble: Color(0xFF8C9BA5),     // 跟随 accent（实心气泡）
+    userText: Color(0xFF182026),       // onAccent
     isDark: true,
     hasPaperGrain: true,
     useReadingChrome: true,

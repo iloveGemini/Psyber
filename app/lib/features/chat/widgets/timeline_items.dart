@@ -490,9 +490,10 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         ? BoxDecoration(
             color: item.isDoorNote ? colors.slipPaper : colors.userBubble,
             borderRadius: BorderRadius.circular(colors.useReadingChrome ? 8 : 10),
-            border: Border.all(
-              color: item.isDoorNote ? colors.hairlineWarm : colors.hairline,
-            ),
+            // 实心强调色气泡不描边，只给门缝纸条留暖色细边
+            border: item.isDoorNote
+                ? Border.all(color: colors.hairlineWarm)
+                : null,
           )
         : null;
     final EdgeInsetsGeometry bubblePadding = showBubbleBox
@@ -675,9 +676,14 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               RichMessageText(
                                 text: item.content,
                                 baseStyle: isUser
-                                    ? null
+                                    // 用户气泡用主题 userText（实心强调色上的反白字）
+                                    ? TextStyle(
+                                        fontSize: 15,
+                                        height: 1.62,
+                                        color: colors.userText,
+                                      )
                                     : PsyberTheme.editorialSerif.copyWith(
-                                        fontSize: 15.5,
+                                        fontSize: 15,
                                         height: 1.66,
                                         color: colors.inkDeep,
                                       ),
@@ -934,7 +940,7 @@ class StreamingAssistantBubble extends StatelessWidget {
                       RichMessageText(
                         text: active.text,
                         baseStyle: PsyberTheme.editorialSerif.copyWith(
-                          fontSize: 15.5,
+                          fontSize: 15,
                           height: 1.66,
                           color: colors.inkDeep,
                         ),
