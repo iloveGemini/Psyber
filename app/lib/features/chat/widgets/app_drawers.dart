@@ -10,6 +10,7 @@ import '../../../core/models/models.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../shared/theme.dart';
 import '../../settings/drawer_modal.dart';
+import '../../settings/settings_panel.dart';
 import 'dual_status_card.dart';
 
 /// 左区面板正文：复用于窄屏遮罩抽屉与宽屏可折叠侧边栏。
@@ -33,6 +34,7 @@ class LeftArchivePanelContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    final appearanceAnchorKey = GlobalKey();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -69,7 +71,7 @@ class LeftArchivePanelContent extends StatelessWidget {
             ],
           ),
         ),
-        DualStatusCard(controller: controller),
+        DualStatusCard(controller: controller, imagePicker: imagePicker),
         Divider(height: 1, color: colors.hairline),
         Expanded(
           child: ListView(
@@ -173,32 +175,79 @@ class LeftArchivePanelContent extends StatelessWidget {
         Divider(height: 1, color: colors.hairline),
         Material(
           color: isSidebar ? Colors.transparent : colors.mineralCanvas,
-          child: ListTile(
-            key: const Key('settings_button'),
-            dense: true,
-            leading: Icon(
-              PhosphorIconsLight.slidersHorizontal,
-              size: 19,
-              color: colors.inkDeep,
+          child: SafeArea(
+            top: false,
+            left: false,
+            right: false,
+            bottom: !isSidebar,
+            child: Row(
+              children: [
+                Expanded(
+                  child: ListTile(
+                    key: const Key('settings_button'),
+                    dense: true,
+                    contentPadding: const EdgeInsets.fromLTRB(16, 0, 4, 0),
+                    leading: Icon(
+                      PhosphorIconsLight.slidersHorizontal,
+                      size: 19,
+                      color: colors.inkDeep,
+                    ),
+                    title: Text(
+                      '偏好与设置',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w500,
+                        color: colors.inkDeep,
+                      ),
+                    ),
+                    subtitle: Text(
+                      '模型、作息、扩展与设备',
+                      style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () {
+                      if (!isSidebar) {
+                        Navigator.of(context).pop();
+                      }
+                      onOpenSettings();
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: KeyedSubtree(
+                    key: appearanceAnchorKey,
+                    child: ValueListenableBuilder<ThemeMode>(
+                      valueListenable: controller.themeModeNotifier,
+                      builder: (context, mode, _) {
+                        final icon = switch (mode) {
+                          ThemeMode.light => PhosphorIconsLight.sun,
+                          ThemeMode.dark => PhosphorIconsLight.moon,
+                          ThemeMode.system => PhosphorIconsLight.circleHalf,
+                        };
+                        return IconButton(
+                          key: const Key('quick_appearance_button'),
+                          tooltip: '外观与阅读色板',
+                          icon: Icon(icon, size: 18, color: colors.inkQuiet),
+                          onPressed: () {
+                            if (!isSidebar) {
+                              Navigator.of(context).pop();
+                            }
+                            unawaited(
+                              showAppearancePopover(
+                                context,
+                                anchorKey: appearanceAnchorKey,
+                                controller: controller,
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ],
             ),
-            title: Text(
-              '偏好与设置',
-              style: TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w500,
-                color: colors.inkDeep,
-              ),
-            ),
-            subtitle: Text(
-              '模型、作息、通知、设备与外观',
-              style: TextStyle(fontSize: 11, color: colors.inkQuiet),
-            ),
-            onTap: () {
-              if (!isSidebar) {
-                Navigator.of(context).pop();
-              }
-              onOpenSettings();
-            },
           ),
         ),
       ],
@@ -354,19 +403,23 @@ class LeftArchiveDrawer extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
 
+    const drawerRadius = BorderRadius.only(
+      topRight: Radius.circular(16),
+      bottomRight: Radius.circular(16),
+    );
+
     return Drawer(
       backgroundColor: colors.letterSurface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.only(
-          topRight: Radius.circular(16),
-          bottomRight: Radius.circular(16),
-        ),
-      ),
-      child: SafeArea(
-        child: LeftArchivePanelContent(
-          controller: controller,
-          onOpenSettings: onOpenSettings,
-          imagePicker: imagePicker,
+      shape: const RoundedRectangleBorder(borderRadius: drawerRadius),
+      child: ClipRRect(
+        borderRadius: drawerRadius,
+        child: SafeArea(
+          bottom: false,
+          child: LeftArchivePanelContent(
+            controller: controller,
+            onOpenSettings: onOpenSettings,
+            imagePicker: imagePicker,
+          ),
         ),
       ),
     );

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -11,28 +12,802 @@ import '../../core/network/api_client.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
-/// 完整设置面板：
-/// - 宽屏（>= 920px）嵌入右侧滑出栏，不遮挡主空间；
-/// - 窄屏 / 移动端作为独立设置页推入，可自然返回；
-/// - 接通 GET / PATCH /api/v1/settings（模型热切换、作息、通知、设备吊销）并保留贴纸管理。
+/// 设置分组：将原本平铺的 7 个长分区收拢为 4 个低频配置中心。
+enum SettingsSection {
+  modelUsage,
+  rhythmNotify,
+  appearance,
+  toolsDevices,
+}
+
+extension SettingsSectionMeta on SettingsSection {
+  String get title => switch (this) {
+        SettingsSection.modelUsage => '模型与用量',
+        SettingsSection.rhythmNotify => '作息与通知',
+        SettingsSection.appearance => '居所与外观',
+        SettingsSection.toolsDevices => '工具与设备',
+      };
+
+  IconData get icon => switch (this) {
+        SettingsSection.modelUsage => PhosphorIconsLight.cpu,
+        SettingsSection.rhythmNotify => PhosphorIconsLight.moonStars,
+        SettingsSection.appearance => PhosphorIconsLight.palette,
+        SettingsSection.toolsDevices => PhosphorIconsLight.plugsConnected,
+      };
+}
+
+/// 桌面端居中双栏设置弹层（不再占据主界面右侧抽屉）。
+Future<void> showSettingsDialog(
+  BuildContext context, {
+  required AppController controller,
+  ImageFilePicker? imagePicker,
+  SettingsSection initialSection = SettingsSection.modelUsage,
+}) {
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierColor: Colors.black.withValues(alpha: 0.28),
+    builder: (dialogCtx) {
+      final colors = dialogCtx.colors;
+      final size = MediaQuery.sizeOf(dialogCtx);
+      final dialogWidth = math.min(760.0, size.width - 48);
+      final dialogHeight = math.min(620.0, size.height * 0.84);
+
+      return Dialog(
+        key: const Key('settings_modal_dialog'),
+        backgroundColor: colors.mineralCanvas,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: colors.hairline),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: SizedBox(
+          width: dialogWidth,
+          height: dialogHeight,
+          child: SettingsPanelContent(
+            controller: controller,
+            imagePicker: imagePicker,
+            initialSection: initialSection,
+            onClose: () => Navigator.of(dialogCtx).pop(),
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// 侧边栏快捷外观浮层（无黑幕遮罩，可直接看着主聊天纸面预览配色）。
+Future<void> showAppearancePopover(
+  BuildContext context, {
+  required GlobalKey anchorKey,
+  required AppController controller,
+}) {
+  final isWide = MediaQuery.sizeOf(context).width >= PsyberTheme.desktopBreakpoint;
+  if (!isWide) {
+    return showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: context.colors.letterSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+          child: AppearanceQuickCard(
+            controller: controller,
+            onClose: () => Navigator.of(sheetCtx).pop(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  double bottom = 58;
+  double left = 16;
+  final anchorCtx = anchorKey.currentContext;
+  if (anchorCtx != null) {
+    final box = anchorCtx.findRenderObject() as RenderBox?;
+    final overlay = Overlay.maybeOf(context)?.context.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize && overlay != null && overlay.hasSize) {
+      final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+      bottom = (overlay.size.height - topLeft.dy + 8).clamp(16.0, overlay.size.height - 240.0);
+      left = topLeft.dx.clamp(12.0, math.max(12.0, overlay.size.width - 324.0));
+    }
+  }
+
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: '关闭外观快捷切换',
+    barrierColor: Colors.transparent,
+    transitionDuration: const Duration(milliseconds: 140),
+    pageBuilder: (dialogCtx, _, __) {
+      final colors = dialogCtx.colors;
+      return Stack(
+        children: [
+          Positioned(
+            left: left,
+            bottom: bottom,
+            width: 312,
+            child: Material(
+              key: const Key('appearance_popover_card'),
+              color: colors.letterSurface,
+              elevation: 8,
+              shadowColor: Colors.black.withValues(alpha: 0.12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: BorderSide(color: colors.hairline),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: AppearanceQuickCard(
+                  controller: controller,
+                  onClose: () => Navigator.of(dialogCtx).pop(),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+    transitionBuilder: (ctx, anim, _, child) {
+      return FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+        child: child,
+      );
+    },
+  );
+}
+
+/// 独立导出的上传贴纸弹窗（供贴纸选择面板右上角「+ 上传」直接调用）。
+Future<void> showStickerUploadDialog(
+  BuildContext context, {
+  required AppController controller,
+  ImageFilePicker? imagePicker,
+}) {
+  return showDialog<void>(
+    context: context,
+    builder: (_) => _StickerUploadDialog(
+      controller: controller,
+      imagePicker: imagePicker,
+    ),
+  );
+}
+
+/// 快捷外观与阅读色板卡片（复用于侧边栏 Popover 与移动端底部 Sheet）。
+class AppearanceQuickCard extends StatelessWidget {
+  const AppearanceQuickCard({
+    super.key,
+    required this.controller,
+    required this.onClose,
+  });
+
+  final AppController controller;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(PhosphorIconsLight.palette, size: 16, color: colors.inkDeep),
+            const SizedBox(width: 7),
+            Text(
+              '外观与阅读色板',
+              style: PsyberTheme.editorialSerif.copyWith(
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+                color: colors.inkDeep,
+              ),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(PhosphorIconsLight.x, size: 15),
+              tooltip: '关闭',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+              onPressed: onClose,
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        ThemePaletteSelector(controller: controller, framed: false),
+      ],
+    );
+  }
+}
+
+/// 可复用的主题模式与 5 套阅读色板选择器。
+class ThemePaletteSelector extends StatelessWidget {
+  const ThemePaletteSelector({
+    super.key,
+    required this.controller,
+    this.framed = true,
+  });
+
+  final AppController controller;
+  final bool framed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: controller.themeModeNotifier,
+      builder: (context, currentMode, _) {
+        return ValueListenableBuilder<PsyberPalette>(
+          valueListenable: controller.lightPaletteNotifier,
+          builder: (context, lightPalette, _) {
+            return ValueListenableBuilder<PsyberPalette>(
+              valueListenable: controller.darkPaletteNotifier,
+              builder: (context, darkPalette, _) {
+                final body = Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_system'),
+                            label: '跟随系统',
+                            icon: PhosphorIconsLight.circleHalf,
+                            selected: currentMode == ThemeMode.system,
+                            onTap: () => controller.setThemeMode(ThemeMode.system),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_light'),
+                            label: '日间浅色',
+                            icon: PhosphorIconsLight.sun,
+                            selected: currentMode == ThemeMode.light,
+                            onTap: () => controller.setThemeMode(ThemeMode.light),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _ThemeChip(
+                            key: const Key('theme_mode_dark'),
+                            label: '夜间深色',
+                            icon: PhosphorIconsLight.moon,
+                            selected: currentMode == ThemeMode.dark,
+                            onTap: () => controller.setThemeMode(ThemeMode.dark),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '阅读色板（日间与夜间分别保存）',
+                      style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final palette in PsyberPalette.values)
+                          Builder(
+                            builder: (context) {
+                              final isSavedSlot =
+                                  palette == lightPalette || palette == darkPalette;
+                              final isActive = switch (currentMode) {
+                                ThemeMode.light => palette == lightPalette,
+                                ThemeMode.dark => palette == darkPalette,
+                                ThemeMode.system => isSavedSlot,
+                              };
+                              final slotHint = palette == lightPalette
+                                  ? ' · 日'
+                                  : palette == darkPalette
+                                      ? ' · 夜'
+                                      : '';
+                              return InkWell(
+                                key: Key('palette_${palette.name}'),
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () => controller.setPalette(palette),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 9,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isActive
+                                        ? colors.accentSoft
+                                        : colors.mineralCanvas,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: isActive
+                                          ? colors.accentBorder
+                                          : isSavedSlot
+                                              ? colors.hairlineWarm
+                                              : colors.hairline,
+                                      width: isActive ? 1.3 : 1.0,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Container(
+                                        width: 11,
+                                        height: 11,
+                                        decoration: BoxDecoration(
+                                          color: palette.swatchBg,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: palette.swatchAccent,
+                                            width: 2,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        '${palette.label}$slotHint',
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: isActive
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                          color: isActive
+                                              ? colors.inkDeep
+                                              : colors.inkQuiet,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                      ],
+                    ),
+                  ],
+                );
+                if (!framed) return body;
+                return _SurfaceBox(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: body,
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+/// 桌面端居中双栏设置内容（左分组导航 + 右独立滚动区）。
 class SettingsPanelContent extends StatefulWidget {
   const SettingsPanelContent({
     super.key,
     required this.controller,
     required this.onClose,
     this.imagePicker,
+    this.initialSection = SettingsSection.modelUsage,
   });
 
   final AppController controller;
   final VoidCallback onClose;
   final ImageFilePicker? imagePicker;
+  final SettingsSection initialSection;
 
   @override
   State<SettingsPanelContent> createState() => _SettingsPanelContentState();
 }
 
 class _SettingsPanelContentState extends State<SettingsPanelContent> {
+  late SettingsSection _activeSection;
+
+  @override
+  void initState() {
+    super.initState();
+    _activeSection = widget.initialSection;
+    unawaited(widget.controller.loadSettings());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 左侧固定分组导航
+        Container(
+          width: 184,
+          decoration: BoxDecoration(
+            color: colors.letterSurface,
+            border: Border(right: BorderSide(color: colors.hairline)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 18, 14, 14),
+                child: Text(
+                  '偏好与设置',
+                  style: PsyberTheme.editorialSerif.copyWith(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w500,
+                    color: colors.inkDeep,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                  children: [
+                    for (final section in SettingsSection.values)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: _NavRailTile(
+                          key: Key('settings_nav_${section.name}'),
+                          icon: section.icon,
+                          label: section.title,
+                          selected: _activeSection == section,
+                          onTap: () => setState(() => _activeSection = section),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 右侧独立内容区
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                height: 54,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(22, 0, 12, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        _activeSection.title,
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 16.5,
+                          fontWeight: FontWeight.w500,
+                          color: colors.inkDeep,
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        key: const Key('close_settings_button'),
+                        icon: const Icon(PhosphorIconsLight.x, size: 19),
+                        tooltip: '关闭设置 (Esc)',
+                        onPressed: widget.onClose,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Divider(height: 1, color: colors.hairline),
+              Expanded(
+                child: _SettingsSectionBody(
+                  key: ValueKey(_activeSection),
+                  section: _activeSection,
+                  controller: widget.controller,
+                  imagePicker: widget.imagePicker,
+                  onCloseSettings: widget.onClose,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 窄屏/移动端使用的全屏两级导航设置页。
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({
+    super.key,
+    required this.controller,
+    this.imagePicker,
+    this.initialSection,
+  });
+
+  final AppController controller;
+  final ImageFilePicker? imagePicker;
+  final SettingsSection? initialSection;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.controller.loadSettings());
+  }
+
+  String _summaryFor(
+    SettingsSection section,
+    SettingsSnapshot? snap,
+    ThemeMode mode,
+    PsyberPalette? palette,
+  ) {
+    switch (section) {
+      case SettingsSection.modelUsage:
+        final slot = snap?.chatSlot;
+        if (slot != null && slot.model.isNotEmpty) {
+          return '${slot.provider} · ${slot.model}';
+        }
+        return '尚未配置主对话模型';
+      case SettingsSection.rhythmNotify:
+        final c = snap?.circadian;
+        if (c != null) {
+          return '夜间静默 ${c.sleepStart} – ${c.sleepEnd}';
+        }
+        return '作息、主动招呼与离线推送';
+      case SettingsSection.appearance:
+        final modeLabel = switch (mode) {
+          ThemeMode.system => '跟随系统',
+          ThemeMode.light => '日间浅色',
+          ThemeMode.dark => '夜间深色',
+        };
+        return palette != null ? '$modeLabel · ${palette.label}' : modeLabel;
+      case SettingsSection.toolsDevices:
+        final devCount = snap?.devices.length ?? 0;
+        final mcpCount = snap?.mcpServers.length ?? 0;
+        return '$devCount 台已配对设备 · $mcpCount 个 MCP 扩展';
+    }
+  }
+
+  void _openSection(SettingsSection section) {
+    unawaited(
+      Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => _SettingsMobileDetailPage(
+            section: section,
+            controller: widget.controller,
+            imagePicker: widget.imagePicker,
+            onCloseAll: () => Navigator.of(context).pop(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.initialSection != null) {
+      return _SettingsMobileDetailPage(
+        section: widget.initialSection!,
+        controller: widget.controller,
+        imagePicker: widget.imagePicker,
+        onCloseAll: () => Navigator.of(context).pop(),
+      );
+    }
+
+    final colors = context.colors;
+    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+    return Scaffold(
+      key: const Key('settings_mobile_page'),
+      backgroundColor: colors.mineralCanvas,
+      body: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(top: isMacOs ? 28 : 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                height: 52,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 0, 10, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        '偏好与设置',
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 17.5,
+                          fontWeight: FontWeight.w500,
+                          color: colors.inkDeep,
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        key: const Key('close_settings_button'),
+                        icon: const Icon(PhosphorIconsLight.x, size: 19),
+                        tooltip: '关闭设置',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Divider(height: 1, color: colors.hairline),
+              Expanded(
+                child: ValueListenableBuilder<SettingsSnapshot?>(
+                  valueListenable: widget.controller.settingsNotifier,
+                  builder: (context, snap, _) => ValueListenableBuilder<ThemeMode>(
+                    valueListenable: widget.controller.themeModeNotifier,
+                    builder: (context, mode, _) => ValueListenableBuilder<PsyberPalette?>(
+                      valueListenable: widget.controller.paletteNotifier,
+                      builder: (context, palette, _) {
+                        return ListView(
+                          padding: const EdgeInsets.all(16),
+                          children: [
+                            _SurfaceBox(
+                              child: Column(
+                                children: [
+                                  for (var i = 0; i < SettingsSection.values.length; i++) ...[
+                                    if (i > 0) Divider(height: 1, color: colors.hairline),
+                                    ListTile(
+                                      key: Key(
+                                        'settings_mobile_item_${SettingsSection.values[i].name}',
+                                      ),
+                                      leading: Icon(
+                                        SettingsSection.values[i].icon,
+                                        size: 20,
+                                        color: colors.inkDeep,
+                                      ),
+                                      title: Text(
+                                        SettingsSection.values[i].title,
+                                        style: TextStyle(
+                                          fontSize: 14.5,
+                                          fontWeight: FontWeight.w500,
+                                          color: colors.inkDeep,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        _summaryFor(
+                                          SettingsSection.values[i],
+                                          snap,
+                                          mode,
+                                          palette,
+                                        ),
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: colors.inkQuiet,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      trailing: Icon(
+                                        PhosphorIconsLight.caretRight,
+                                        size: 16,
+                                        color: colors.inkFaint,
+                                      ),
+                                      onTap: () => _openSection(SettingsSection.values[i]),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsMobileDetailPage extends StatelessWidget {
+  const _SettingsMobileDetailPage({
+    required this.section,
+    required this.controller,
+    required this.onCloseAll,
+    this.imagePicker,
+  });
+
+  final SettingsSection section;
+  final AppController controller;
+  final VoidCallback onCloseAll;
+  final ImageFilePicker? imagePicker;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return Scaffold(
+      backgroundColor: colors.mineralCanvas,
+      body: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(top: isMacOs ? 28 : 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                height: 52,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 0, 10, 0),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        key: const Key('settings_mobile_back_button'),
+                        icon: const Icon(PhosphorIconsLight.caretLeft, size: 20),
+                        tooltip: '返回',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                      Text(
+                        section.title,
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w500,
+                          color: colors.inkDeep,
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        key: const Key('close_settings_button'),
+                        icon: const Icon(PhosphorIconsLight.x, size: 19),
+                        tooltip: '关闭设置',
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          onCloseAll();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Divider(height: 1, color: colors.hairline),
+              Expanded(
+                child: _SettingsSectionBody(
+                  section: section,
+                  controller: controller,
+                  imagePicker: imagePicker,
+                  onCloseSettings: () {
+                    Navigator.of(context).pop();
+                    onCloseAll();
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 单个设置分组的主体内容（复用于桌面弹层右侧与移动端二级详情页）。
+class _SettingsSectionBody extends StatefulWidget {
+  const _SettingsSectionBody({
+    super.key,
+    required this.section,
+    required this.controller,
+    required this.onCloseSettings,
+    this.imagePicker,
+  });
+
+  final SettingsSection section;
+  final AppController controller;
+  final VoidCallback onCloseSettings;
+  final ImageFilePicker? imagePicker;
+
+  @override
+  State<_SettingsSectionBody> createState() => _SettingsSectionBodyState();
+}
+
+class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   final _webhookUrlCtrl = TextEditingController();
+  final _baseUrlCtrl = TextEditingController();
+  final _modelCtrl = TextEditingController();
+  final _apiKeyCtrl = TextEditingController();
 
   String _sleepStart = '23:30';
   String _sleepEnd = '07:30';
@@ -43,7 +818,13 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
   String? _rhythmFeedback;
   String? _rhythmError;
   bool _hydrated = false;
-  bool _dirty = false;
+
+  bool _editingModelInline = false;
+  String _providerKind = 'openai-compat';
+  bool _hasExistingKey = false;
+  bool _savingModel = false;
+  String? _modelErrText;
+
   bool _testingLlm = false;
   String? _llmTestHint;
   bool _llmTestOk = true;
@@ -58,7 +839,6 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     super.initState();
     _syncFromSnapshot(widget.controller.settingsNotifier.value);
     widget.controller.settingsNotifier.addListener(_onSettingsChanged);
-    unawaited(widget.controller.loadSettings());
   }
 
   void _onSettingsChanged() {
@@ -68,22 +848,37 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
 
   void _syncFromSnapshot(SettingsSnapshot? snap) {
     if (snap == null) return;
-    if (!_hydrated || !_dirty) {
+    if (!_hydrated) {
       _sleepStart = snap.circadian.sleepStart;
       _sleepEnd = snap.circadian.sleepEnd;
       _webhookUrlCtrl.text = snap.webhookUrl;
       _proactiveEnabled = snap.circadian.proactiveEnabled;
       _desktopNotifyEnabled = snap.desktopNotifyEnabled;
       _webhookEnabled = snap.webhookEnabled;
+      _hydrateModelFields(snap);
       _hydrated = true;
+    } else if (!_editingModelInline) {
+      _hydrateModelFields(snap);
     }
     if (mounted) setState(() {});
+  }
+
+  void _hydrateModelFields(SettingsSnapshot snap) {
+    final slot = snap.chatSlot;
+    final currentProvider = slot != null ? snap.providers[slot.provider] : null;
+    _providerKind = currentProvider?.kind ?? 'openai-compat';
+    _hasExistingKey = currentProvider?.authStatus == 'configured';
+    _baseUrlCtrl.text = currentProvider?.baseUrl ?? '';
+    _modelCtrl.text = slot?.model ?? '';
   }
 
   @override
   void dispose() {
     widget.controller.settingsNotifier.removeListener(_onSettingsChanged);
     _webhookUrlCtrl.dispose();
+    _baseUrlCtrl.dispose();
+    _modelCtrl.dispose();
+    _apiKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -125,8 +920,8 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
       } else {
         _sleepEnd = _formatTime(picked);
       }
-      _dirty = true;
     });
+    await _saveCircadianAndNotifications();
   }
 
   Future<void> _saveCircadianAndNotifications() async {
@@ -153,10 +948,9 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
         },
       });
       if (!mounted) return;
-      _dirty = false;
       setState(() {
         _savingRhythm = false;
-        _rhythmFeedback = '已保存并即时生效';
+        _rhythmFeedback = '已自动保存并即时生效';
       });
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -173,29 +967,47 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     }
   }
 
-  void _openModelConfigDialog() {
-    final snap = widget.controller.settingsNotifier.value;
-    unawaited(
-      showDialog<void>(
-        context: context,
-        builder: (_) => _ModelConfigDialog(
-          controller: widget.controller,
-          settings: snap,
-        ),
-      ),
-    );
-  }
-
-  void _openStickerUploadDialog() {
-    unawaited(
-      showDialog<void>(
-        context: context,
-        builder: (_) => _StickerUploadDialog(
-          controller: widget.controller,
-          imagePicker: widget.imagePicker,
-        ),
-      ),
-    );
+  Future<void> _saveModelInline() async {
+    final model = _modelCtrl.text.trim();
+    final baseUrl = _baseUrlCtrl.text.trim();
+    if (model.isEmpty) {
+      setState(() => _modelErrText = '请填写模型 ID');
+      return;
+    }
+    if (_providerKind == 'openai-compat' && baseUrl.isEmpty) {
+      setState(() => _modelErrText = '兼容接口请填写自定义 Base URL');
+      return;
+    }
+    setState(() {
+      _savingModel = true;
+      _modelErrText = null;
+    });
+    try {
+      await widget.controller.updateLlmSettings(
+        providerKind: _providerKind,
+        modelName: model,
+        baseUrl: baseUrl.isEmpty ? null : baseUrl,
+        apiKey: _apiKeyCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      _apiKeyCtrl.clear();
+      setState(() {
+        _savingModel = false;
+        _editingModelInline = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _modelErrText = e.message;
+        _savingModel = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _modelErrText = '保存失败，请检查网络连接';
+        _savingModel = false;
+      });
+    }
   }
 
   Future<void> _handleTestLlm(ModelSlotView? slot) async {
@@ -367,13 +1179,605 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     }
   }
 
+  Widget _buildModelUsageSection(BuildContext context, SettingsSnapshot? snap) {
+    final colors = context.colors;
+    final slot = snap?.chatSlot;
+    final providerInfo = slot != null ? snap?.providers[slot.provider] : null;
+    final configured = providerInfo?.authStatus == 'configured';
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const _SectionLabel('主对话模型与凭证'),
+        _SurfaceBox(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              InkWell(
+                key: const Key('open_model_config_tile'),
+                onTap: () {
+                  if (snap != null) _hydrateModelFields(snap);
+                  setState(() {
+                    _editingModelInline = !_editingModelInline;
+                    _modelErrText = null;
+                  });
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              slot != null && slot.model.isNotEmpty
+                                  ? '${slot.provider} · ${slot.model}'
+                                  : '尚未设置主对话模型',
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              configured
+                                  ? (_editingModelInline
+                                      ? '正在编辑配置（保存后立即热生效）'
+                                      : '凭证已配置（点击展开修改模型或 Key）')
+                                  : '点击展开填写 API Key 与模型 ID',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: configured
+                                    ? colors.inkQuiet
+                                    : colors.thresholdAmber,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (slot != null && slot.model.isNotEmpty)
+                        TextButton(
+                          key: const Key('test_llm_button'),
+                          onPressed: _testingLlm
+                              ? null
+                              : () => unawaited(_handleTestLlm(slot)),
+                          child: Text(
+                            _testingLlm ? '测试中…' : '测连通',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      Icon(
+                        _editingModelInline
+                            ? PhosphorIconsLight.caretUp
+                            : PhosphorIconsLight.caretDown,
+                        size: 16,
+                        color: colors.inkQuiet,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_llmTestHint != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                  child: Text(
+                    _llmTestHint!,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: _llmTestOk ? colors.statusSuccess : colors.dangerInk,
+                    ),
+                  ),
+                ),
+              if (_editingModelInline) ...[
+                Divider(height: 1, color: colors.hairline),
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: _providerKind,
+                        decoration: const InputDecoration(
+                          labelText: '模型服务商',
+                          isDense: true,
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
+                          DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
+                          DropdownMenuItem(value: 'google', child: Text('Google')),
+                          DropdownMenuItem(
+                            value: 'openai-compat',
+                            child: Text('OpenAI 兼容接口（自定义地址）'),
+                          ),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) setState(() => _providerKind = v);
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _baseUrlCtrl,
+                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                        decoration: const InputDecoration(
+                          labelText: '接口地址 Base URL（兼容接口必填）',
+                          hintText: 'https://api.example.com/v1',
+                          isDense: true,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _modelCtrl,
+                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                        decoration: const InputDecoration(
+                          labelText: '主对话模型 ID',
+                          hintText: 'gpt-4o / deepseek-chat',
+                          isDense: true,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _apiKeyCtrl,
+                        obscureText: true,
+                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                        decoration: InputDecoration(
+                          labelText: _hasExistingKey
+                              ? 'API Key（留空保持现有密钥不变）'
+                              : 'API Key（必填）',
+                          isDense: true,
+                        ),
+                      ),
+                      if (_modelErrText != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _modelErrText!,
+                          style: TextStyle(color: colors.dangerInk, fontSize: 12),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: _savingModel
+                                ? null
+                                : () => setState(() => _editingModelInline = false),
+                            child: const Text('取消'),
+                          ),
+                          const SizedBox(width: 8),
+                          FilledButton(
+                            onPressed: _savingModel
+                                ? null
+                                : () => unawaited(_saveModelInline()),
+                            child: Text(_savingModel ? '保存中…' : '保存模型配置'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              Divider(height: 1, color: colors.hairline),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          '默认思考深度档位',
+                          style: TextStyle(fontSize: 12, color: colors.inkQuiet),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '也可在聊天输入栏随时切换',
+                          style: TextStyle(fontSize: 11, color: colors.inkFaint),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        for (final entry in const [
+                          ('off', '关闭'),
+                          ('low', '轻度'),
+                          ('medium', '标准'),
+                          ('high', '深度'),
+                        ])
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 2),
+                              child: InkWell(
+                                key: Key('thinking_level_${entry.$1}'),
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () => unawaited(
+                                  widget.controller.patchSettings({
+                                    'llm': {
+                                      'thinking': {
+                                        'enabled': entry.$1 != 'off',
+                                        'level': entry.$1,
+                                      },
+                                    },
+                                  }),
+                                ),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 6),
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                        ? colors.accentSoft
+                                        : colors.mineralCanvas,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                          ? colors.accentBorder
+                                          : colors.hairline,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    entry.$2,
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight:
+                                          (snap?.thinkingLevel ?? 'medium') == entry.$1
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                      color: colors.inkDeep,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        const _SectionLabel('消耗统计'),
+        _buildUsageStatsCard(context),
+      ],
+    );
+  }
+
+  Widget _buildRhythmNotifySection(BuildContext context) {
+    final colors = context.colors;
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const _SectionLabel('作息节律'),
+        _SurfaceBox(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _TimePickerBox(
+                        key: const Key('sleep_start_picker'),
+                        label: '夜间休息开始',
+                        value: _sleepStart,
+                        onTap: () => unawaited(_pickCircadianTime(isStart: true)),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _TimePickerBox(
+                        key: const Key('sleep_end_picker'),
+                        label: '早晨醒来',
+                        value: _sleepEnd,
+                        onTap: () => unawaited(_pickCircadianTime(isStart: false)),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                _QuietSwitchTile(
+                  key: const Key('proactive_enabled_switch'),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                  title: '允许定时主动招呼',
+                  subtitle: '静默时段不打扰，连续未回会自动安静',
+                  value: _proactiveEnabled,
+                  onChanged: (v) {
+                    setState(() => _proactiveEnabled = v);
+                    unawaited(_saveCircadianAndNotifications());
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+        const _SectionLabel('离线触达'),
+        _SurfaceBox(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _QuietSwitchTile(
+                  key: const Key('desktop_notify_switch'),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                  title: '本机桌面通知',
+                  value: _desktopNotifyEnabled,
+                  onChanged: (v) {
+                    setState(() => _desktopNotifyEnabled = v);
+                    unawaited(_saveCircadianAndNotifications());
+                  },
+                ),
+                _QuietSwitchTile(
+                  key: const Key('webhook_enabled_switch'),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                  title: 'Webhook 离线推送',
+                  value: _webhookEnabled,
+                  onChanged: (v) {
+                    setState(() => _webhookEnabled = v);
+                    unawaited(_saveCircadianAndNotifications());
+                  },
+                ),
+                if (_webhookEnabled || _webhookUrlCtrl.text.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _webhookUrlCtrl,
+                          style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                          decoration: const InputDecoration(
+                            labelText: 'Webhook URL',
+                            hintText: 'https://...',
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _savingRhythm
+                            ? null
+                            : () => unawaited(_saveCircadianAndNotifications()),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        ),
+                        child: const Text('保存', style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_rhythmError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _rhythmError!,
+                    style: TextStyle(color: colors.dangerInk, fontSize: 12),
+                  ),
+                ],
+                if (_rhythmFeedback != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _rhythmFeedback!,
+                    style: TextStyle(color: colors.statusSuccess, fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAppearanceSection(BuildContext context) {
+    final colors = context.colors;
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const _SectionLabel('明暗与阅读色板'),
+        ThemePaletteSelector(controller: widget.controller, framed: true),
+        const SizedBox(height: 18),
+        const _SectionLabel('居所双人头像'),
+        _SurfaceBox(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  '也可直接在左侧栏顶部的双人状态卡点击头像更换。',
+                  style: TextStyle(fontSize: 12, color: colors.inkQuiet),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: const Key('upload_resident_avatar_button'),
+                        onPressed: _uploadingAvatar
+                            ? null
+                            : () => unawaited(_handleUploadAvatar('resident')),
+                        icon: const Icon(PhosphorIconsLight.sparkle, size: 15),
+                        label: const Text('住户头像', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: const Key('upload_user_avatar_button'),
+                        onPressed: _uploadingAvatar
+                            ? null
+                            : () => unawaited(_handleUploadAvatar('user')),
+                        icon: const Icon(PhosphorIconsLight.user, size: 15),
+                        label: const Text('我的头像', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_avatarHint != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _avatarHint!,
+                    style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildToolsDevicesSection(BuildContext context, SettingsSnapshot? snap) {
+    final colors = context.colors;
+    final currentDeviceId = widget.controller.profileNotifier.value?.deviceId ?? '';
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const _SectionLabel('外部工具扩展（MCP）'),
+        _buildMcpServersSection(context, snap),
+        const SizedBox(height: 18),
+        const _SectionLabel('已配对设备'),
+        _SurfaceBox(
+          child: Column(
+            children: [
+              if (snap != null && snap.devices.isNotEmpty) ...[
+                for (var i = 0; i < snap.devices.length; i++) ...[
+                  if (i > 0) Divider(height: 1, color: colors.hairline),
+                  ListTile(
+                    dense: true,
+                    leading: Icon(
+                      snap.devices[i].platform == 'ios' ||
+                              snap.devices[i].platform == 'android'
+                          ? PhosphorIconsLight.deviceMobile
+                          : PhosphorIconsLight.laptop,
+                      size: 18,
+                      color: colors.inkQuiet,
+                    ),
+                    title: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            snap.devices[i].deviceName,
+                            style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (snap.devices[i].deviceId == currentDeviceId) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 1.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colors.celadonWash,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: colors.hairline),
+                            ),
+                            child: Text(
+                              '本机',
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                color: colors.inkQuiet,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    subtitle: Text(
+                      snap.devices[i].platform,
+                      style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                    ),
+                    trailing: snap.devices[i].deviceId == currentDeviceId
+                        ? null
+                        : TextButton(
+                            onPressed: () => unawaited(
+                              widget.controller
+                                  .revokeOtherDevice(snap.devices[i].deviceId),
+                            ),
+                            child: Text(
+                              '吊销',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: colors.dangerInk,
+                              ),
+                            ),
+                          ),
+                  ),
+                ],
+                Divider(height: 1, color: colors.hairline),
+              ],
+              ListTile(
+                key: const Key('disconnect_device_button'),
+                leading: Icon(
+                  PhosphorIconsLight.linkBreak,
+                  size: 18,
+                  color: colors.dangerInk,
+                ),
+                title: Text(
+                  '断开本机连接并重新配对',
+                  style: TextStyle(fontSize: 13.5, color: colors.dangerInk),
+                ),
+                onTap: () async {
+                  widget.onCloseSettings();
+                  await widget.controller.disconnect();
+                },
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        const _SectionLabel('评测与调试（进阶）'),
+        _SurfaceBox(
+          child: ValueListenableBuilder<bool>(
+            valueListenable: widget.controller.recallEvalModeNotifier,
+            builder: (context, enabled, _) => Column(
+              children: [
+                _QuietSwitchTile(
+                  key: const Key('recall_eval_switch'),
+                  title: '召回评测模式',
+                  subtitle: '开启后在回复下显示「想起 N 张卡」',
+                  value: enabled,
+                  onChanged: widget.controller.toggleRecallEvalMode,
+                ),
+                if (enabled) ...[
+                  Divider(height: 1, color: colors.hairline),
+                  _QuietSwitchTile(
+                    key: const Key('recall_eval_notice_switch'),
+                    title: '评测检视对住户透明',
+                    subtitle: '开启后如实告知住户当前处于召回评测检视中',
+                    value: snap?.recallEvalNoticeResident ?? false,
+                    onChanged: (v) => unawaited(
+                      widget.controller.patchSettings({
+                        'recallEvalNoticeResident': v,
+                      }),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildMcpServersSection(BuildContext context, SettingsSnapshot? snap) {
     final colors = context.colors;
     final servers = snap?.mcpServers ?? const <McpServerView>[];
     return _SurfaceBox(
       child: Padding(
         key: const Key('mcp_servers_section'),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -404,7 +1808,10 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                               ),
                               const SizedBox(width: 6),
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 1.5,
+                                ),
                                 decoration: BoxDecoration(
                                   color: servers[i].status == 'connected'
                                       ? colors.celadonWash
@@ -439,15 +1846,24 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                     ),
                     IconButton(
                       key: Key('mcp_reconnect_${servers[i].id}'),
-                      icon: Icon(PhosphorIconsLight.arrowClockwise, size: 16, color: colors.inkQuiet),
+                      icon: Icon(
+                        PhosphorIconsLight.arrowClockwise,
+                        size: 16,
+                        color: colors.inkQuiet,
+                      ),
                       tooltip: '重连',
                       constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                       padding: EdgeInsets.zero,
-                      onPressed: () => unawaited(widget.controller.reconnectMcpServer(servers[i].id)),
+                      onPressed: () =>
+                          unawaited(widget.controller.reconnectMcpServer(servers[i].id)),
                     ),
                     IconButton(
                       key: Key('mcp_delete_${servers[i].id}'),
-                      icon: Icon(PhosphorIconsLight.trash, size: 16, color: colors.dangerInk),
+                      icon: Icon(
+                        PhosphorIconsLight.trash,
+                        size: 16,
+                        color: colors.dangerInk,
+                      ),
                       tooltip: '移除',
                       constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                       padding: EdgeInsets.zero,
@@ -491,148 +1907,6 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     );
   }
 
-  Widget _buildThemeModeSelector(BuildContext context) {
-    final colors = context.colors;
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: widget.controller.themeModeNotifier,
-      builder: (context, currentMode, _) {
-        return ValueListenableBuilder<PsyberPalette>(
-          valueListenable: widget.controller.lightPaletteNotifier,
-          builder: (context, lightPalette, _) {
-            return ValueListenableBuilder<PsyberPalette>(
-              valueListenable: widget.controller.darkPaletteNotifier,
-              builder: (context, darkPalette, _) {
-                return _SurfaceBox(
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: _ThemeChip(
-                                key: const Key('theme_mode_system'),
-                                label: '跟随系统',
-                                icon: PhosphorIconsLight.circleHalf,
-                                selected: currentMode == ThemeMode.system,
-                                onTap: () => widget.controller.setThemeMode(ThemeMode.system),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: _ThemeChip(
-                                key: const Key('theme_mode_light'),
-                                label: '日间浅色',
-                                icon: PhosphorIconsLight.sun,
-                                selected: currentMode == ThemeMode.light,
-                                onTap: () => widget.controller.setThemeMode(ThemeMode.light),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: _ThemeChip(
-                                key: const Key('theme_mode_dark'),
-                                label: '夜间深色',
-                                icon: PhosphorIconsLight.moon,
-                                selected: currentMode == ThemeMode.dark,
-                                onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          '阅读色板（日间与夜间分别保存）',
-                          style: TextStyle(fontSize: 11, color: colors.inkQuiet),
-                        ),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: [
-                            for (final palette in PsyberPalette.values)
-                              Builder(
-                                builder: (context) {
-                                  final isSavedSlot = palette == lightPalette || palette == darkPalette;
-                                  final isActive = switch (currentMode) {
-                                    ThemeMode.light => palette == lightPalette,
-                                    ThemeMode.dark => palette == darkPalette,
-                                    ThemeMode.system => isSavedSlot,
-                                  };
-                                  final slotHint = palette == lightPalette
-                                      ? ' · 日'
-                                      : palette == darkPalette
-                                          ? ' · 夜'
-                                          : '';
-                                  return InkWell(
-                                    key: Key('palette_${palette.name}'),
-                                    borderRadius: BorderRadius.circular(8),
-                                    onTap: () => widget.controller.setPalette(palette),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                                      decoration: BoxDecoration(
-                                        color: isActive
-                                            ? colors.accentSoft
-                                            : colors.mineralCanvas,
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: Border.all(
-                                          color: isActive
-                                              ? colors.accentBorder
-                                              : isSavedSlot
-                                                  ? colors.hairlineWarm
-                                                  : colors.hairline,
-                                          width: isActive ? 1.3 : 1.0,
-                                        ),
-                                      ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Container(
-                                            width: 11,
-                                            height: 11,
-                                            decoration: BoxDecoration(
-                                              color: palette.swatchBg,
-                                              shape: BoxShape.circle,
-                                              border: Border.all(
-                                                color: palette.swatchAccent,
-                                                width: 2,
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 5),
-                                          Text(
-                                            '${palette.label}$slotHint',
-                                            style: TextStyle(
-                                              fontSize: 11.5,
-                                              fontWeight: isActive
-                                                  ? FontWeight.w600
-                                                  : FontWeight.w400,
-                                              color: isActive
-                                                  ? colors.inkDeep
-                                                  : colors.inkQuiet,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
   Widget _buildUsageStatsCard(BuildContext context) {
     final colors = context.colors;
     final stats = _usageStats;
@@ -659,7 +1933,8 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                 const Spacer(),
                 TextButton(
                   key: const Key('load_usage_stats_button'),
-                  onPressed: _loadingUsage ? null : () => unawaited(_handleLoadUsageStats()),
+                  onPressed:
+                      _loadingUsage ? null : () => unawaited(_handleLoadUsageStats()),
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     minimumSize: Size.zero,
@@ -738,516 +2013,75 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
-    final currentDeviceId = widget.controller.profileNotifier.value?.deviceId ?? '';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(
-          height: 50,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 10, 0),
-            child: Row(
-              children: [
-                Text(
-                  '偏好与设置',
-                  style: PsyberTheme.editorialSerif.copyWith(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const Spacer(),
-                IconButton(
-                  key: const Key('close_settings_button'),
-                  icon: const Icon(PhosphorIconsLight.x, size: 19),
-                  tooltip: '关闭设置',
-                  onPressed: widget.onClose,
-                ),
-              ],
-            ),
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: ValueListenableBuilder<SettingsSnapshot?>(
-            valueListenable: widget.controller.settingsNotifier,
-            builder: (context, snap, _) {
-              final slot = snap?.chatSlot;
-              final providerInfo =
-                  slot != null ? snap?.providers[slot.provider] : null;
-              final configured = providerInfo?.authStatus == 'configured';
-
-              return ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  const _SectionLabel('模型与凭证'),
-                  _SurfaceBox(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        InkWell(
-                          key: const Key('open_model_config_tile'),
-                          onTap: _openModelConfigDialog,
-                          child: Padding(
-                            padding: const EdgeInsets.all(14),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        slot != null && slot.model.isNotEmpty
-                                            ? '${slot.provider} · ${slot.model}'
-                                            : '尚未设置主对话模型',
-                                        style: const TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        configured
-                                            ? '凭证已配置（点击热切换模型或 Key）'
-                                            : '点击填写 API Key 与模型 ID',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: configured
-                                              ? colors.inkQuiet
-                                              : colors.thresholdAmber,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                if (slot != null && slot.model.isNotEmpty)
-                                  TextButton(
-                                    key: const Key('test_llm_button'),
-                                    onPressed: _testingLlm
-                                        ? null
-                                        : () => unawaited(_handleTestLlm(slot)),
-                                    child: Text(
-                                      _testingLlm ? '测试中…' : '测连通',
-                                      style: const TextStyle(fontSize: 12),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        if (_llmTestHint != null)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                            child: Text(
-                              _llmTestHint!,
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                color: _llmTestOk ? colors.statusSuccess : colors.dangerInk,
-                              ),
-                            ),
-                          ),
-                        const Divider(height: 1),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '思考深度档位',
-                                style: TextStyle(fontSize: 12, color: colors.inkQuiet),
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  for (final entry in const [
-                                    ('off', '关闭'),
-                                    ('low', '轻度'),
-                                    ('medium', '标准'),
-                                    ('high', '深度'),
-                                  ])
-                                    Expanded(
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(horizontal: 2),
-                                        child: InkWell(
-                                          key: Key('thinking_level_${entry.$1}'),
-                                          borderRadius: BorderRadius.circular(8),
-                                          onTap: () => unawaited(
-                                            widget.controller.patchSettings({
-                                              'llm': {
-                                                'thinking': {
-                                                  'enabled': entry.$1 != 'off',
-                                                  'level': entry.$1,
-                                                },
-                                              },
-                                            }),
-                                          ),
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(vertical: 6),
-                                            alignment: Alignment.center,
-                                            decoration: BoxDecoration(
-                                              color: (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                                  ? colors.accentSoft
-                                                  : colors.mineralCanvas,
-                                              borderRadius: BorderRadius.circular(8),
-                                              border: Border.all(
-                                                color: (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                                    ? colors.accentBorder
-                                                    : colors.hairline,
-                                              ),
-                                            ),
-                                            child: Text(
-                                              entry.$2,
-                                              style: TextStyle(
-                                                fontSize: 11.5,
-                                                fontWeight:
-                                                    (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                                        ? FontWeight.w600
-                                                        : FontWeight.w400,
-                                                color: colors.inkDeep,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('消耗统计'),
-                  _buildUsageStatsCard(context),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('互动与评测'),
-                  _SurfaceBox(
-                    child: Column(
-                      children: [
-                        ValueListenableBuilder<bool>(
-                          valueListenable: widget.controller.recallEvalModeNotifier,
-                          builder: (context, enabled, _) => Column(
-                            children: [
-                              _QuietSwitchTile(
-                                key: const Key('recall_eval_switch'),
-                                title: '召回评测模式',
-                                subtitle: '开启后在回复下显示「想起 N 张卡」',
-                                value: enabled,
-                                onChanged: widget.controller.toggleRecallEvalMode,
-                              ),
-                              if (enabled) ...[
-                                const Divider(height: 1),
-                                _QuietSwitchTile(
-                                  key: const Key('recall_eval_notice_switch'),
-                                  title: '评测检视对住户透明',
-                                  subtitle: '开启后如实告知住户当前处于召回评测检视中',
-                                  value: snap?.recallEvalNoticeResident ?? false,
-                                  onChanged: (v) => unawaited(
-                                    widget.controller.patchSettings({
-                                      'recallEvalNoticeResident': v,
-                                    }),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                        const Divider(height: 1),
-                        ListTile(
-                          key: const Key('open_sticker_manager_entry'),
-                          leading: Icon(
-                            PhosphorIconsLight.smiley,
-                            size: 19,
-                            color: colors.inkQuiet,
-                          ),
-                          title: const Text('上传互发表情贴纸', style: TextStyle(fontSize: 14)),
-                          subtitle: Text(
-                            '支持 PNG / WebP / GIF 贴纸',
-                            style: TextStyle(fontSize: 12, color: colors.inkQuiet),
-                          ),
-                          onTap: _openStickerUploadDialog,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('作息节律与离线触达'),
-                  _SurfaceBox(
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: _TimePickerBox(
-                                  key: const Key('sleep_start_picker'),
-                                  label: '夜间休息开始',
-                                  value: _sleepStart,
-                                  onTap: () => unawaited(_pickCircadianTime(isStart: true)),
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: _TimePickerBox(
-                                  key: const Key('sleep_end_picker'),
-                                  label: '早晨醒来',
-                                  value: _sleepEnd,
-                                  onTap: () => unawaited(_pickCircadianTime(isStart: false)),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          _QuietSwitchTile(
-                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
-                            title: '允许定时主动招呼',
-                            subtitle: '静默时段不打扰，连续未回会自动安静',
-                            value: _proactiveEnabled,
-                            onChanged: (v) => setState(() {
-                              _proactiveEnabled = v;
-                              _dirty = true;
-                            }),
-                          ),
-                          _QuietSwitchTile(
-                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
-                            title: '本机桌面通知',
-                            value: _desktopNotifyEnabled,
-                            onChanged: (v) => setState(() {
-                              _desktopNotifyEnabled = v;
-                              _dirty = true;
-                            }),
-                          ),
-                          _QuietSwitchTile(
-                            contentPadding: const EdgeInsets.symmetric(vertical: 6),
-                            title: 'Webhook 离线推送',
-                            value: _webhookEnabled,
-                            onChanged: (v) => setState(() {
-                              _webhookEnabled = v;
-                              _dirty = true;
-                            }),
-                          ),
-                          if (_webhookEnabled || _webhookUrlCtrl.text.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: _webhookUrlCtrl,
-                              onChanged: (_) => _dirty = true,
-                              style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
-                              decoration: const InputDecoration(
-                                labelText: 'Webhook URL',
-                                hintText: 'https://...',
-                                isDense: true,
-                              ),
-                            ),
-                          ],
-                          if (_rhythmError != null) ...[
-                            const SizedBox(height: 8),
-                            Text(
-                              _rhythmError!,
-                              style: TextStyle(color: colors.dangerInk, fontSize: 12),
-                            ),
-                          ],
-                          if (_rhythmFeedback != null) ...[
-                            const SizedBox(height: 8),
-                            Text(
-                              _rhythmFeedback!,
-                              style: TextStyle(color: colors.statusSuccess, fontSize: 12),
-                            ),
-                          ],
-                          const SizedBox(height: 10),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: FilledButton(
-                              onPressed: _savingRhythm ? null : _saveCircadianAndNotifications,
-                              style: FilledButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                              ),
-                              child: Text(
-                                _savingRhythm ? '保存中…' : '保存作息与通知',
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('已配对设备'),
-                  _SurfaceBox(
-                    child: Column(
-                      children: [
-                        if (snap != null && snap.devices.isNotEmpty) ...[
-                          for (var i = 0; i < snap.devices.length; i++) ...[
-                            if (i > 0) const Divider(height: 1),
-                            ListTile(
-                              dense: true,
-                              leading: Icon(
-                                snap.devices[i].platform == 'ios' ||
-                                        snap.devices[i].platform == 'android'
-                                    ? PhosphorIconsLight.deviceMobile
-                                    : PhosphorIconsLight.laptop,
-                                size: 18,
-                                color: colors.inkQuiet,
-                              ),
-                              title: Row(
-                                children: [
-                                  Flexible(
-                                    child: Text(
-                                      snap.devices[i].deviceName,
-                                      style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                  if (snap.devices[i].deviceId == currentDeviceId) ...[
-                                    const SizedBox(width: 6),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 6,
-                                        vertical: 1.5,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: colors.celadonWash,
-                                        borderRadius: BorderRadius.circular(6),
-                                        border: Border.all(color: colors.hairline),
-                                      ),
-                                      child: Text(
-                                        '本机',
-                                        style: TextStyle(
-                                          fontSize: 10.5,
-                                          color: colors.inkQuiet,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              subtitle: Text(
-                                snap.devices[i].platform,
-                                style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-                              ),
-                              trailing: snap.devices[i].deviceId == currentDeviceId
-                                  ? null
-                                  : TextButton(
-                                      onPressed: () => unawaited(
-                                        widget.controller
-                                            .revokeOtherDevice(snap.devices[i].deviceId),
-                                      ),
-                                      child: Text(
-                                        '吊销',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: colors.dangerInk,
-                                        ),
-                                      ),
-                                    ),
-                            ),
-                          ],
-                          const Divider(height: 1),
-                        ],
-                        ListTile(
-                          key: const Key('disconnect_device_button'),
-                          leading: Icon(PhosphorIconsLight.linkBreak, size: 18, color: colors.dangerInk),
-                          title: Text(
-                            '断开本机连接并重新配对',
-                            style: TextStyle(fontSize: 13.5, color: colors.dangerInk),
-                          ),
-                          onTap: () async {
-                            widget.onClose();
-                            await widget.controller.disconnect();
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('居所头像与外观'),
-                  _SurfaceBox(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  key: const Key('upload_resident_avatar_button'),
-                                  onPressed: _uploadingAvatar
-                                      ? null
-                                      : () => unawaited(_handleUploadAvatar('resident')),
-                                  icon: const Icon(PhosphorIconsLight.sparkle, size: 15),
-                                  label: const Text('住户头像', style: TextStyle(fontSize: 12)),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  key: const Key('upload_user_avatar_button'),
-                                  onPressed: _uploadingAvatar
-                                      ? null
-                                      : () => unawaited(_handleUploadAvatar('user')),
-                                  icon: const Icon(PhosphorIconsLight.user, size: 15),
-                                  label: const Text('我的头像', style: TextStyle(fontSize: 12)),
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (_avatarHint != null) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              _avatarHint!,
-                              style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  _buildThemeModeSelector(context),
-                  const SizedBox(height: 18),
-                  const _SectionLabel('外部工具扩展（MCP）'),
-                  _buildMcpServersSection(context, snap),
-                ],
-              );
-            },
-          ),
-        ),
-      ],
+    return ValueListenableBuilder<SettingsSnapshot?>(
+      valueListenable: widget.controller.settingsNotifier,
+      builder: (context, snap, _) {
+        switch (widget.section) {
+          case SettingsSection.modelUsage:
+            return _buildModelUsageSection(context, snap);
+          case SettingsSection.rhythmNotify:
+            return _buildRhythmNotifySection(context);
+          case SettingsSection.appearance:
+            return _buildAppearanceSection(context);
+          case SettingsSection.toolsDevices:
+            return _buildToolsDevicesSection(context, snap);
+        }
+      },
     );
   }
 }
 
-/// 窄屏/移动端使用的完整设置页路由。
-class SettingsPage extends StatelessWidget {
-  const SettingsPage({
+class _NavRailTile extends StatelessWidget {
+  const _NavRailTile({
     super.key,
-    required this.controller,
-    this.imagePicker,
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
   });
 
-  final AppController controller;
-  final ImageFilePicker? imagePicker;
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final isMacOs = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
-    return Scaffold(
-      backgroundColor: colors.mineralCanvas,
-      body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.only(top: isMacOs ? 28 : 0),
-          child: SettingsPanelContent(
-            controller: controller,
-            imagePicker: imagePicker,
-            onClose: () => Navigator.of(context).pop(),
+    return Material(
+      color: selected ? colors.accentSoft : Colors.transparent,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected ? colors.accentBorder : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 17,
+                color: selected ? colors.inkDeep : colors.inkQuiet,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    color: selected ? colors.inkDeep : colors.inkQuiet,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1762,189 +2596,6 @@ class _McpEditorDialogState extends State<_McpEditorDialog> {
                     key: const Key('mcp_save_button'),
                     onPressed: _saving ? null : () => unawaited(_save()),
                     child: Text(_saving ? '保存中…' : '保存并热加载'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ModelConfigDialog extends StatefulWidget {
-  const _ModelConfigDialog({
-    required this.controller,
-    required this.settings,
-  });
-
-  final AppController controller;
-  final SettingsSnapshot? settings;
-
-  @override
-  State<_ModelConfigDialog> createState() => _ModelConfigDialogState();
-}
-
-class _ModelConfigDialogState extends State<_ModelConfigDialog> {
-  late String _providerKind;
-  late final TextEditingController _baseUrlCtrl;
-  late final TextEditingController _modelCtrl;
-  late final TextEditingController _apiKeyCtrl;
-  String? _errText;
-  bool _saving = false;
-  bool _hasExistingKey = false;
-
-  @override
-  void initState() {
-    super.initState();
-    final snap = widget.settings;
-    final slot = snap?.chatSlot;
-    final currentProvider = slot != null ? snap?.providers[slot.provider] : null;
-    _providerKind = currentProvider?.kind ?? 'openai-compat';
-    _hasExistingKey = currentProvider?.authStatus == 'configured';
-    _baseUrlCtrl = TextEditingController(text: currentProvider?.baseUrl ?? '');
-    _modelCtrl = TextEditingController(text: slot?.model ?? '');
-    _apiKeyCtrl = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _baseUrlCtrl.dispose();
-    _modelCtrl.dispose();
-    _apiKeyCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final model = _modelCtrl.text.trim();
-    final baseUrl = _baseUrlCtrl.text.trim();
-    if (model.isEmpty) {
-      setState(() => _errText = '请填写模型 ID');
-      return;
-    }
-    if (_providerKind == 'openai-compat' && baseUrl.isEmpty) {
-      setState(() => _errText = '兼容接口请填写自定义 Base URL');
-      return;
-    }
-    setState(() {
-      _saving = true;
-      _errText = null;
-    });
-    try {
-      await widget.controller.updateLlmSettings(
-        providerKind: _providerKind,
-        modelName: model,
-        baseUrl: baseUrl.isEmpty ? null : baseUrl,
-        apiKey: _apiKeyCtrl.text.trim(),
-      );
-      if (mounted) Navigator.of(context).pop();
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _errText = e.message;
-        _saving = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _errText = '保存失败，请检查网络连接';
-        _saving = false;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    return Dialog(
-      backgroundColor: colors.letterSurface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: colors.hairline),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                '配置模型与 API Key',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '保存后立即热生效，密钥仅写入服务端 0600 凭证文件。',
-                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
-              ),
-              const SizedBox(height: 14),
-              DropdownButtonFormField<String>(
-                initialValue: _providerKind,
-                decoration: const InputDecoration(labelText: '模型服务商'),
-                items: const [
-                  DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                  DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
-                  DropdownMenuItem(value: 'google', child: Text('Google')),
-                  DropdownMenuItem(
-                    value: 'openai-compat',
-                    child: Text('OpenAI 兼容接口（自定义地址）'),
-                  ),
-                ],
-                onChanged: (v) {
-                  if (v != null) setState(() => _providerKind = v);
-                },
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _baseUrlCtrl,
-                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                decoration: const InputDecoration(
-                  labelText: '接口地址 Base URL（兼容接口必填）',
-                  hintText: 'https://api.example.com/v1',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _modelCtrl,
-                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                decoration: const InputDecoration(
-                  labelText: '主对话模型 ID',
-                  hintText: 'gpt-4o / deepseek-chat',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _apiKeyCtrl,
-                obscureText: true,
-                style: PsyberTheme.monoStyle.copyWith(fontSize: 13.5),
-                decoration: InputDecoration(
-                  labelText: _hasExistingKey
-                      ? 'API Key（留空保持现有密钥不变）'
-                      : 'API Key（必填）',
-                ),
-              ),
-              if (_errText != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  _errText!,
-                  style: TextStyle(color: colors.dangerInk, fontSize: 12.5),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: _saving ? null : () => Navigator.of(context).pop(),
-                    child: const Text('取消'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: _saving ? null : () => unawaited(_save()),
-                    child: const Text('保存'),
                   ),
                 ],
               ),

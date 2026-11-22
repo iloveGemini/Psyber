@@ -871,9 +871,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
+    // 移动端全屏两级导航：先进入「工具与设备」二级页再开启召回评测
+    expect(find.byKey(const Key('settings_mobile_page')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings_mobile_item_toolsDevices')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('recall_eval_switch')));
     await tester.pumpAndSettle();
-    Navigator.of(tester.element(find.byKey(const Key('recall_eval_switch')))).pop();
+    await tester.tap(find.byKey(const Key('close_settings_button')));
     await tester.pumpAndSettle();
 
     expect(find.text('想起 1 张卡'), findsOneWidget);
@@ -946,6 +950,7 @@ void main() {
 
     await tester.tap(find.byKey(const Key('open_stickers_button')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('sticker_picker_upload_button')), findsOneWidget);
     expect(find.byKey(const Key('sticker_option_hug')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('sticker_option_hug')));
@@ -1102,31 +1107,24 @@ void main() {
     Navigator.of(tester.element(find.byKey(const Key('activity_popover_card')))).pop();
     await tester.pumpAndSettle();
 
-    // 宽屏点击设置应展开右侧栏而非覆盖页面，并回显 GET /settings 内容
+    // 宽屏点击设置应弹出居中双栏弹层（不占右抽屉），并回显 GET /settings 内容
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('settings_modal_dialog')), findsOneWidget);
     expect(find.byKey(const Key('close_settings_button')), findsOneWidget);
     expect(find.text('openai · gpt-4o'), findsOneWidget);
 
-    // 确保作息保存与已配对设备（本机）可滚入视口并正常交互
-    await tester.scrollUntilVisible(
-      find.text('保存作息与通知'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
-    await tester.ensureVisible(find.text('保存作息与通知'));
+    // 切到「作息与通知」分组，切换开关应立即自动保存
+    await tester.tap(find.byKey(const Key('settings_nav_rhythmNotify')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('保存作息与通知'));
+    await tester.tap(find.byKey(const Key('proactive_enabled_switch')));
     await tester.pumpAndSettle();
     expect(api.settingsPatches.length, 1);
 
-    await tester.scrollUntilVisible(
-      find.text('本机'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
+    // 切到「工具与设备」分组，验证已配对设备（本机）可见且无重复「上锁的抽屉」入口
+    await tester.tap(find.byKey(const Key('settings_nav_toolsDevices')));
+    await tester.pumpAndSettle();
     expect(find.text('本机'), findsOneWidget);
-    // 设置页中不再保留重复的「上锁的抽屉」入口
     expect(
       find.descendant(
         of: find.byType(SettingsPanelContent),
@@ -1142,9 +1140,10 @@ void main() {
       findsOneWidget,
     );
 
-    // 验证桌面端快捷键：Esc 关闭设置侧栏；Enter 直接发送消息（Shift+Enter 换行）
+    // 验证桌面端快捷键：Esc 关闭设置弹层；Enter 直接发送消息（Shift+Enter 换行）
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('settings_modal_dialog')), findsNothing);
     expect(find.byKey(const Key('close_settings_button')), findsNothing);
 
     await tester.enterText(find.byKey(const Key('chat_input_field')), '桌面回车直发');
@@ -1848,37 +1847,49 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // 1. 验证主界面高频快捷层：输入台思考深度浮层 + 侧边栏快捷外观浮层
+      await tester.tap(find.byKey(const Key('composer_thinking_button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('composer_thinking_popover')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('quick_thinking_low')));
+      await tester.pumpAndSettle();
+      expect(api.settingsPatches.isNotEmpty, isTrue);
+
+      await tester.tap(find.byKey(const Key('quick_appearance_button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('appearance_popover_card')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('palette_oldBookPaper')));
+      await tester.pumpAndSettle();
+      expect(controller.paletteNotifier.value, PsyberPalette.oldBookPaper);
+      expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
+      await tester.tapAt(const Offset(600, 300));
+      await tester.pumpAndSettle();
+
+      // 2. 验证居中双栏设置弹层：模型与用量 / 居所与外观 / 工具与设备
       await tester.tap(find.byKey(const Key('settings_button')));
       await tester.pumpAndSettle();
+      expect(find.byKey(const Key('settings_modal_dialog')), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('test_llm_button')));
       await tester.pumpAndSettle();
       expect(api.llmTestCount, 1);
       expect(find.text('连通正常 · 128 ms'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('thinking_level_low')));
+      await tester.tap(find.byKey(const Key('thinking_level_high')));
       await tester.pumpAndSettle();
-      expect(api.settingsPatches.isNotEmpty, isTrue);
+      expect(api.settingsPatches.length, greaterThanOrEqualTo(2));
 
       await tester.tap(find.byKey(const Key('load_usage_stats_button')));
       await tester.pumpAndSettle();
       expect(find.text('\$0.0125'), findsOneWidget);
       expect(find.textContaining('42.9%'), findsWidgets);
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('palette_oldBookPaper')),
-        200,
-        scrollable: find.byType(Scrollable).last,
-      );
+      await tester.tap(find.byKey(const Key('settings_nav_appearance')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('upload_user_avatar_button')));
       await tester.pumpAndSettle();
       expect(api.uploadedAvatars, ['user']);
       expect(find.text('我的头像已更新'), findsOneWidget);
-
-      await tester.tap(find.byKey(const Key('palette_oldBookPaper')));
-      await tester.pumpAndSettle();
-      expect(controller.paletteNotifier.value, PsyberPalette.oldBookPaper);
-      expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('palette_shoreLight')));
       await tester.pumpAndSettle();
@@ -1890,9 +1901,14 @@ void main() {
       expect(controller.paletteNotifier.value, PsyberPalette.shoreDark);
       expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
 
+      await tester.tap(find.byKey(const Key('settings_nav_toolsDevices')));
+      await tester.pumpAndSettle();
       final switches = tester.widgetList<CupertinoSwitch>(find.byType(CupertinoSwitch));
       expect(switches, isNotEmpty);
       expect(switches.first.activeTrackColor, PsyberColors.shoreDark.accent);
+
+      await tester.tap(find.byKey(const Key('close_settings_button')));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('open_drawer_entry')));
       await tester.pumpAndSettle();
@@ -1901,6 +1917,8 @@ void main() {
       await tester.tapAt(const Offset(10, 10));
       await tester.pumpAndSettle();
 
+      await tester.tap(find.byKey(const Key('quick_appearance_button')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('palette_warmPaper')));
       await tester.pumpAndSettle();
       expect(controller.paletteNotifier.value, PsyberPalette.warmPaper);
@@ -1955,15 +1973,10 @@ void main() {
       expect(api.resolvedApprovals.length, 1);
       expect(api.resolvedApprovals.first['decision'], 'allow');
 
-      // 2. 在设置页通过预设添加外部 MCP 服务器并验证重连按钮
+      // 2. 在设置弹层的「工具与设备」分组通过预设添加外部 MCP 服务器并验证重连按钮
       await tester.tap(find.byKey(const Key('settings_button')));
       await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('mcp_add_preset_button')),
-        240,
-        scrollable: find.byType(Scrollable).last,
-      );
-      await tester.ensureVisible(find.byKey(const Key('mcp_add_preset_button')));
+      await tester.tap(find.byKey(const Key('settings_nav_toolsDevices')));
       await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('mcp_add_preset_button')));

@@ -6,6 +6,7 @@
 ## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（同步换段与连续性重构完成）
 
 ### 已完成
+- **iOS 客户端骨架、沙盒存储兼容与抽屉底栏适配（`app/`，2026-11-22）**：补齐 `app/ios/` 工程并配置 `NSAppTransportSecurity` / `NSLocalNetworkUsageDescription` 放行本地 HTTP 后端；修复 iOS 无 `HOME` 环境变量导致 `FileSessionStorage` 启动抛错白屏的问题，改由原生 `psyber/storage` MethodChannel 读取沙盒 `Application Support/psyber`，并在 `main.dart` 为 `initialize()` 兜底防白屏；修复 iOS 左抽屉底部 `SafeArea` 露底留缝问题。
 - **同步收尾换段、`sessionId` 持久化与 `<continuity>` 升级（`docs/` + `server/` + `app/`，2026-11-22）**：
   - **契约与同步换段**：否掉异步先切段，75% 阈值 / `CONTEXT_OVERFLOW` / 手动 `POST /api/v1/chat/wrap-up` 均先同步排空 `daily_wrapup`（`turnMutex -> tidyMutex` 单向锁、`bedtime` 完成回调挪至释放 `tidyMutex` 后零死锁），成功后再切新 `sessionId`；整理失败保留原段不硬切；`CONTEXT_OVERFLOW` 有历史时换段后当轮自动重试一次；排队消息自动重绑新 `sessionId` 绝不双发。
   - **状态持久化与安全边界**：`task_cursors['active_session']` 持久化 `{ sessionId, fresh, carryOverUntilSeq, continuity }`，彻底修复常驻服务 `bedtime` 不换段、换段未发言重启复活旧段、短停重启丢过渡轮与水位归零；工具 `scope: "session"` 白名单绑定当前 `sessionId` 换段即失效；`edit`/`reroll` 禁止跨段修改；`buildHistoryMessages` 按 `session_id` 完整回放保护缓存；开机补跑 `bedtime` 同步覆盖昨晚手动换段后关机缺日梗概场景。

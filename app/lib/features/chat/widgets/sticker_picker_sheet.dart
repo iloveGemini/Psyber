@@ -14,11 +14,13 @@ class StickerPickerDialog extends StatefulWidget {
     required this.stickersFuture,
     required this.profile,
     required this.onSelect,
+    this.onUploadSticker,
   });
 
   final Future<List<StickerView>> stickersFuture;
   final ConnectionProfile? profile;
   final void Function(StickerView sticker) onSelect;
+  final VoidCallback? onUploadSticker;
 
   @override
   State<StickerPickerDialog> createState() => _StickerPickerDialogState();
@@ -54,6 +56,21 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                     ),
                   ),
                   const Spacer(),
+                  if (widget.onUploadSticker != null)
+                    TextButton.icon(
+                      key: const Key('sticker_picker_upload_button'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        widget.onUploadSticker!();
+                      },
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      icon: const Icon(PhosphorIconsLight.plus, size: 14),
+                      label: const Text('上传', style: TextStyle(fontSize: 12.5)),
+                    ),
                   IconButton(
                     icon: const Icon(PhosphorIconsLight.x, size: 18),
                     onPressed: () => Navigator.of(context).pop(),

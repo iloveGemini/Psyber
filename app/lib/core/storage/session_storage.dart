@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../shared/theme.dart';
 import '../models/models.dart';
@@ -98,26 +99,49 @@ class MemorySessionStorage implements SessionStorage {
 }
 
 class FileSessionStorage implements SessionStorage {
-  FileSessionStorage({File? file}) : _file = file ?? _defaultFile();
+  FileSessionStorage({File? file}) : _explicitFile = file;
 
-  final File _file;
+  static const MethodChannel _storageChannel = MethodChannel('psyber/storage');
+
+  final File? _explicitFile;
+  File? _resolvedFile;
   Future<void> _themeSaveQueue = Future<void>.value();
   int _tmpSeq = 0;
 
   /// 严禁退化写入全局可访问的 Directory.systemTemp，防止长期 Bearer Token 泄露。
-  static File _defaultFile() {
-    final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+  Future<File> _getFile() async {
+    final explicit = _explicitFile;
+    if (explicit != null) return explicit;
+    final cached = _resolvedFile;
+    if (cached != null) return cached;
+
+    if (Platform.isIOS) {
+      // iOS GUI 进程默认不注入 HOME 环境变量，需向原生沙盒索取 Application Support 目录。
+      final appSupport =
+          await _storageChannel.invokeMethod<String>('getAppSupportDir');
+      if (appSupport != null && appSupport.trim().isNotEmpty) {
+        final file = File('$appSupport/psyber/client_session.json');
+        _resolvedFile = file;
+        return file;
+      }
+    }
+
+    final home =
+        Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
     if (home == null || home.trim().isEmpty) {
       throw StateError('无法确定用户私有主目录，已拒绝将访问令牌写入全局临时目录');
     }
-    return File('$home/.psyber/client_session.json');
+    final file = File('$home/.psyber/client_session.json');
+    _resolvedFile = file;
+    return file;
   }
 
   @override
   Future<ConnectionProfile?> load() async {
     try {
-      if (!await _file.exists()) return null;
-      final raw = await _file.readAsString();
+      final file = await _getFile();
+      if (!await file.exists()) return null;
+      final raw = await file.readAsString();
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return null;
       final profile = ConnectionProfile.fromJson(decoded);
@@ -130,21 +154,22 @@ class FileSessionStorage implements SessionStorage {
 
   @override
   Future<void> save(ConnectionProfile profile) async {
-    await _file.parent.create(recursive: true);
-    final tmp = File('${_file.path}.tmp.${DateTime.now().microsecondsSinceEpoch}');
+    final file = await _getFile();
+    await file.parent.create(recursive: true);
+    final tmp = File('${file.path}.tmp.${DateTime.now().microsecondsSinceEpoch}');
     try {
       await tmp.writeAsString(jsonEncode(profile.toJson()), flush: true);
-      if (!Platform.isWindows) {
+      if (!Platform.isWindows && !Platform.isIOS) {
         try {
           await Process.run('chmod', ['600', tmp.path]);
         } catch (_) {
           // macOS App Sandbox 或受限环境无权限 spawn 子进程，沙盒自身已隔离容器，安全降级
         }
       }
-      await tmp.rename(_file.path);
-      if (!Platform.isWindows) {
+      await tmp.rename(file.path);
+      if (!Platform.isWindows && !Platform.isIOS) {
         try {
-          await Process.run('chmod', ['600', _file.path]);
+          await Process.run('chmod', ['600', file.path]);
         } catch (_) {
           // 安全降级
         }
@@ -159,10 +184,11 @@ class FileSessionStorage implements SessionStorage {
   @override
   Future<void> clear() async {
     try {
-      if (await _file.exists()) {
-        await _file.delete();
+      final file = await _getFile();
+      if (await file.exists()) {
+        await file.delete();
       }
-      final draftFile = _draftFile();
+      final draftFile = _draftFile(file);
       if (await draftFile.exists()) {
         await draftFile.delete();
       }
@@ -171,12 +197,13 @@ class FileSessionStorage implements SessionStorage {
     }
   }
 
-  File _draftFile() => File('${_file.parent.path}/client_draft.txt');
+  File _draftFile(File sessionFile) =>
+      File('${sessionFile.parent.path}/client_draft.txt');
 
   @override
   Future<String> loadDraft() async {
     try {
-      final f = _draftFile();
+      final f = _draftFile(await _getFile());
       if (!await f.exists()) return '';
       return await f.readAsString();
     } catch (_) {
@@ -187,7 +214,7 @@ class FileSessionStorage implements SessionStorage {
   @override
   Future<void> saveDraft(String draft) async {
     try {
-      final f = _draftFile();
+      final f = _draftFile(await _getFile());
       if (draft.isEmpty) {
         if (await f.exists()) await f.delete();
         return;
@@ -207,12 +234,13 @@ class FileSessionStorage implements SessionStorage {
     }
   }
 
-  File _themeFile() => File('${_file.parent.path}/client_theme.json');
+  File _themeFile(File sessionFile) =>
+      File('${sessionFile.parent.path}/client_theme.json');
 
   @override
   Future<ThemePreferences> loadThemePreferences() async {
     try {
-      final f = _themeFile();
+      final f = _themeFile(await _getFile());
       if (!await f.exists()) return const ThemePreferences();
       final decoded = jsonDecode(await f.readAsString());
       if (decoded is! Map<String, dynamic>) return const ThemePreferences();
@@ -230,7 +258,7 @@ class FileSessionStorage implements SessionStorage {
 
   Future<void> _writeThemePreferences(ThemePreferences prefs) async {
     try {
-      final f = _themeFile();
+      final f = _themeFile(await _getFile());
       await f.parent.create(recursive: true);
       _tmpSeq += 1;
       final tmp = File('${f.path}.tmp.${DateTime.now().microsecondsSinceEpoch}.$_tmpSeq');

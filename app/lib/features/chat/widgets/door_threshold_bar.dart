@@ -20,6 +20,7 @@ class DoorThresholdBar extends StatefulWidget {
     required this.onOpenLeftDrawer,
     required this.onOpenRightDrawer,
     this.onOpenSettings,
+    this.onOpenRhythmSettings,
     this.activeActivity,
     this.isReplying = false,
     this.isWide = false,
@@ -33,6 +34,7 @@ class DoorThresholdBar extends StatefulWidget {
   final VoidCallback onOpenLeftDrawer;
   final VoidCallback onOpenRightDrawer;
   final VoidCallback? onOpenSettings;
+  final VoidCallback? onOpenRhythmSettings;
   final ActivitySessionView? activeActivity;
   final bool isReplying;
   final bool isWide;
@@ -465,12 +467,41 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                           ),
                           if (circadian != null) ...[
                             const SizedBox(height: 6),
-                            Text(
-                              '夜间静默窗：${circadian.sleepStart} – ${circadian.sleepEnd}',
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                color: colors.inkFaint,
-                              ),
+                            Row(
+                              children: [
+                                Text(
+                                  '夜间静默窗：${circadian.sleepStart} – ${circadian.sleepEnd}',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: colors.inkFaint,
+                                  ),
+                                ),
+                                if (widget.onOpenRhythmSettings != null) ...[
+                                  const SizedBox(width: 8),
+                                  InkWell(
+                                    key: const Key('door_bar_adjust_rhythm_button'),
+                                    borderRadius: BorderRadius.circular(4),
+                                    onTap: () {
+                                      setState(() => _expanded = false);
+                                      widget.onOpenRhythmSettings!();
+                                    },
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 4,
+                                        vertical: 1,
+                                      ),
+                                      child: Text(
+                                        '调整',
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          color: colors.accent,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ],
                         ],

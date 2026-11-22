@@ -3,20 +3,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
+import '../../../core/media/image_picker.dart';
 import '../../../core/models/models.dart';
+import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../shared/theme.dart';
 
 /// 左侧栏顶部「双人状态卡」：
-/// - 上方：住户头像、门状态/回复状态与门牌心绪短句；
-/// - 下方：用户头像、主动挂出的心绪短句（点开可编辑/清掉）与一键「勿扰」开关（开启时抑制非紧急主动 wake）。
+/// - 上方：住户头像（点击可更换）、门状态/回复状态与门牌心绪短句；
+/// - 下方：用户头像（点击可更换）、主动挂出的心绪短句与一键「勿扰」开关。
 class DualStatusCard extends StatefulWidget {
   const DualStatusCard({
     super.key,
     required this.controller,
+    this.imagePicker,
   });
 
   final AppController controller;
+  final ImageFilePicker? imagePicker;
 
   @override
   State<DualStatusCard> createState() => _DualStatusCardState();
@@ -27,6 +31,7 @@ class _DualStatusCardState extends State<DualStatusCard> {
 
   bool _editingMood = false;
   bool _saving = false;
+  bool _uploadingAvatar = false;
   late final TextEditingController _moodController;
 
   @override
@@ -99,6 +104,43 @@ class _DualStatusCardState extends State<DualStatusCard> {
     }
   }
 
+  Future<void> _pickAndUploadAvatar(String who) async {
+    if (_uploadingAvatar) return;
+    final picker = widget.imagePicker ?? defaultPlatformImagePicker;
+    final picked = await picker();
+    if (picked == null || !mounted) return;
+    setState(() => _uploadingAvatar = true);
+    try {
+      await widget.controller.uploadAvatar(
+        who: who,
+        bytes: picked.bytes,
+        filename: picked.filename,
+        mimeType: picked.mimeType,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(who == 'resident' ? '住户头像已更新' : '我的头像已更新'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('头像上传失败，请稍后重试')),
+      );
+    } finally {
+      if (mounted) setState(() => _uploadingAvatar = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
@@ -133,12 +175,17 @@ class _DualStatusCardState extends State<DualStatusCard> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         _StatusAvatar(
+                          key: const Key('quick_resident_avatar'),
+                          tooltip: '点击更换住户头像',
                           icon: PhosphorIconsLight.sparkle,
                           bgColor: colors.celadonWash,
                           iconColor: colors.inkDeep,
                           dotColor: residentDotColor,
                           imageUrl: settingsSnap?.residentAvatarUrl,
                           profile: profile,
+                          onTap: _uploadingAvatar
+                              ? null
+                              : () => unawaited(_pickAndUploadAvatar('resident')),
                         ),
                       const SizedBox(width: 9),
                       Expanded(
@@ -336,12 +383,17 @@ class _DualStatusCardState extends State<DualStatusCard> {
                       ),
                       const SizedBox(width: 9),
                       _StatusAvatar(
+                        key: const Key('quick_user_avatar'),
+                        tooltip: '点击更换我的头像',
                         icon: PhosphorIconsLight.user,
                         bgColor: colors.accentSoft,
                         iconColor: colors.inkDeep,
                         dotColor: userStatus.undisturbed ? colors.thresholdAmber : null,
                         imageUrl: settingsSnap?.userAvatarUrl,
                         profile: profile,
+                        onTap: _uploadingAvatar
+                            ? null
+                            : () => unawaited(_pickAndUploadAvatar('user')),
                       ),
                     ],
                   ),
@@ -435,12 +487,15 @@ class _DualStatusCardState extends State<DualStatusCard> {
 
 class _StatusAvatar extends StatelessWidget {
   const _StatusAvatar({
+    super.key,
     required this.icon,
     required this.bgColor,
     required this.iconColor,
     this.dotColor,
     this.imageUrl,
     this.profile,
+    this.tooltip,
+    this.onTap,
   });
 
   final IconData icon;
@@ -449,12 +504,14 @@ class _StatusAvatar extends StatelessWidget {
   final Color? dotColor;
   final String? imageUrl;
   final ConnectionProfile? profile;
+  final String? tooltip;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final hasImage = imageUrl != null && imageUrl!.isNotEmpty && profile != null;
-    return Stack(
+    final avatar = Stack(
       clipBehavior: Clip.none,
       children: [
         Container(
@@ -490,6 +547,15 @@ class _StatusAvatar extends StatelessWidget {
             ),
           ),
       ],
+    );
+    if (onTap == null) return avatar;
+    return Tooltip(
+      message: tooltip ?? '',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: avatar,
+      ),
     );
   }
 }

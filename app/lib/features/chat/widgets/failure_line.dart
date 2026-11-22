@@ -24,7 +24,7 @@ String _failureLabel(String code) {
 String _failureSuggestion(String code) {
   switch (code) {
     case 'AUTH_EXPIRED':
-      return '请打开右上角「偏好与设置 → 模型大脑」，检查 API Key 或服务商配置是否正确；保存后可直接点上方「重试」。';
+      return '请打开左下角「偏好与设置 → 模型与用量」，检查 API Key 或服务商配置是否正确；保存后可直接点上方「重试」。';
     case 'RATE_LIMITED':
       return '模型服务当前限流了，稍等几秒再点「重试」即可继续，不需要重发一遍刚才的话。';
     case 'CONTEXT_OVERFLOW':

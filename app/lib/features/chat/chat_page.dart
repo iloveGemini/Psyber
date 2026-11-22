@@ -24,10 +24,10 @@ import 'widgets/sticker_picker_sheet.dart';
 import 'widgets/timeline_items.dart';
 
 /// 主聊天室页面：
-/// - 门楣顶栏（实时门态、门牌便签展开、活动胶囊与设置入口）
+/// - 门楣顶栏（实时门态、门牌便签展开、活动胶囊）
 /// - Ring 1.5 活动伴看浮栏槽（日常零占位）
 /// - 居中窄阅读列（680px）+ 悬停/长按消息菜单 + 局部流式轮次槽 + 回到底部胶囊
-/// - 宽屏（>= 920px）右侧滑出设置栏，窄屏推入独立设置页
+/// - 宽屏（>= 920px）居中双栏设置弹层，窄屏推入全屏两级设置页
 class ChatPage extends StatefulWidget {
   const ChatPage({
     super.key,
@@ -55,7 +55,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _uploadingImage = false;
   bool _loadingOlder = false;
   bool _showDesktopSidebar = true;
-  bool _showDesktopSettings = false;
+  bool _settingsDialogOpen = false;
   bool _showScrollToBottom = false;
   bool _isDraggingFiles = false;
   bool _autoScrollScheduled = false;
@@ -339,6 +339,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
             if (!mounted) return;
             setState(() => _pendingSticker = sticker);
           },
+          onUploadSticker: () => unawaited(
+            showStickerUploadDialog(
+              context,
+              controller: widget.controller,
+              imagePicker: widget.imagePicker,
+            ),
+          ),
         ),
       ),
     );
@@ -367,10 +374,24 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     });
   }
 
-  void _toggleSettings() {
+  void _openSettings({SettingsSection? initialSection}) {
     final wide = MediaQuery.sizeOf(context).width >= PsyberTheme.desktopBreakpoint;
     if (wide) {
-      setState(() => _showDesktopSettings = !_showDesktopSettings);
+      if (_settingsDialogOpen) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+        return;
+      }
+      _settingsDialogOpen = true;
+      unawaited(
+        showSettingsDialog(
+          context,
+          controller: widget.controller,
+          imagePicker: widget.imagePicker,
+          initialSection: initialSection ?? SettingsSection.modelUsage,
+        ).whenComplete(() {
+          _settingsDialogOpen = false;
+        }),
+      );
       return;
     }
     unawaited(
@@ -379,11 +400,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           builder: (_) => SettingsPage(
             controller: widget.controller,
             imagePicker: widget.imagePicker,
+            initialSection: initialSection,
           ),
         ),
       ),
     );
   }
+
+  void _toggleSettings() => _openSettings();
 
   String? _previousAssistantModel(List<TimelineItem> items, int beforeIndex) {
     for (var i = beforeIndex - 1; i >= 0; i--) {
@@ -444,11 +468,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
             setState(() => _showDesktopSidebar = !_showDesktopSidebar);
           }
         },
-        const SingleActivator(LogicalKeyboardKey.escape): () {
-          if (isWide && _showDesktopSettings) {
-            setState(() => _showDesktopSettings = false);
-          }
-        },
+
       },
       child: Focus(
         autofocus: true,
@@ -532,6 +552,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   }
                                 },
                                 onOpenSettings: _toggleSettings,
+                                onOpenRhythmSettings: () => _openSettings(
+                                  initialSection: SettingsSection.rhythmNotify,
+                                ),
                               ),
                             ),
                           ),
@@ -1067,45 +1090,70 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                           builder: (context, door, _) =>
                               ValueListenableBuilder<ActiveTurnState?>(
                             valueListenable: widget.controller.activeTurnNotifier,
-                            builder: (context, activeTurn, _) => AdaptiveComposer(
-                              door: door,
-                              controller: _inputController,
-                              pendingAttachments: _pendingAttachments,
-                              pendingVideoClip: _pendingVideoClip,
-                              pendingSticker: _pendingSticker,
-                              profile: widget.controller.profileNotifier.value,
-                              uploadingImage: _uploadingImage,
-                              sending: _sending,
-                              isReplying: activeTurn != null,
-                              isDraggingFiles: _isDraggingFiles,
-                              onPickImage: _pickAndUploadImage,
-                              onOpenStickers: _openStickerSheet,
-                              onRemoveAttachment: (idx) {
-                                setState(() => _pendingAttachments.removeAt(idx));
+                            builder: (context, activeTurn, _) =>
+                                ValueListenableBuilder<SettingsSnapshot?>(
+                              valueListenable: widget.controller.settingsNotifier,
+                              builder: (context, settingsSnap, _) {
+                                final slot = settingsSnap?.chatSlot;
+                                final modelLabel = (slot != null && slot.model.isNotEmpty)
+                                    ? '${slot.provider} · ${slot.model}'
+                                    : null;
+                                return AdaptiveComposer(
+                                  door: door,
+                                  controller: _inputController,
+                                  pendingAttachments: _pendingAttachments,
+                                  pendingVideoClip: _pendingVideoClip,
+                                  pendingSticker: _pendingSticker,
+                                  profile: widget.controller.profileNotifier.value,
+                                  uploadingImage: _uploadingImage,
+                                  sending: _sending,
+                                  isReplying: activeTurn != null,
+                                  isDraggingFiles: _isDraggingFiles,
+                                  thinkingLevel: settingsSnap?.thinkingLevel ?? 'medium',
+                                  currentModelLabel: modelLabel,
+                                  onSelectThinkingLevel: (level) => unawaited(
+                                    widget.controller.patchSettings({
+                                      'llm': {
+                                        'thinking': {
+                                          'enabled': level != 'off',
+                                          'level': level,
+                                        },
+                                      },
+                                    }),
+                                  ),
+                                  onOpenModelSettings: () => _openSettings(
+                                    initialSection: SettingsSection.modelUsage,
+                                  ),
+                                  onPickImage: _pickAndUploadImage,
+                                  onOpenStickers: _openStickerSheet,
+                                  onRemoveAttachment: (idx) {
+                                    setState(() => _pendingAttachments.removeAt(idx));
+                                  },
+                                  onRemoveVideoClip: () {
+                                    setState(() => _pendingVideoClip = null);
+                                  },
+                                  onClearSticker: () {
+                                    setState(() => _pendingSticker = null);
+                                  },
+                                  onPasteClipboard: DesktopMediaBridge.isSupported
+                                      ? _handleDesktopPaste
+                                      : null,
+                                  onVoiceInput: () {
+                                    ScaffoldMessenger.of(context)
+                                      ..hideCurrentSnackBar()
+                                      ..showSnackBar(
+                                        const SnackBar(
+                                          content: Text('语音输入即将支持'),
+                                          duration: Duration(seconds: 2),
+                                        ),
+                                      );
+                                  },
+                                  onAbort: () =>
+                                      unawaited(widget.controller.abortActiveTurn()),
+                                  onSend: ({bool urgent = false}) =>
+                                      unawaited(_send(urgent: urgent)),
+                                );
                               },
-                              onRemoveVideoClip: () {
-                                setState(() => _pendingVideoClip = null);
-                              },
-                              onClearSticker: () {
-                                setState(() => _pendingSticker = null);
-                              },
-                              onPasteClipboard: DesktopMediaBridge.isSupported
-                                  ? _handleDesktopPaste
-                                  : null,
-                              onVoiceInput: () {
-                                ScaffoldMessenger.of(context)
-                                  ..hideCurrentSnackBar()
-                                  ..showSnackBar(
-                                    const SnackBar(
-                                      content: Text('语音输入即将支持'),
-                                      duration: Duration(seconds: 2),
-                                    ),
-                                  );
-                              },
-                              onAbort: () =>
-                                  unawaited(widget.controller.abortActiveTurn()),
-                              onSend: ({bool urgent = false}) =>
-                                  unawaited(_send(urgent: urgent)),
                             ),
                           ),
                         ),
@@ -1118,19 +1166,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
-              if (isWide && _showDesktopSettings)
-                Container(
-                  width: 372,
-                  decoration: BoxDecoration(
-                    color: colors.mineralCanvas,
-                    border: Border(left: BorderSide(color: colors.hairline)),
-                  ),
-                  child: SettingsPanelContent(
-                    controller: widget.controller,
-                    imagePicker: widget.imagePicker,
-                    onClose: () => setState(() => _showDesktopSettings = false),
-                  ),
-                ),
             ],
           ),
         ),

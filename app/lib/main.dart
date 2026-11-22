@@ -16,7 +16,11 @@ void main() async {
     api: HttpPsyberApiClient(),
     storage: FileSessionStorage(),
   );
-  await controller.initialize();
+  try {
+    await controller.initialize();
+  } catch (e, st) {
+    debugPrint('AppController initialize failed: $e\n$st');
+  }
   runApp(PsyberApp(controller: controller));
 }
 

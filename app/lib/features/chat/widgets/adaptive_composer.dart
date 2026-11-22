@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +64,10 @@ class AdaptiveComposer extends StatefulWidget {
     this.onPasteClipboard,
     this.onVoiceInput,
     this.onAbort,
+    this.thinkingLevel = 'medium',
+    this.currentModelLabel,
+    this.onSelectThinkingLevel,
+    this.onOpenModelSettings,
     required this.onSend,
   });
 
@@ -84,6 +89,10 @@ class AdaptiveComposer extends StatefulWidget {
   final Future<bool> Function()? onPasteClipboard;
   final VoidCallback? onVoiceInput;
   final VoidCallback? onAbort;
+  final String thinkingLevel;
+  final String? currentModelLabel;
+  final ValueChanged<String>? onSelectThinkingLevel;
+  final VoidCallback? onOpenModelSettings;
   final void Function({bool urgent}) onSend;
 
   @override
@@ -92,6 +101,7 @@ class AdaptiveComposer extends StatefulWidget {
 
 class _AdaptiveComposerState extends State<AdaptiveComposer> {
   late final FocusNode _inputFocusNode;
+  final GlobalKey _thinkingAnchorKey = GlobalKey();
   bool _urgentOpen = false;
 
   bool get _isDesktopOrWeb {
@@ -220,6 +230,165 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
       setState(() => _urgentOpen = true);
       _inputFocusNode.requestFocus();
     }
+  }
+
+  String _thinkingLabel(String level) => switch (level) {
+        'off' => '关闭',
+        'low' => '轻度',
+        'high' => '深度',
+        _ => '标准',
+      };
+
+  Future<void> _openThinkingPopover() async {
+    if (widget.onSelectThinkingLevel == null) return;
+    double bottom = 72;
+    double left = 24;
+    final anchorCtx = _thinkingAnchorKey.currentContext;
+    if (anchorCtx != null) {
+      final box = anchorCtx.findRenderObject() as RenderBox?;
+      final overlay = Overlay.maybeOf(context)?.context.findRenderObject() as RenderBox?;
+      if (box != null && box.hasSize && overlay != null && overlay.hasSize) {
+        final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+        bottom = (overlay.size.height - topLeft.dy + 8).clamp(16.0, overlay.size.height - 180.0);
+        left = topLeft.dx.clamp(12.0, math.max(12.0, overlay.size.width - 284.0));
+      }
+    }
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '关闭思考深度菜单',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 130),
+      pageBuilder: (dialogCtx, _, __) {
+        final colors = dialogCtx.colors;
+        return Stack(
+          children: [
+            Positioned(
+              left: left,
+              bottom: bottom,
+              width: 272,
+              child: Material(
+                key: const Key('composer_thinking_popover'),
+                color: colors.letterSurface,
+                elevation: 8,
+                shadowColor: Colors.black.withValues(alpha: 0.12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(color: colors.hairline),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(PhosphorIconsLight.brain, size: 15, color: colors.inkDeep),
+                          const SizedBox(width: 6),
+                          Text(
+                            '思考深度',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: colors.inkDeep,
+                            ),
+                          ),
+                          const Spacer(),
+                          if (widget.onOpenModelSettings != null)
+                            InkWell(
+                              key: const Key('quick_open_model_settings'),
+                              borderRadius: BorderRadius.circular(6),
+                              onTap: () {
+                                Navigator.of(dialogCtx).pop();
+                                widget.onOpenModelSettings!();
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                child: Text(
+                                  '配置模型',
+                                  style: TextStyle(fontSize: 11.5, color: colors.accent),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      if (widget.currentModelLabel != null &&
+                          widget.currentModelLabel!.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          widget.currentModelLabel!,
+                          style: PsyberTheme.monoStyle.copyWith(
+                            fontSize: 11,
+                            color: colors.inkQuiet,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          for (final entry in const [
+                            ('off', '关闭'),
+                            ('low', '轻度'),
+                            ('medium', '标准'),
+                            ('high', '深度'),
+                          ])
+                            Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 2),
+                                child: InkWell(
+                                  key: Key('quick_thinking_${entry.$1}'),
+                                  borderRadius: BorderRadius.circular(8),
+                                  onTap: () {
+                                    Navigator.of(dialogCtx).pop();
+                                    widget.onSelectThinkingLevel!(entry.$1);
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 6),
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: widget.thinkingLevel == entry.$1
+                                          ? colors.accentSoft
+                                          : colors.mineralCanvas,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: widget.thinkingLevel == entry.$1
+                                            ? colors.accentBorder
+                                            : colors.hairline,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      entry.$2,
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        fontWeight: widget.thinkingLevel == entry.$1
+                                            ? FontWeight.w600
+                                            : FontWeight.w400,
+                                        color: colors.inkDeep,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+      transitionBuilder: (ctx, anim, _, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+        child: child,
+      ),
+    );
   }
 
   @override
@@ -530,6 +699,36 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                                 color: colors.inkQuiet,
                               ),
                             ),
+                            if (widget.onSelectThinkingLevel != null) ...[
+                              const SizedBox(width: 2),
+                              KeyedSubtree(
+                                key: _thinkingAnchorKey,
+                                child: IconButton(
+                                  key: const Key('composer_thinking_button'),
+                                  tooltip: '思考深度：${_thinkingLabel(widget.thinkingLevel)}',
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints.tightFor(
+                                    width: 30,
+                                    height: 30,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    minimumSize: const Size(30, 30),
+                                    fixedSize: const Size(30, 30),
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: widget.sending
+                                      ? null
+                                      : () => unawaited(_openThinkingPopover()),
+                                  icon: Icon(
+                                    PhosphorIconsLight.brain,
+                                    size: 18,
+                                    color: widget.thinkingLevel == 'off'
+                                        ? colors.inkFaint
+                                        : colors.accent,
+                                  ),
+                                ),
+                              ),
+                            ],
                             Expanded(
                               child: TextField(
                                 key: const Key('chat_input_field'),
