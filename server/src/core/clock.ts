@@ -199,3 +199,29 @@ export function localWeekday(epochMs: number, timeZone: string): string {
   }).format(new Date(epochMs));
   return WEEKDAY_ZH[short] ?? "未知";
 }
+
+const UTC_WEEKDAY_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+/** 按 YYYY-MM-DD 日历日直接返回中文星期（不受跨午夜时钟影响） */
+export function weekdayOfDay(dateStr: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  if (!match) return "未知";
+  const dow = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
+  return UTC_WEEKDAY_ZH[dow] ?? "未知";
+}
+
+/** 按指定 IANA 时区格式化为 YYYY-MM-DD HH:mm 本地时间 */
+export function localDateTime(epochMs: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(epochMs));
+
+  const get = (type: string, fallback: string) => parts.find((p) => p.type === type)?.value ?? fallback;
+  return `${get("year", "1970")}-${get("month", "01")}-${get("day", "01")} ${get("hour", "00")}:${get("minute", "00")}`;
+}

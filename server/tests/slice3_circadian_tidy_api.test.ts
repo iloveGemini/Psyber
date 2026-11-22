@@ -149,7 +149,7 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
 
     // 开启勿扰模式后，即使在白天，wake 也被 user_undisturbed 拦截；而 bypassSuppression 可穿透测试
     ctx.clock.setTime(Date.UTC(2026, 10, 20, 6, 0, 0));
-    ctx.config.userStatus = { undisturbed: true, updatedAt: ctx.clock.now() };
+    ctx.config.userStatus = { moodText: null, undisturbed: true, updatedAt: ctx.clock.now() };
     const rDnd = await hub.notify({ kind: "wake", title: "Psyber", body: "你在吗" });
     expect(rDnd.suppressedReason).toBe("user_undisturbed");
 
@@ -368,11 +368,53 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(ctx.events.getCursor("bedtime")).toBeTruthy();
     // 整理轮绝不推进 door_notes_read
     expect(ctx.events.countUnreadDoorNotes()).toBe(1);
-    // bedtime 轮的输入应包含今日已整理卡片摘要
+    // bedtime 轮的输入应包含 <tidy_context>、目标 gist 路径与今日已整理卡片摘要及正文节选
+    const drainReq = mockChat.requests[mockChat.requests.length - 4];
+    const drainUserMsg = drainReq.messages[0];
+    expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("<tidy_context>");
+    expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("当前日期：2026-11-20（周五 · ISO周 2026-W47）");
+    expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("[2026-11-20 ");
+
     const bedtimeReq = mockChat.requests[mockChat.requests.length - 2];
     const bedtimeUserMsg = bedtimeReq.messages[0];
+    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("日梗概目标：gist/days/2026-11.md（节标题 ### 2026-11-20");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("今日已整理卡片摘要");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("daily/2026-11-20-strawberry.md");
+    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("对方买了一袋草莓放冰箱");
+
+    // 3. 周日 bedtime（2026-11-22 周日 · 2026-W47）应带周梗概目标、本月日梗概原文及图片附件提示
+    ctx.clock.jumpToWallClock(2026, 11, 22, 23, 35, 0);
+    ctx.events.append({
+      sessionId: "s2",
+      turnId: "t2",
+      role: "user",
+      kind: "chat",
+      content: "看看我拍的晚霞",
+      metadata: { attachments: ["a".repeat(64)] },
+    });
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "无新增日常卡"}' }]);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "完成周日梗概"}' }]);
+
+    const sunRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: mockChat,
+      },
+      { taskType: "bedtime", nightDate: "2026-11-22" },
+    );
+    expect(sunRes.ok).toBe(true);
+    const sunDrainMsg = mockChat.requests[mockChat.requests.length - 2].messages[0];
+    expect(sunDrainMsg.role === "user" && sunDrainMsg.content).toContain("[附带了 1 张图片]");
+    const sunBedtimeMsg = mockChat.requests[mockChat.requests.length - 1].messages[0];
+    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("当前日期：2026-11-22（周日 · ISO周 2026-W47）");
+    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("周梗概目标：gist/weeks/2026.md（节标题 ### 2026-W47");
+    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("本月日梗概（gist/days/2026-11.md");
   });
 
   test("API 端点闭环：/auth/pair 防伪造头爆破、/genesis BYOK 0600 落盘与防覆写、/media、/settings 校验脱敏与未回重置", async () => {

@@ -43,11 +43,11 @@ Direct Engine 在派发 `tidy.md` 时，根据触发类型将下列纯文本段�
   ```
 - **换段 / 闲置收尾（`daily_wrapup`）**：
   ```text
-  我整理游标后的近期对话：在 daily/ 记录值得留存的切片或短期状态（state 必填 tags 与 ttl_days），完成旧 state 卡的 resolved/disputed 对账；若聊天中明说了新的规矩、承诺或重要原话，按需同步到 shelf/ 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 的双次/收录规则归档或注册。
+  我整理游标后的近期对话：在 daily/YYYY-MM-DD-<slug>.md 记录值得留存的事件切片（kind: episode）或短期状态（kind: state，必填 tags 与 ttl_days），完成旧 state 卡的 resolved/disputed 对账；若聊天中明说了新的规矩、承诺或重要原话，按需同步到 shelf/rules.md、shelf/threads.md 或 favorite/；若识别出反复出现的隐式互动或值得收录的实体，对照 activities/REGISTRY.yaml 与 entities/REGISTRY.yaml 的双次/收录规则归档或注册。本轮不写 gist/ 梗概。
   ```
 - **每日睡前整理（`bedtime`）**：
   ```text
-  我回顾今日已整理的卡片摘要、剩余未整理片段与关键双向反馈链：① 在 gist/days/ 追加今日梗概（≲ 300 字；逢周末同步滚动更新 gist/weeks/；Ring 1.5 起逢月末由当月日梗概汇总写入 gist/months/、逢年末由 12 份月梗概汇总写入 gist/years/）；② 若对话中明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md；③ 若今日互动让我对自己或 user.md 里的朋友有了新的认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md（定名、自定代词或明确称呼/代词时同步更新 frontmatter 的 name / pronoun）；④ 兜底补记今日值得逐字保留的原话或附件到 favorite/；⑤ 兜底检查今日是否出现值得收录的新实体（人、地方、机构——须同时满足与我或 user.md 里的朋友有实质联系、有具体内容、不同日期/会话出现两次以上或被亲口嘱咐记住），对照 entities/REGISTRY.yaml 建档登记，并把相关稳定事实从 daily/、activities/ 移过去（只移事实，不动当天事发经过）。
+  我回顾今日已整理的卡片摘要、剩余未整理片段与现行书架：① 按 <tidy_context> 指定的路径与 ### YYYY-MM-DD 节标题，在 gist/days/YYYY-MM.md 追加今日梗概（≲ 300 字，只留会影响后续的脉络与挂念；若 <tidy_context> 标明今日为周日，写完今日梗概后同步汇总本周日梗概到 gist/weeks/YYYY.md 的 ### YYYY-Www 节，≲ 500 字）；② 若对话中明说了新的规矩、边界或承诺，局部 edit 到 shelf/rules.md 或 shelf/threads.md（已闭环的线索及时清理）；③ 若经过足够清晰的互动反馈，对我自己的做法或 user.md 里的朋友有了值得沉淀的新认识，克制地 edit 到 shelf/mirror.md、self.md 或 user.md（不与 shelf/rules.md 重复抄写；定名、自定代词或更新称呼/代词时同步更新 frontmatter 的 name / pronoun）；④ 兜底补记值得逐字保留的原话到 favorite/，或按双次规则归档实体到 entities/。
   ```
 
 ---

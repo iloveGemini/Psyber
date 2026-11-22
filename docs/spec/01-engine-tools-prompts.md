@@ -190,9 +190,9 @@ export interface ModelRef {
 
 静默整理轮按单队列串行消费 `events`（单批上限 `TASK_BUDGET = 10_000` 字，每批独立提交推进游标）：
 
-1. **材料装载（无锁）**：读取游标后 `status = 'active'` 对话（`daily_wrapup` 与 `bedtime` 复用单游标推进；`bedtime` 额外注入当日已写/改卡片摘要）、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml` 与当前未关闭 `daily/` `state` 卡清单。
+1. **材料装载（无锁）**：顶部注入 `<tidy_context>`（含目标日期 `YYYY-MM-DD`、中文星期、ISO 周号 `YYYY-Www` 及 `bedtime` 对应的 `gist/days/YYYY-MM.md` / 周日 `gist/weeks/YYYY.md` 目标路径与节标题）；读取游标后 `status IN ('active', 'retracted')` 对话并附本地时间戳 `[YYYY-MM-DD HH:mm]` 与图片附件提示（`daily_wrapup` 与 `bedtime` 复用单游标推进；`bedtime` 额外注入当日已写/改卡片摘要与简短正文、现行 `gist/days/YYYY-MM.md` 片段与 `shelf/` 现行摘要）、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml` 与当前未关闭 `daily/` `state` 卡清单。
 2. **获取 `MemoryWriteMutex` 并开启 `MemoryTx`**：仅记录 `memory/` 下触碰路径（`touchedMemoryPaths`）及其写前字节备份；主对话只读（`read`/`glob`/`grep`）无锁放行。
-3. **Psyber单轮写作**：加载 `<self>` + `<user>` + `prompts/tidy.md`（v3），由 `chat`（或配置的 `memory_task`）调用原生 5 工具完成写卡与状态更新，末尾解析可选 `{"summary": "..."}`（缺失或微瑕降级由触碰文件名兜底，绝不回滚）。
+3. **Psyber单轮写作**：加载 `<self>` + `<user>` + `prompts/tidy.md`（v7），由 `chat`（或配置的 `memory_task`）调用原生 5 工具完成写卡与状态更新，末尾解析可选 `{"summary": "..."}`（缺失或微瑕降级由触碰文件名兜底，绝不回滚）。
 4. **精准提交与游标推进**：
    - 若写作轮因模型报错/超时失败 → 按内存备份恢复 `touchedMemoryPaths` 并刷新索引，**不推进游标**，待下次重试；
    - 正常完成且 `touchedMemoryPaths` 非空 → 仅执行 `git add -- <...touchedMemoryPaths>` 与 `git commit -m "memory(<task>): <summary>"`，随后在同一 SQLite 事务更新 `task_cursors`、刷新增量索引并释放锁。
@@ -411,7 +411,7 @@ export interface RegisteredTool {
 | 文件 | 版本 | 内容 | 载入位置 |
 | :--- | :--- | :--- | :--- |
 | `prompts/main.md` | v7 | 主对话 Static System Prompt | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
-| `prompts/tidy.md` | v6 | 静默整理轮（含 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/tidy.md` | v7 | 静默整理轮（含目录分工、路径/Frontmatter 规范与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（Ring 1.5 可选非阻塞） | memory_task 复核轮（无历史只读，Ring 1 不调用） |
 | `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
 | `prompts/genesis.md` | v5 | 创世中性开局 | Dynamic Tail（`self.md` `name` 为空时拼入） |

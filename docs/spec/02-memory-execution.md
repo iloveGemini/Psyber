@@ -345,9 +345,9 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
   ```
   - **切批防卡死**：按累计字符数达到 `TASK_BUDGET = 10_000` 字切批，严格不断开同一 `turn_id` 的 user/assistant 对；若首个完整 `turn_id` 即超过 `10_000` 字，仍整轮纳入本批（保证每批至少推进 1 个 `turn_id`）；每批提交后立即将 `task_cursors['daily_wrapup']` 推进至本批末条 `event.id`（ULID 单调递增与 `seq` 同序）；若本批中恰包含已结束但未建 span 的历史残留活动事件，同步补记其 `digested_activity_spans`；
 - **`bedtime` 执行顺序**：
-  1. 先循环调用 `daily_wrapup` 排空游标之后剩余未整理对话；
-  2. 提取**上次 `bedtime` 以来（`updated_at >= meta.last_run_at`，首次取当日零点）**新写/修改的卡片摘要，以及**当日关键双向反馈链（`prev → acts → next`）**：筛选自 `last_run_at` 以来包含 `tool_calls`、`express`、`door` 状态变化或连续多轮呼应的关键 `(user → assistant → next_user)` 片段（每条仅取正文与工具动作摘要，总预算上限 `4000` 字符）；
-  3. 若当日恰逢 ISO 周末（周日）、月末或年末，自动一并注入当月 `gist/days/YYYY-MM.md`（或当年 `gist/months/YYYY.md`）供Psyber滚动汇总；
+  1. 先循环调用 `daily_wrapup` 排空游标之后剩余未整理对话（每条对话附本地 `[YYYY-MM-DD HH:mm]` 时间与附件提示，顶部注入 `<tidy_context>` 当前日期/星期/ISO 周）；
+  2. 提取**上次 `bedtime` 以来（`updated_at >= meta.last_run_at`，首次取当日零点）**新写/修改的卡片摘要与正文节选，并附上现行 `gist/days/YYYY-MM.md`（尾部）与 `shelf/` 摘要防重复写；
+  3. 在 `<tidy_context>` 中按目标日（`nightDate ?? localDay(now)`）明确给出日梗概目标 `gist/days/YYYY-MM.md`（节标题 `### YYYY-MM-DD`）；若目标日恰逢 ISO 周日（或月末/年末），明确给出周梗概目标 `gist/weeks/YYYY.md`（节标题 `### YYYY-Www`）并注入当月 `gist/days/YYYY-MM.md` 供滚动汇总；
   4. 成功后将 `task_cursors['bedtime']` 推进至当前最新 `event.id`，并在 `meta_json` 记下 `{ last_gist_date, last_run_at, last_commit_sha }`（保证同日不重复触发且不错过昨日深夜睡前后的新增卡片）。
 
 ### 5.3 异常回滚与崩溃自愈

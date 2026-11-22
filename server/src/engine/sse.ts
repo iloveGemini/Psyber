@@ -2,6 +2,8 @@ export type Ring1SseEventName =
   | "message.created"
   | "message.updated"
   | "door.updated"
+  | "door_notes.read"
+  | "door_note.opened"
   | "identity.updated"
   | "user_status.updated"
   | "share.opened"

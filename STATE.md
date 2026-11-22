@@ -1,11 +1,12 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-22（去 `named` 开关、`self.md` 可选 `pronoun`、全仓术语与未定名默认称呼统一为 `Psyber`，全量测试通过）。
+> 最后更新：2026-11-22（静默整理轮 `<tidy_context>` 日期/ISO周注入、消息时间戳与附件提示、`prompts/tidy.md` v7 目录分工与最小 Frontmatter 规范落地）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（身份模型简化与术语统一完成）
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（整理轮提示词与上下文加固完成）
 
 ### 已完成
+- **静默整理轮日期上下文与 `prompts/tidy.md` v7 加固（`prompts/` + `docs/spec/` + `server/`，2026-11-22）**：借鉴 Psyche 热/冷写与梗概设计，在 `tidy.ts` 顶部注入 `<tidy_context>`（目标日、星期、ISO 周号与 `bedtime` 精确 `gist/days/YYYY-MM.md` / 周日 `gist/weeks/YYYY.md` 目标路径与节标题），消息转录附本地 `[YYYY-MM-DD HH:mm]` 与图片附件提示，`bedtime` 补充当日卡片节选、现行 `gist/days/` 尾部与 `shelf/` 摘要防重复写；`prompts/tidy.md` 升至 v7 明确 `daily/` vs `gist/days/` 分工、意外/后果优先、同事实只落一处及最小 Frontmatter 规范。
 - **身份简化、可选代词与全仓去「住户」统一（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：移除 `self.md` 冗余 `named` 布尔字段（以 `name` 非空为唯一真相并兼容无 `name` 键旧档案），`self.md` 增加初始为空的可选 `pronoun`（不于创世页预设）；透传 `residentPronoun`；全仓 `docs/`、`prompts/`、`server/` 与 UI 默认兜底统一称 `Psyber`（不再用「住户」或「TA」），保留「我的头像」，`SettingsPanel` 与 `DrawerModal` 实时监听 `identityNotifier`。
 - **身份档案、多步日志、消息/门牌时序与顶栏重构（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：`self.md`/`user.md` 引入结构化 Frontmatter（`name`/`pronoun`）与 `identity` 接口、`identity.updated` SSE 及创世页代词选择；对话流按 `step` 拆分多步思考与工具日志（`journalSteps`）；用户贴图/图片独立无气泡渲染；`door` 状态事件延后至助手持久化后落库；移除后台/提示词/UI 中机械服务口吻与多余「对方」；桌面移除顶栏并流式区去重复徽标/停止按钮，手机端改为头像+状态色点+状态词居中胶囊与顶部透明渐隐。
 - **iOS 客户端骨架、沙盒存储兼容与抽屉底栏适配（`app/`，2026-11-22）**：补齐 `app/ios/` 工程并配置 `NSAppTransportSecurity` / `NSLocalNetworkUsageDescription` 放行本地 HTTP 后端；修复 iOS 无 `HOME` 环境变量导致 `FileSessionStorage` 启动抛错白屏的问题，改由原生 `psyber/storage` MethodChannel 读取沙盒 `Application Support/psyber`，并在 `main.dart` 为 `initialize()` 兜底防白屏；修复 iOS 左抽屉底部 `SafeArea` 露底留缝问题。
@@ -36,5 +37,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-22 终改后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 50 用例 / 606 断言）全部通过。
+- **`server/`（2026-11-22 整理轮加固后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 51 用例 / 636 断言）全部通过。
 - **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（25 用例）全部通过。

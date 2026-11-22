@@ -48,7 +48,7 @@ function charLen(text: string): number {
 }
 
 /** ISO 周 YYYY-Www（周一起） */
-function weekOf(day: string): string {
+export function weekOf(day: string): string {
   const [y, m, d] = day.split("-").map(Number);
   const t = Date.UTC(y, m - 1, d);
   const dow = (new Date(t).getUTCDay() + 6) % 7;
