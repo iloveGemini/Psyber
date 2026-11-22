@@ -309,13 +309,14 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
   Future<void> _openMcpPresetPicker() async {
     final presets = await widget.controller.loadMcpPresets();
     if (!mounted) return;
+    final colors = context.colors;
     final picked = await showDialog<McpPresetView>(
       context: context,
       builder: (ctx) => Dialog(
-        backgroundColor: PsyberTheme.letterSurface,
+        backgroundColor: colors.letterSurface,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: PsyberTheme.hairline),
+          side: BorderSide(color: colors.hairline),
         ),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420),
@@ -325,15 +326,19 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
+                Text(
                   '选择 MCP 生态预设',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: colors.inkDeep,
+                  ),
                 ),
                 const SizedBox(height: 10),
                 if (presets.isEmpty)
-                  const Text(
+                  Text(
                     '当前服务端未返回预设模板，可改用「自定义添加」。',
-                    style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
+                    style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
                   )
                 else
                   for (final p in presets)
@@ -341,10 +346,13 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                       key: Key('mcp_preset_${p.id}'),
                       dense: true,
                       contentPadding: const EdgeInsets.symmetric(horizontal: 6),
-                      title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
+                      title: Text(
+                        p.label,
+                        style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
+                      ),
                       subtitle: Text(
                         p.description,
-                        style: const TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
+                        style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                       ),
                       onTap: () => Navigator.of(ctx).pop(p),
                     ),
@@ -439,7 +447,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                     ),
                     IconButton(
                       key: Key('mcp_delete_${servers[i].id}'),
-                      icon: const Icon(PhosphorIconsLight.trash, size: 16, color: PsyberTheme.dangerInk),
+                      icon: Icon(PhosphorIconsLight.trash, size: 16, color: colors.dangerInk),
                       tooltip: '移除',
                       constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                       padding: EdgeInsets.zero,
@@ -488,114 +496,136 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: widget.controller.themeModeNotifier,
       builder: (context, currentMode, _) {
-        return ValueListenableBuilder<PsyberPalette?>(
-          valueListenable: widget.controller.paletteNotifier,
-          builder: (context, currentPalette, _) {
-            return _SurfaceBox(
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
+        return ValueListenableBuilder<PsyberPalette>(
+          valueListenable: widget.controller.lightPaletteNotifier,
+          builder: (context, lightPalette, _) {
+            return ValueListenableBuilder<PsyberPalette>(
+              valueListenable: widget.controller.darkPaletteNotifier,
+              builder: (context, darkPalette, _) {
+                return _SurfaceBox(
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(
-                          child: _ThemeChip(
-                            key: const Key('theme_mode_system'),
-                            label: '跟随系统',
-                            icon: PhosphorIconsLight.circleHalf,
-                            selected: currentPalette == null && currentMode == ThemeMode.system,
-                            onTap: () => widget.controller.setPalette(null),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _ThemeChip(
-                            key: const Key('theme_mode_light'),
-                            label: '暖纸浅色',
-                            icon: PhosphorIconsLight.sun,
-                            selected: currentPalette == null && currentMode == ThemeMode.light,
-                            onTap: () => widget.controller.setThemeMode(ThemeMode.light),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _ThemeChip(
-                            key: const Key('theme_mode_dark'),
-                            label: '曜夜深色',
-                            icon: PhosphorIconsLight.moon,
-                            selected: currentPalette == null && currentMode == ThemeMode.dark,
-                            onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      '手账色板（5 套）',
-                      style: TextStyle(fontSize: 11, color: colors.inkQuiet),
-                    ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        for (final palette in PsyberPalette.values)
-                          InkWell(
-                            key: Key('palette_${palette.name}'),
-                            borderRadius: BorderRadius.circular(8),
-                            onTap: () => widget.controller.setPalette(palette),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: currentPalette == palette
-                                    ? colors.accentSoft
-                                    : colors.mineralCanvas,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: currentPalette == palette
-                                      ? colors.accentBorder
-                                      : colors.hairline,
-                                  width: currentPalette == palette ? 1.3 : 1.0,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Container(
-                                    width: 11,
-                                    height: 11,
-                                    decoration: BoxDecoration(
-                                      color: palette.swatchBg,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: palette.swatchAccent,
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    palette.label,
-                                    style: TextStyle(
-                                      fontSize: 11.5,
-                                      fontWeight: currentPalette == palette
-                                          ? FontWeight.w600
-                                          : FontWeight.w400,
-                                      color: currentPalette == palette
-                                          ? colors.inkDeep
-                                          : colors.inkQuiet,
-                                    ),
-                                  ),
-                                ],
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _ThemeChip(
+                                key: const Key('theme_mode_system'),
+                                label: '跟随系统',
+                                icon: PhosphorIconsLight.circleHalf,
+                                selected: currentMode == ThemeMode.system,
+                                onTap: () => widget.controller.setThemeMode(ThemeMode.system),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _ThemeChip(
+                                key: const Key('theme_mode_light'),
+                                label: '日间浅色',
+                                icon: PhosphorIconsLight.sun,
+                                selected: currentMode == ThemeMode.light,
+                                onTap: () => widget.controller.setThemeMode(ThemeMode.light),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _ThemeChip(
+                                key: const Key('theme_mode_dark'),
+                                label: '夜间深色',
+                                icon: PhosphorIconsLight.moon,
+                                selected: currentMode == ThemeMode.dark,
+                                onTap: () => widget.controller.setThemeMode(ThemeMode.dark),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          '阅读色板（日间与夜间分别保存）',
+                          style: TextStyle(fontSize: 11, color: colors.inkQuiet),
+                        ),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            for (final palette in PsyberPalette.values)
+                              Builder(
+                                builder: (context) {
+                                  final isSavedSlot = palette == lightPalette || palette == darkPalette;
+                                  final isActive = switch (currentMode) {
+                                    ThemeMode.light => palette == lightPalette,
+                                    ThemeMode.dark => palette == darkPalette,
+                                    ThemeMode.system => isSavedSlot,
+                                  };
+                                  final slotHint = palette == lightPalette
+                                      ? ' · 日'
+                                      : palette == darkPalette
+                                          ? ' · 夜'
+                                          : '';
+                                  return InkWell(
+                                    key: Key('palette_${palette.name}'),
+                                    borderRadius: BorderRadius.circular(8),
+                                    onTap: () => widget.controller.setPalette(palette),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: isActive
+                                            ? colors.accentSoft
+                                            : colors.mineralCanvas,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: isActive
+                                              ? colors.accentBorder
+                                              : isSavedSlot
+                                                  ? colors.hairlineWarm
+                                                  : colors.hairline,
+                                          width: isActive ? 1.3 : 1.0,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Container(
+                                            width: 11,
+                                            height: 11,
+                                            decoration: BoxDecoration(
+                                              color: palette.swatchBg,
+                                              shape: BoxShape.circle,
+                                              border: Border.all(
+                                                color: palette.swatchAccent,
+                                                width: 2,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 5),
+                                          Text(
+                                            '${palette.label}$slotHint',
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              fontWeight: isActive
+                                                  ? FontWeight.w600
+                                                  : FontWeight.w400,
+                                              color: isActive
+                                                  ? colors.inkDeep
+                                                  : colors.inkQuiet,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                          ],
+                        ),
                       ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             );
           },
         );
@@ -1018,7 +1048,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                             const SizedBox(height: 8),
                             Text(
                               _rhythmError!,
-                              style: const TextStyle(color: PsyberTheme.dangerInk, fontSize: 12),
+                              style: TextStyle(color: colors.dangerInk, fontSize: 12),
                             ),
                           ],
                           if (_rhythmFeedback != null) ...[
@@ -1062,14 +1092,14 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                                     ? PhosphorIconsLight.deviceMobile
                                     : PhosphorIconsLight.laptop,
                                 size: 18,
-                                color: PsyberTheme.inkQuiet,
+                                color: colors.inkQuiet,
                               ),
                               title: Row(
                                 children: [
                                   Flexible(
                                     child: Text(
                                       snap.devices[i].deviceName,
-                                      style: const TextStyle(fontSize: 13.5),
+                                      style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                   ),
@@ -1099,7 +1129,7 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                               ),
                               subtitle: Text(
                                 snap.devices[i].platform,
-                                style: const TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
+                                style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                               ),
                               trailing: snap.devices[i].deviceId == currentDeviceId
                                   ? null
@@ -1108,11 +1138,11 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                                         widget.controller
                                             .revokeOtherDevice(snap.devices[i].deviceId),
                                       ),
-                                      child: const Text(
+                                      child: Text(
                                         '吊销',
                                         style: TextStyle(
                                           fontSize: 12,
-                                          color: PsyberTheme.dangerInk,
+                                          color: colors.dangerInk,
                                         ),
                                       ),
                                     ),
@@ -1122,10 +1152,10 @@ class _SettingsPanelContentState extends State<SettingsPanelContent> {
                         ],
                         ListTile(
                           key: const Key('disconnect_device_button'),
-                          leading: const Icon(PhosphorIconsLight.linkBreak, size: 18, color: PsyberTheme.dangerInk),
-                          title: const Text(
+                          leading: Icon(PhosphorIconsLight.linkBreak, size: 18, color: colors.dangerInk),
+                          title: Text(
                             '断开本机连接并重新配对',
-                            style: TextStyle(fontSize: 13.5, color: PsyberTheme.dangerInk),
+                            style: TextStyle(fontSize: 13.5, color: colors.dangerInk),
                           ),
                           onTap: () async {
                             widget.onClose();
@@ -1315,8 +1345,9 @@ class _QuietSwitchTile extends StatelessWidget {
               alignment: Alignment.centerRight,
               child: CupertinoSwitch(
                 value: value,
-                activeTrackColor: colors.statusSuccess,
+                activeTrackColor: colors.accent,
                 inactiveTrackColor: colors.hairline,
+                thumbColor: value ? colors.onAccent : colors.letterSurface,
                 onChanged: onChanged,
               ),
             ),
@@ -1594,12 +1625,13 @@ class _McpEditorDialogState extends State<_McpEditorDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     final preset = widget.preset;
     return Dialog(
-      backgroundColor: PsyberTheme.letterSurface,
+      backgroundColor: colors.letterSurface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: PsyberTheme.hairline),
+        side: BorderSide(color: colors.hairline),
       ),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 440),
@@ -1611,12 +1643,16 @@ class _McpEditorDialogState extends State<_McpEditorDialog> {
             children: [
               Text(
                 preset != null ? '接入预设：${preset.label}' : '添加外部 MCP 服务器',
-                style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  fontSize: 16.5,
+                  fontWeight: FontWeight.w600,
+                  color: colors.inkDeep,
+                ),
               ),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 '工具强制归入 Tier 3 按需搜索池，默认需审批确认，密钥仅写入 0600 凭证文件。',
-                style: TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
+                style: TextStyle(fontSize: 12, color: colors.inkQuiet),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -1711,7 +1747,7 @@ class _McpEditorDialogState extends State<_McpEditorDialog> {
               ),
               if (_errText != null) ...[
                 const SizedBox(height: 8),
-                Text(_errText!, style: const TextStyle(fontSize: 12, color: PsyberTheme.dangerInk)),
+                Text(_errText!, style: TextStyle(fontSize: 12, color: colors.dangerInk)),
               ],
               const SizedBox(height: 14),
               Row(

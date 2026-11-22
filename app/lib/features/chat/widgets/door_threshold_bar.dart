@@ -193,10 +193,14 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                           width: 30,
                           height: 30,
                           decoration: BoxDecoration(
-                            color: colors.celadonWash,
+                            color: colors.useReadingChrome
+                                ? colors.accentSoft
+                                : colors.celadonWash,
                             shape: BoxShape.circle,
                             border: Border.all(
-                              color: colors.hairline,
+                              color: colors.useReadingChrome
+                                  ? colors.accentBorder
+                                  : colors.hairline,
                               width: 1.0,
                             ),
                           ),
@@ -206,7 +210,9 @@ class _DoorThresholdBarState extends State<DoorThresholdBar> {
                               style: PsyberTheme.editorialSerif.copyWith(
                                 fontSize: 15,
                                 fontWeight: FontWeight.w500,
-                                color: colors.inkDeep,
+                                color: colors.useReadingChrome
+                                    ? colors.accent
+                                    : colors.inkDeep,
                               ),
                             ),
                           ),

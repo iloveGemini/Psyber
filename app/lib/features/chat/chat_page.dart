@@ -11,6 +11,7 @@ import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../expression/expression_renderer.dart';
+import '../../../shared/paper_grain.dart';
 import '../../../shared/theme.dart';
 import '../activities/activity_banner_slot.dart' show ActivityBannerSlot;
 import '../settings/settings_panel.dart';
@@ -136,6 +137,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 窗口失焦（inactive）或切后台（paused/hidden）时暂缓消费新动作，切回前台后再播放
+    widget.controller.setAppForeground(state == AppLifecycleState.resumed);
     // 仅真正切入后台（paused/hidden）时中断 SSE，避免桌面窗口失焦或系统弹窗（inactive）频繁断流
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
       widget.controller.onAppPaused();
@@ -473,8 +476,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                   imagePicker: widget.imagePicker,
                 ),
               Expanded(
-                child: Column(
+                child: Stack(
                   children: [
+                    if (colors.hasPaperGrain)
+                      Positioned.fill(
+                        child: PaperGrainOverlay(
+                          isDark: colors.isDark,
+                          edgeTint: colors.pageEdgeTint,
+                        ),
+                      ),
+                    Column(
+                      children: [
                     ValueListenableBuilder<DoorStatus>(
                       valueListenable: widget.controller.doorNotifier,
                       builder: (context, door, _) => ValueListenableBuilder<bool>(
@@ -558,7 +570,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                 horizontal: 16,
                                 vertical: 9,
                               ),
-                              color: PsyberTheme.dangerSoft,
+                              color: colors.dangerSoft,
                               child: Center(
                                 child: ConstrainedBox(
                                   constraints: const BoxConstraints(
@@ -570,17 +582,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                         child: Text(
                                           err,
                                           key: const Key('turn_error_banner'),
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                             fontSize: 13,
-                                            color: PsyberTheme.dangerInk,
+                                            color: colors.dangerInk,
                                           ),
                                         ),
                                       ),
                                       IconButton(
-                                        icon: const Icon(
+                                        icon: Icon(
                                           PhosphorIconsLight.x,
                                           size: 16,
-                                          color: PsyberTheme.dangerInk,
+                                          color: colors.dangerInk,
                                         ),
                                         padding: EdgeInsets.zero,
                                         constraints: const BoxConstraints(
@@ -663,11 +675,31 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                                 pendingModel.isNotEmpty &&
                                                                 prevModel != pendingModel;
                                                             final bubble =
-                                                                StreamingAssistantBubble(
-                                                              active: active,
-                                                              onAbort: widget
+                                                                ValueListenableBuilder<bool>(
+                                                              valueListenable: widget
                                                                   .controller
-                                                                  .abortActiveTurn,
+                                                                  .isAppForegroundNotifier,
+                                                              builder: (
+                                                                context,
+                                                                isForeground,
+                                                                _,
+                                                              ) =>
+                                                                  StreamingAssistantBubble(
+                                                                active: active,
+                                                                isForeground: isForeground,
+                                                                profile: widget
+                                                                    .controller
+                                                                    .profileNotifier
+                                                                    .value,
+                                                                onMotionStarted: () => widget
+                                                                    .controller
+                                                                    .markTurnMotionStarted(
+                                                                      active.turnId,
+                                                                    ),
+                                                                onAbort: widget
+                                                                    .controller
+                                                                    .abortActiveTurn,
+                                                              ),
                                                             );
                                                             if (!showPendingSwitch) {
                                                               return bubble;
@@ -1034,7 +1066,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                 ),
               ],
             ),
-          ),
+                  ],
+                ),
+              ),
               if (isWide && _showDesktopSettings)
                 Container(
                   width: 372,
@@ -1063,6 +1097,7 @@ class _EmptyRoomState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -1073,7 +1108,7 @@ class _EmptyRoomState extends StatelessWidget {
               door.state.isDoorNoteMode ? '门关着，屋里安静得很。' : '门刚推开，屋里还没落笔。',
               style: PsyberTheme.editorialSerif.copyWith(
                 fontSize: 17,
-                color: PsyberTheme.inkQuiet,
+                color: colors.inkQuiet,
               ),
             ),
             const SizedBox(height: 6),
@@ -1081,7 +1116,7 @@ class _EmptyRoomState extends StatelessWidget {
               door.state.isDoorNoteMode
                   ? '可以在下方塞一张纸条，等对方想看的时候再看。'
                   : '随便打个招呼，或者先送一张贴纸开始认识。',
-              style: const TextStyle(fontSize: 13, color: PsyberTheme.inkFaint),
+              style: TextStyle(fontSize: 13, color: colors.inkFaint),
               textAlign: TextAlign.center,
             ),
           ],

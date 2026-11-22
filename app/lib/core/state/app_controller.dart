@@ -116,7 +116,15 @@ class AppController {
   final ValueNotifier<ThemeMode> themeModeNotifier =
       ValueNotifier<ThemeMode>(ThemeMode.system);
 
-  /// Ring 1.5 五套克制暖调手账色板（null 表示跟随系统日夜切换）。
+  /// 日间首选阅读色板（跟随系统浅色或手动浅色时启用并持久化）。
+  final ValueNotifier<PsyberPalette> lightPaletteNotifier =
+      ValueNotifier<PsyberPalette>(PsyberPalette.warmPaper);
+
+  /// 夜间首选阅读色板（跟随系统深色或手动深色时启用并持久化）。
+  final ValueNotifier<PsyberPalette> darkPaletteNotifier =
+      ValueNotifier<PsyberPalette>(PsyberPalette.obsidianNight);
+
+  /// 当前显式选中的色板（仅跟随系统时为 null）。
   final ValueNotifier<PsyberPalette?> paletteNotifier =
       ValueNotifier<PsyberPalette?>(null);
 
@@ -124,18 +132,78 @@ class AppController {
   final ValueNotifier<PendingToolApproval?> pendingApprovalNotifier =
       ValueNotifier<PendingToolApproval?>(null);
 
+  final ValueNotifier<bool> isAppForegroundNotifier = ValueNotifier<bool>(true);
+
+  final Map<String, String> _liveTurnMotions = <String, String>{};
+  final Map<String, DateTime> _liveMotionStartedAt = <String, DateTime>{};
+  final Set<String> _consumedMotionTurnIds = <String>{};
+  bool _initialSnapshotLoaded = false;
+  int _highestSeqSeen = 0;
+
+  void setAppForeground(bool foreground) {
+    if (isAppForegroundNotifier.value == foreground) return;
+    isAppForegroundNotifier.value = foreground;
+  }
+
   void setThemeMode(ThemeMode mode) {
-    paletteNotifier.value = null;
     themeModeNotifier.value = mode;
+    paletteNotifier.value = switch (mode) {
+      ThemeMode.light => lightPaletteNotifier.value,
+      ThemeMode.dark => darkPaletteNotifier.value,
+      ThemeMode.system => null,
+    };
+    _persistThemePreferences();
   }
 
   void setPalette(PsyberPalette? palette) {
-    paletteNotifier.value = palette;
     if (palette == null) {
-      themeModeNotifier.value = ThemeMode.system;
-    } else {
-      themeModeNotifier.value = palette.isDark ? ThemeMode.dark : ThemeMode.light;
+      setThemeMode(ThemeMode.system);
+      return;
     }
+    if (palette.isDark) {
+      darkPaletteNotifier.value = palette;
+      themeModeNotifier.value = ThemeMode.dark;
+    } else {
+      lightPaletteNotifier.value = palette;
+      themeModeNotifier.value = ThemeMode.light;
+    }
+    paletteNotifier.value = palette;
+    _persistThemePreferences();
+  }
+
+  void _persistThemePreferences() {
+    unawaited(
+      _storage.saveThemePreferences(
+        ThemePreferences(
+          themeMode: themeModeNotifier.value,
+          lightPalette: lightPaletteNotifier.value,
+          darkPalette: darkPaletteNotifier.value,
+        ),
+      ),
+    );
+  }
+
+  String? liveMotionForCommittedTurn(String? turnId) {
+    if (turnId == null || turnId.isEmpty) return null;
+    if (_consumedMotionTurnIds.contains(turnId)) return null;
+    final motion = _liveTurnMotions[turnId];
+    if (motion == null) return null;
+    final startedAt = _liveMotionStartedAt[turnId];
+    if (startedAt != null && DateTime.now().difference(startedAt).inMilliseconds >= 250) {
+      _consumedMotionTurnIds.add(turnId);
+      return null;
+    }
+    return motion;
+  }
+
+  void markTurnMotionStarted(String? turnId) {
+    if (turnId == null || turnId.isEmpty) return;
+    _liveMotionStartedAt.putIfAbsent(turnId, DateTime.now);
+  }
+
+  void markTurnMotionConsumed(String? turnId) {
+    if (turnId == null || turnId.isEmpty) return;
+    _consumedMotionTurnIds.add(turnId);
   }
 
   StreamSubscription<SseEventFrame>? _sseSub;
@@ -156,6 +224,17 @@ class AppController {
   Future<void> saveDraft(String draft) => _storage.saveDraft(draft);
 
   Future<void> initialize() async {
+    final themePrefs = await _storage.loadThemePreferences();
+    if (_disposed) return;
+    lightPaletteNotifier.value = themePrefs.lightPalette;
+    darkPaletteNotifier.value = themePrefs.darkPalette;
+    themeModeNotifier.value = themePrefs.themeMode;
+    paletteNotifier.value = switch (themePrefs.themeMode) {
+      ThemeMode.light => themePrefs.lightPalette,
+      ThemeMode.dark => themePrefs.darkPalette,
+      ThemeMode.system => null,
+    };
+
     final saved = await _storage.load();
     if (_disposed) return;
     if (saved == null) {
@@ -281,6 +360,11 @@ class AppController {
         // 网络不通或服务端已停机时静默忽略，优先保证客户端本地清空返回配对
       }
     }
+    _initialSnapshotLoaded = false;
+    _highestSeqSeen = 0;
+    _liveTurnMotions.clear();
+    _liveMotionStartedAt.clear();
+    _consumedMotionTurnIds.clear();
     _cancelSseAndTimers();
     await _storage.clear();
     if (_disposed) return;
@@ -387,6 +471,24 @@ class AppController {
       _nextBeforeId = page.nextBefore;
       timelineNotifier.value = List<TimelineItem>.unmodifiable(page.items);
     }
+    if (!_initialSnapshotLoaded) {
+      for (final item in page.items) {
+        if (item.turnId != null && item.turnId!.isNotEmpty) {
+          _consumedMotionTurnIds.add(item.turnId!);
+        }
+        if (item.seq > _highestSeqSeen) {
+          _highestSeqSeen = item.seq;
+        }
+      }
+      _initialSnapshotLoaded = true;
+    } else {
+      for (final item in page.items) {
+        if (item.seq > _highestSeqSeen) {
+          _recordTurnMotionFromItem(item);
+          _highestSeqSeen = item.seq;
+        }
+      }
+    }
     final active = activeTurnNotifier.value;
     if (active != null) {
       final completedInHistory = page.items.any(
@@ -419,11 +521,13 @@ class AppController {
   /// App 切后台：主动静默中止 SSE，绝不触发红色错误条。
   void onAppPaused() {
     _isPaused = true;
+    isAppForegroundNotifier.value = false;
     _cancelSseAndTimers();
   }
 
   /// App 切回前台：合并为单次静默重连并拉取最新历史与门状态。
   void onAppResumed() {
+    isAppForegroundNotifier.value = true;
     if (!_isPaused) return;
     _isPaused = false;
     _reconnectAttempt = 0;
@@ -835,6 +939,7 @@ class AppController {
         final rawMsg = frame.data['message'];
         if (rawMsg is Map<String, dynamic>) {
           final item = TimelineItem.fromJson(rawMsg);
+          _recordTurnMotionFromItem(item);
           _upsertTimelineItem(item);
           if (item.isAssistant &&
               item.turnId != null &&
@@ -940,6 +1045,14 @@ class AppController {
         final payload = ExpressionPayload.fromJson(frame.data);
         expressionNotifier.value = payload;
         final current = _ensureActiveTurn(frame.data['turnId'] as String?);
+        final exprTurnId =
+            (frame.data['turnId'] as String?) ?? current?.turnId;
+        if (payload.motion != null &&
+            payload.motion!.isNotEmpty &&
+            exprTurnId != null &&
+            exprTurnId.isNotEmpty) {
+          _liveTurnMotions[exprTurnId] = payload.motion!;
+        }
         if (current != null) {
           activeTurnNotifier.value = current.copyWith(latestExpression: payload);
         }
@@ -1029,8 +1142,26 @@ class AppController {
     _upsertTimelineItem(item);
   }
 
+  void _recordTurnMotionFromItem(TimelineItem item) {
+    final tid = item.turnId;
+    if (!item.isAssistant || tid == null || tid.isEmpty) return;
+    if (_consumedMotionTurnIds.contains(tid) || _liveTurnMotions.containsKey(tid)) {
+      return;
+    }
+    for (var i = item.expressions.length - 1; i >= 0; i--) {
+      final motion = item.expressions[i].motion;
+      if (motion != null && motion.isNotEmpty) {
+        _liveTurnMotions[tid] = motion;
+        return;
+      }
+    }
+  }
+
   void _upsertTimelineItem(TimelineItem item) {
     if (item.id.isEmpty) return;
+    if (item.seq > _highestSeqSeen) {
+      _highestSeqSeen = item.seq;
+    }
     final list = List<TimelineItem>.from(timelineNotifier.value);
     final idx = list.indexWhere((e) => e.id == item.id);
     if (idx >= 0) {
@@ -1142,7 +1273,10 @@ class AppController {
     activeActivityNotifier.dispose();
     recallEvalModeNotifier.dispose();
     themeModeNotifier.dispose();
+    lightPaletteNotifier.dispose();
+    darkPaletteNotifier.dispose();
     paletteNotifier.dispose();
     pendingApprovalNotifier.dispose();
+    isAppForegroundNotifier.dispose();
   }
 }

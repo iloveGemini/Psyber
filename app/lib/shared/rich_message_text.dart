@@ -115,10 +115,27 @@ class RichMessageText extends StatelessWidget {
         );
       case _QuoteBlock(:final text):
         return Container(
-          padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+          padding: EdgeInsets.fromLTRB(
+            12,
+            colors.useReadingChrome ? 7 : 4,
+            colors.useReadingChrome ? 10 : 4,
+            colors.useReadingChrome ? 7 : 4,
+          ),
           decoration: BoxDecoration(
+            color: colors.useReadingChrome
+                ? colors.accentSoft.withValues(alpha: 0.42)
+                : null,
+            borderRadius: colors.useReadingChrome
+                ? const BorderRadius.only(
+                    topRight: Radius.circular(6),
+                    bottomRight: Radius.circular(6),
+                  )
+                : null,
             border: Border(
-              left: BorderSide(color: colors.hairlineWarm, width: 2.5),
+              left: BorderSide(
+                color: colors.useReadingChrome ? colors.accent : colors.hairlineWarm,
+                width: colors.useReadingChrome ? 2.8 : 2.5,
+              ),
             ),
           ),
           child: SelectableText.rich(

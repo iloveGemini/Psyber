@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1864,7 +1865,7 @@ void main() {
       expect(find.textContaining('42.9%'), findsWidgets);
 
       await tester.scrollUntilVisible(
-        find.byKey(const Key('palette_autumnLatte')),
+        find.byKey(const Key('palette_oldBookPaper')),
         200,
         scrollable: find.byType(Scrollable).last,
       );
@@ -1873,9 +1874,36 @@ void main() {
       expect(api.uploadedAvatars, ['user']);
       expect(find.text('我的头像已更新'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('palette_autumnLatte')));
+      await tester.tap(find.byKey(const Key('palette_oldBookPaper')));
       await tester.pumpAndSettle();
-      expect(controller.paletteNotifier.value, PsyberPalette.autumnLatte);
+      expect(controller.paletteNotifier.value, PsyberPalette.oldBookPaper);
+      expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('palette_shoreLight')));
+      await tester.pumpAndSettle();
+      expect(controller.paletteNotifier.value, PsyberPalette.shoreLight);
+      expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('palette_shoreDark')));
+      await tester.pumpAndSettle();
+      expect(controller.paletteNotifier.value, PsyberPalette.shoreDark);
+      expect(find.byKey(const Key('paper_grain_overlay')), findsOneWidget);
+
+      final switches = tester.widgetList<CupertinoSwitch>(find.byType(CupertinoSwitch));
+      expect(switches, isNotEmpty);
+      expect(switches.first.activeTrackColor, PsyberColors.shoreDark.accent);
+
+      await tester.tap(find.byKey(const Key('open_drawer_entry')));
+      await tester.pumpAndSettle();
+      final drawerDialog = tester.widget<Dialog>(find.byType(Dialog));
+      expect(drawerDialog.backgroundColor, PsyberColors.shoreDark.letterSurface);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('palette_warmPaper')));
+      await tester.pumpAndSettle();
+      expect(controller.paletteNotifier.value, PsyberPalette.warmPaper);
+      expect(find.byKey(const Key('paper_grain_overlay')), findsNothing);
     },
   );
 
@@ -2048,6 +2076,146 @@ void main() {
     expect(controller.activeTurnNotifier.value, isNull);
     expect(find.text('我查到了，内容在这里。'), findsOneWidget);
     expect(find.byKey(const Key('streaming_bubble')), findsNothing);
+  });
+
+  test('日间与夜间独立色板可持久化保存与恢复', () async {
+    final tmpDir = await Directory.systemTemp.createTemp('psyber_theme_prefs_');
+    addTearDown(() async {
+      if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+    });
+    final sessionFile = File('${tmpDir.path}/client_session.json');
+    final storage = FileSessionStorage(file: sessionFile);
+    await storage.save(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'tok-persist',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+
+    final api1 = FakePsyberApiClient();
+    final ctrl1 = AppController(api: api1, storage: storage);
+    addTearDown(() async {
+      await api1.closeStream();
+      ctrl1.dispose();
+    });
+    await ctrl1.initialize();
+    ctrl1.setPalette(PsyberPalette.oldBookPaper);
+    ctrl1.setPalette(PsyberPalette.shoreDark);
+    ctrl1.setThemeMode(ThemeMode.system);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    final api2 = FakePsyberApiClient();
+    final ctrl2 = AppController(api: api2, storage: FileSessionStorage(file: sessionFile));
+    addTearDown(() async {
+      await api2.closeStream();
+      ctrl2.dispose();
+    });
+    await ctrl2.initialize();
+    expect(ctrl2.themeModeNotifier.value, ThemeMode.system);
+    expect(ctrl2.lightPaletteNotifier.value, PsyberPalette.oldBookPaper);
+    expect(ctrl2.darkPaletteNotifier.value, PsyberPalette.shoreDark);
+  });
+
+  testWidgets('流式 express 贴纸与动作在正文到齐后可见并继承至落盘气泡', (tester) async {
+    final api = FakePsyberApiClient();
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'tok-expr',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+    await controller.initialize();
+    await controller.connectAndSync();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(api.streamOpenCount, greaterThanOrEqualTo(1));
+    api.emitSse('turn.start', {'turnId': 'turn_expr_1'}, id: '1');
+    api.emitSse(
+      'turn.expression',
+      {
+        'turnId': 'turn_expr_1',
+        'motion': 'shake',
+        'sticker': {'id': 'wave-hi', 'label': '挥手打招呼', 'url': ''},
+      },
+      id: '2',
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('[贴纸：挥手打招呼]'), findsOneWidget);
+    expect(controller.liveMotionForCommittedTurn('turn_expr_1'), 'shake');
+
+    api.emitSse(
+      'message.created',
+      {
+        'message': {
+          'id': 'ev_expr_1',
+          'seq': 1,
+          'sessionId': 'sess_1',
+          'turnId': 'turn_expr_1',
+          'role': 'assistant',
+          'kind': 'chat',
+          'content': '摇摇头给你看',
+          'metadata': {
+            'expressions': [
+              {
+                'motion': 'shake',
+                'sticker': {'id': 'wave-hi', 'label': '挥手打招呼', 'url': ''},
+              },
+            ],
+          },
+          'createdAt': 1795046500000,
+        },
+      },
+      id: '3',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('[贴纸：挥手打招呼]'), findsOneWidget);
+    expect(find.text('摇摇头给你看'), findsOneWidget);
+    expect(controller.liveMotionForCommittedTurn('turn_expr_1'), isNull);
+
+    // 切离窗口/后台期间新到的动作先保留不丢，切回前台时再补播并消耗
+    controller.setAppForeground(false);
+    await tester.pump();
+    api.emitSse(
+      'message.created',
+      {
+        'message': {
+          'id': 'ev_expr_bg',
+          'seq': 2,
+          'sessionId': 'sess_1',
+          'turnId': 'turn_expr_bg',
+          'role': 'assistant',
+          'kind': 'chat',
+          'content': '等你回来再点头',
+          'metadata': {
+            'expressions': [
+              {'motion': 'nod'},
+            ],
+          },
+          'createdAt': 1795046505000,
+        },
+      },
+      id: '4',
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(controller.liveMotionForCommittedTurn('turn_expr_bg'), 'nod');
+
+    controller.setAppForeground(true);
+    await tester.pumpAndSettle();
+    expect(controller.liveMotionForCommittedTurn('turn_expr_bg'), isNull);
   });
 }
 

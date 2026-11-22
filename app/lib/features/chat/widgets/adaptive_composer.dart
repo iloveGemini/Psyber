@@ -229,14 +229,15 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
   }
 
   void _openFarewellDialog(BuildContext context, String farewell) {
+    final colors = context.colors;
     unawaited(
       showDialog<void>(
         context: context,
         builder: (ctx) => Dialog(
-          backgroundColor: PsyberTheme.slipPaper,
+          backgroundColor: colors.slipPaper,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: PsyberTheme.hairlineWarm),
+            side: BorderSide(color: colors.hairlineWarm),
           ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 460),
@@ -898,12 +899,13 @@ class _PendingThumbChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Container(
       padding: const EdgeInsets.fromLTRB(4, 4, 6, 4),
       decoration: BoxDecoration(
-        color: PsyberTheme.mineralCanvas,
+        color: colors.mineralCanvas,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: PsyberTheme.hairline),
+        border: Border.all(color: colors.hairline),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -916,16 +918,16 @@ class _PendingThumbChip extends StatelessWidget {
                     width: 34,
                     height: 34,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox(
+                    errorBuilder: (_, __, ___) => SizedBox(
                       width: 34,
                       height: 34,
-                      child: Icon(PhosphorIconsLight.image, size: 18, color: PsyberTheme.inkQuiet),
+                      child: Icon(PhosphorIconsLight.image, size: 18, color: colors.inkQuiet),
                     ),
                   )
-                : const SizedBox(
+                : SizedBox(
                     width: 34,
                     height: 34,
-                    child: Icon(PhosphorIconsLight.image, size: 18, color: PsyberTheme.inkQuiet),
+                    child: Icon(PhosphorIconsLight.image, size: 18, color: colors.inkQuiet),
                   ),
           ),
           const SizedBox(width: 6),
@@ -933,7 +935,7 @@ class _PendingThumbChip extends StatelessWidget {
             constraints: const BoxConstraints(maxWidth: 120),
             child: Text(
               attachment.filename,
-              style: const TextStyle(fontSize: 12, color: PsyberTheme.inkDeep),
+              style: TextStyle(fontSize: 12, color: colors.inkDeep),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -941,9 +943,9 @@ class _PendingThumbChip extends StatelessWidget {
           InkWell(
             onTap: onRemove,
             borderRadius: BorderRadius.circular(10),
-            child: const Padding(
-              padding: EdgeInsets.all(2),
-              child: Icon(PhosphorIconsLight.x, size: 14, color: PsyberTheme.inkQuiet),
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(PhosphorIconsLight.x, size: 14, color: colors.inkQuiet),
             ),
           ),
         ],

@@ -70,14 +70,18 @@ class _DrawerModalState extends State<DrawerModal> {
   }
 
   Future<void> _confirmAndOpen(DrawerEntryView entry) async {
+    final colors = context.colors;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: PsyberTheme.letterSurface,
-        title: const Text('拆封私密日记', style: TextStyle(fontSize: 17)),
+        backgroundColor: colors.letterSurface,
+        title: Text(
+          '拆封私密日记',
+          style: TextStyle(fontSize: 17, color: colors.inkDeep),
+        ),
         content: Text(
           '「${entry.title}」上面贴着封条。拆开阅读会立即写入记录并如实告知对方，确认要打开吗？',
-          style: const TextStyle(fontSize: 14, color: PsyberTheme.inkQuiet, height: 1.5),
+          style: TextStyle(fontSize: 14, color: colors.inkQuiet, height: 1.5),
         ),
         actions: [
           TextButton(
@@ -85,7 +89,10 @@ class _DrawerModalState extends State<DrawerModal> {
             child: const Text('先不看'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: PsyberTheme.thresholdAmber),
+            style: FilledButton.styleFrom(
+              backgroundColor: colors.thresholdAmber,
+              foregroundColor: colors.onAccent,
+            ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('确认拆封'),
           ),
@@ -109,11 +116,12 @@ class _DrawerModalState extends State<DrawerModal> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Dialog(
-      backgroundColor: PsyberTheme.letterSurface,
+      backgroundColor: colors.letterSurface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: PsyberTheme.hairline),
+        side: BorderSide(color: colors.hairline),
       ),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 460, maxHeight: 540),
@@ -127,16 +135,16 @@ class _DrawerModalState extends State<DrawerModal> {
                 children: [
                   if (_opened != null)
                     IconButton(
-                      icon: const Icon(PhosphorIconsLight.arrowLeft, size: 18),
+                      icon: Icon(PhosphorIconsLight.arrowLeft, size: 18, color: colors.inkDeep),
                       onPressed: () {
                         setState(() => _opened = null);
                         unawaited(_load());
                       },
                     ),
-                  const Icon(
+                  Icon(
                     PhosphorIconsLight.lock,
                     size: 18,
-                    color: PsyberTheme.thresholdAmber,
+                    color: colors.thresholdAmber,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -145,19 +153,20 @@ class _DrawerModalState extends State<DrawerModal> {
                       style: PsyberTheme.editorialSerif.copyWith(
                         fontSize: 18,
                         fontWeight: FontWeight.w600,
+                        color: colors.inkDeep,
                       ),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(PhosphorIconsLight.x, size: 18),
+                    icon: Icon(PhosphorIconsLight.x, size: 18, color: colors.inkQuiet),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                 ],
               ),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 '这里放着对方自己留下的私密日记。未经拆封不会外泄，一旦拆封必定留痕。',
-                style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet, height: 1.45),
+                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet, height: 1.45),
               ),
               const SizedBox(height: 14),
               Flexible(
@@ -172,15 +181,15 @@ class _DrawerModalState extends State<DrawerModal> {
                         ? Container(
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
-                              color: PsyberTheme.mineralCanvas,
+                              color: colors.mineralCanvas,
                               borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: PsyberTheme.hairline),
+                              border: Border.all(color: colors.hairline),
                             ),
-                            child: const Text(
+                            child: Text(
                               '当前服务端暂未开启上锁抽屉功能。',
                               style: TextStyle(
                                 fontSize: 13,
-                                color: PsyberTheme.inkQuiet,
+                                color: colors.inkQuiet,
                                 height: 1.5,
                               ),
                             ),
@@ -188,28 +197,28 @@ class _DrawerModalState extends State<DrawerModal> {
                         : _error != null
                             ? Text(
                                 _error!,
-                                style: const TextStyle(color: PsyberTheme.dangerInk, fontSize: 13),
+                                style: TextStyle(color: colors.dangerInk, fontSize: 13),
                               )
                             : _opened != null
                                 ? SingleChildScrollView(
                                     child: Container(
                                       padding: const EdgeInsets.all(14),
                                       decoration: BoxDecoration(
-                                        color: PsyberTheme.slipPaper,
+                                        color: colors.slipPaper,
                                         borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(color: PsyberTheme.hairlineWarm),
+                                        border: Border.all(color: colors.hairlineWarm),
                                       ),
                                       child: RichMessageText(text: _opened!.content),
                                     ),
                                   )
                                 : _entries.isEmpty
-                                    ? const Padding(
-                                        padding: EdgeInsets.symmetric(vertical: 20),
+                                    ? Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 20),
                                         child: Text(
                                           '抽屉里还是空的。',
                                           style: TextStyle(
                                             fontSize: 13,
-                                            color: PsyberTheme.inkQuiet,
+                                            color: colors.inkQuiet,
                                           ),
                                         ),
                                       )
@@ -228,9 +237,9 @@ class _DrawerModalState extends State<DrawerModal> {
                                                 vertical: 12,
                                               ),
                                               decoration: BoxDecoration(
-                                                color: PsyberTheme.mineralCanvas,
+                                                color: colors.mineralCanvas,
                                                 borderRadius: BorderRadius.circular(12),
-                                                border: Border.all(color: PsyberTheme.hairline),
+                                                border: Border.all(color: colors.hairline),
                                               ),
                                               child: Row(
                                                 children: [
@@ -240,14 +249,17 @@ class _DrawerModalState extends State<DrawerModal> {
                                                         : PhosphorIconsLight.sealCheck,
                                                     size: 16,
                                                     color: entry.peeked
-                                                        ? PsyberTheme.thresholdAmber
-                                                        : PsyberTheme.inkQuiet,
+                                                        ? colors.thresholdAmber
+                                                        : colors.inkQuiet,
                                                   ),
                                                   const SizedBox(width: 10),
                                                   Expanded(
                                                     child: Text(
                                                       entry.title,
-                                                      style: const TextStyle(fontSize: 14),
+                                                      style: TextStyle(
+                                                        fontSize: 14,
+                                                        color: colors.inkDeep,
+                                                      ),
                                                     ),
                                                   ),
                                                   Text(
@@ -255,8 +267,8 @@ class _DrawerModalState extends State<DrawerModal> {
                                                     style: TextStyle(
                                                       fontSize: 11.5,
                                                       color: entry.peeked
-                                                          ? PsyberTheme.thresholdAmber
-                                                          : PsyberTheme.inkQuiet,
+                                                          ? colors.thresholdAmber
+                                                          : colors.inkQuiet,
                                                     ),
                                                   ),
                                                 ],

@@ -35,43 +35,40 @@ class PsyberApp extends StatelessWidget {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: controller.themeModeNotifier,
       builder: (context, themeMode, _) {
-        return ValueListenableBuilder<PsyberPalette?>(
-          valueListenable: controller.paletteNotifier,
-          builder: (context, palette, _) {
-            final activeTheme =
-                palette != null ? PsyberTheme.fromPalette(palette) : PsyberTheme.light();
-            final activeDarkTheme =
-                palette != null ? PsyberTheme.fromPalette(palette) : PsyberTheme.dark();
-            final resolvedMode = palette != null
-                ? (palette.isDark ? ThemeMode.dark : ThemeMode.light)
-                : themeMode;
-
-            return MaterialApp(
-              title: 'Psyber',
-              debugShowCheckedModeBanner: false,
-              theme: activeTheme,
-              darkTheme: activeDarkTheme,
-              themeMode: resolvedMode,
-              home: ValueListenableBuilder<ConnectionProfile?>(
-                valueListenable: controller.profileNotifier,
-                builder: (context, profile, _) {
-                  if (profile == null) {
-                    return PairingPage(controller: controller);
-                  }
-                  return ValueListenableBuilder<GenesisStatus?>(
-                    valueListenable: controller.genesisNotifier,
-                    builder: (context, genesis, _) {
-                      if (genesis != null && !genesis.initialized) {
-                        return GenesisPage(controller: controller);
+        return ValueListenableBuilder<PsyberPalette>(
+          valueListenable: controller.lightPaletteNotifier,
+          builder: (context, lightPalette, _) {
+            return ValueListenableBuilder<PsyberPalette>(
+              valueListenable: controller.darkPaletteNotifier,
+              builder: (context, darkPalette, _) {
+                return MaterialApp(
+                  title: 'Psyber',
+                  debugShowCheckedModeBanner: false,
+                  theme: PsyberTheme.fromPalette(lightPalette),
+                  darkTheme: PsyberTheme.fromPalette(darkPalette),
+                  themeMode: themeMode,
+                  home: ValueListenableBuilder<ConnectionProfile?>(
+                    valueListenable: controller.profileNotifier,
+                    builder: (context, profile, _) {
+                      if (profile == null) {
+                        return PairingPage(controller: controller);
                       }
-                      return ChatPage(
-                        controller: controller,
-                        imagePicker: imagePicker,
+                      return ValueListenableBuilder<GenesisStatus?>(
+                        valueListenable: controller.genesisNotifier,
+                        builder: (context, genesis, _) {
+                          if (genesis != null && !genesis.initialized) {
+                            return GenesisPage(controller: controller);
+                          }
+                          return ChatPage(
+                            controller: controller,
+                            imagePicker: imagePicker,
+                          );
+                        },
                       );
                     },
-                  );
-                },
-              ),
+                  ),
+                );
+              },
             );
           },
         );

@@ -134,17 +134,21 @@ class _AtmosphereOverlayState extends State<AtmosphereOverlay> {
   }
 }
 
-/// 当轮助手气泡的单次克制微动效（shake / breathe / hesitate / nod，≤ 600ms）。
+/// 当轮助手气泡的单次克制微动效（shake / breathe / hesitate / nod，≤ 650ms）。
 /// 系统开启“减少动态效果”时自动降级为静态渲染。
 class MotionBubbleWrapper extends StatefulWidget {
   const MotionBubbleWrapper({
     super.key,
     required this.motion,
     required this.child,
+    this.active = true,
+    this.onStarted,
   });
 
   final String? motion;
   final Widget child;
+  final bool active;
+  final VoidCallback? onStarted;
 
   @override
   State<MotionBubbleWrapper> createState() => _MotionBubbleWrapperState();
@@ -153,25 +157,39 @@ class MotionBubbleWrapper extends StatefulWidget {
 class _MotionBubbleWrapperState extends State<MotionBubbleWrapper>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  bool _hasTriggered = false;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 480),
+      duration: const Duration(milliseconds: 620),
     );
-    if (widget.motion != null) {
-      unawaited(_controller.forward(from: 0));
+    if (widget.motion != null && widget.active) {
+      _trigger();
     }
   }
 
   @override
   void didUpdateWidget(covariant MotionBubbleWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.motion != null && widget.motion != oldWidget.motion) {
-      unawaited(_controller.forward(from: 0));
+    if (widget.motion == null) {
+      _hasTriggered = false;
+      return;
     }
+    if (widget.motion != oldWidget.motion) {
+      _hasTriggered = false;
+    }
+    if (widget.active && !_hasTriggered) {
+      _trigger();
+    }
+  }
+
+  void _trigger() {
+    _hasTriggered = true;
+    widget.onStarted?.call();
+    unawaited(_controller.forward(from: 0));
   }
 
   @override
@@ -195,16 +213,16 @@ class _MotionBubbleWrapperState extends State<MotionBubbleWrapper>
         final t = _controller.value;
         switch (motion) {
           case 'shake':
-            final dx = math.sin(t * math.pi * 4) * 3.5 * (1 - t);
+            final dx = math.sin(t * math.pi * 5) * 9.0 * (1 - t);
             return Transform.translate(offset: Offset(dx, 0), child: child);
           case 'nod':
-            final dy = math.sin(t * math.pi * 2) * 3.0 * (1 - t);
+            final dy = math.sin(t * math.pi * 4) * 6.5 * (1 - t);
             return Transform.translate(offset: Offset(0, dy), child: child);
           case 'breathe':
-            final scale = 1.0 + math.sin(t * math.pi) * 0.025;
+            final scale = 1.0 + math.sin(t * math.pi) * 0.04;
             return Transform.scale(scale: scale, child: child);
           case 'hesitate':
-            final opacity = 0.78 + 0.22 * t;
+            final opacity = 0.58 + 0.42 * t;
             return Opacity(opacity: opacity, child: child);
           default:
             return child ?? const SizedBox.shrink();

@@ -123,27 +123,27 @@ class _GenesisPageState extends State<GenesisPage> {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
+                  Text(
                     '名字和称呼都可以先留空，进屋之后在日常聊天里慢慢认识与决定。',
-                    style: TextStyle(fontSize: 13.5, color: PsyberTheme.inkQuiet, height: 1.5),
+                    style: TextStyle(fontSize: 13.5, color: colors.inkQuiet, height: 1.5),
                   ),
                   const SizedBox(height: 18),
                   Container(
                     padding: const EdgeInsets.all(22),
                     decoration: BoxDecoration(
-                      color: PsyberTheme.letterSurface,
+                      color: colors.letterSurface,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: PsyberTheme.hairline),
+                      border: Border.all(color: colors.hairline),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const Text(
+                        Text(
                           '1. 房间名牌（可选）',
                           style: TextStyle(
                             fontSize: 13.5,
                             fontWeight: FontWeight.w600,
-                            color: PsyberTheme.inkDeep,
+                            color: colors.inkDeep,
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -166,12 +166,12 @@ class _GenesisPageState extends State<GenesisPage> {
                           padding: EdgeInsets.symmetric(vertical: 18),
                           child: Divider(height: 1),
                         ),
-                        const Text(
+                        Text(
                           '2. 作息与模型连接',
                           style: TextStyle(
                             fontSize: 13.5,
                             fontWeight: FontWeight.w600,
-                            color: PsyberTheme.inkDeep,
+                            color: colors.inkDeep,
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -204,9 +204,9 @@ class _GenesisPageState extends State<GenesisPage> {
                           ],
                         ),
                         const SizedBox(height: 16),
-                        const Text(
+                        Text(
                           '模型服务商（BYOK，也可稍后在设置里配置）',
-                          style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
+                          style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
                         ),
                         const SizedBox(height: 8),
                         Wrap(
@@ -294,7 +294,7 @@ class _GenesisPageState extends State<GenesisPage> {
                                     ? PhosphorIconsLight.eye
                                     : PhosphorIconsLight.eyeSlash,
                                 size: 18,
-                                color: PsyberTheme.inkQuiet,
+                                color: colors.inkQuiet,
                               ),
                               onPressed: () => setState(() => _obscureKey = !_obscureKey),
                             ),
@@ -305,13 +305,13 @@ class _GenesisPageState extends State<GenesisPage> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                             decoration: BoxDecoration(
-                              color: PsyberTheme.dangerSoft,
+                              color: colors.dangerSoft,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
                               _error!,
-                              style: const TextStyle(
-                                color: PsyberTheme.dangerInk,
+                              style: TextStyle(
+                                color: colors.dangerInk,
                                 fontSize: 13,
                               ),
                             ),

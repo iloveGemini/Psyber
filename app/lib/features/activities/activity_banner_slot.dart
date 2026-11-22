@@ -91,22 +91,22 @@ class ActivityBannerSlot extends StatelessWidget {
                     children: [
                       Text(
                         session.title.isEmpty ? '伴看进行中' : '正在一起看：${session.title}',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
-                          color: PsyberTheme.inkDeep,
+                          color: colors.inkDeep,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
                       if (session.isStale)
-                        const Text(
+                        Text(
                           '暂停有一会儿了，要结束这场观影吗？',
-                          style: TextStyle(fontSize: 11.5, color: PsyberTheme.thresholdAmber),
+                          style: TextStyle(fontSize: 11.5, color: colors.thresholdAmber),
                         )
                       else if (subtitleParts.isNotEmpty)
                         Text(
                           subtitleParts.join(' · '),
-                          style: const TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
+                          style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                         ),
                     ],
                   ),

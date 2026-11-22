@@ -44,8 +44,37 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     };
   }
 
-  const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : null;
+  let stickerId = typeof meta.stickerId === "string" ? meta.stickerId : null;
+  let exprSticker: { id: string; label: string; url: string } | null = null;
+  if (!stickerId && Array.isArray(meta.expressions)) {
+    for (let i = meta.expressions.length - 1; i >= 0; i--) {
+      const expr = meta.expressions[i];
+      if (!expr || typeof expr !== "object") continue;
+      const rec = expr as Record<string, unknown>;
+      if (typeof rec.stickerId === "string" && rec.stickerId.trim()) {
+        stickerId = rec.stickerId.trim();
+      }
+      if (rec.sticker && typeof rec.sticker === "object") {
+        const st = rec.sticker as Record<string, unknown>;
+        if (
+          typeof st.id === "string" &&
+          typeof st.label === "string" &&
+          typeof st.url === "string"
+        ) {
+          exprSticker = { id: st.id, label: st.label, url: st.url };
+        }
+      }
+      if (stickerId || exprSticker) break;
+    }
+  }
   const stickerRec = stickerId ? events.getSticker(stickerId) : null;
+  const resolvedSticker = stickerRec
+    ? {
+        id: stickerRec.id,
+        label: stickerRec.label,
+        url: `/api/v1/media/${stickerRec.mediaHash}`,
+      }
+    : exprSticker;
   const recallCount = typeof meta.recallCount === "number" ? meta.recallCount : undefined;
   const toolSummary = Array.isArray(meta.toolSummary) ? meta.toolSummary : undefined;
   const model = typeof meta.model === "string" ? meta.model : undefined;
@@ -67,15 +96,7 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     ...(videoClip !== undefined ? { videoClip } : {}),
     ...(urgent ? { urgent: true } : {}),
     ...(shares !== undefined ? { shares } : {}),
-    ...(stickerRec
-      ? {
-          sticker: {
-            id: stickerRec.id,
-            label: stickerRec.label,
-            url: `/api/v1/media/${stickerRec.mediaHash}`,
-          },
-        }
-      : {}),
+    ...(resolvedSticker ? { sticker: resolvedSticker } : {}),
   };
 }
 

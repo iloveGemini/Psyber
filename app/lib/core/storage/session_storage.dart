@@ -1,7 +1,52 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
+
+import '../../shared/theme.dart';
 import '../models/models.dart';
+
+/// 本地外观偏好（分别记忆日间与夜间首选阅读色板，跟随系统时自动按昼夜切换）。
+class ThemePreferences {
+  const ThemePreferences({
+    this.themeMode = ThemeMode.system,
+    this.lightPalette = PsyberPalette.warmPaper,
+    this.darkPalette = PsyberPalette.obsidianNight,
+  });
+
+  final ThemeMode themeMode;
+  final PsyberPalette lightPalette;
+  final PsyberPalette darkPalette;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'themeMode': themeMode.name,
+        'lightPalette': lightPalette.name,
+        'darkPalette': darkPalette.name,
+      };
+
+  static ThemePreferences fromJson(Map<String, dynamic> json) {
+    final modeRaw = json['themeMode'] as String?;
+    final mode = ThemeMode.values.firstWhere(
+      (m) => m.name == modeRaw,
+      orElse: () => ThemeMode.system,
+    );
+    final lightRaw = json['lightPalette'] as String?;
+    final light = PsyberPalette.values.firstWhere(
+      (p) => !p.isDark && p.name == lightRaw,
+      orElse: () => PsyberPalette.warmPaper,
+    );
+    final darkRaw = json['darkPalette'] as String?;
+    final dark = PsyberPalette.values.firstWhere(
+      (p) => p.isDark && p.name == darkRaw,
+      orElse: () => PsyberPalette.obsidianNight,
+    );
+    return ThemePreferences(
+      themeMode: mode,
+      lightPalette: light,
+      darkPalette: dark,
+    );
+  }
+}
 
 /// 本地会话凭证与输入草稿存储抽象（Ring 1 原子写 + POSIX 0600 权限）。
 abstract class SessionStorage {
@@ -10,11 +55,14 @@ abstract class SessionStorage {
   Future<void> clear();
   Future<String> loadDraft();
   Future<void> saveDraft(String draft);
+  Future<ThemePreferences> loadThemePreferences() async => const ThemePreferences();
+  Future<void> saveThemePreferences(ThemePreferences prefs) async {}
 }
 
 class MemorySessionStorage implements SessionStorage {
   ConnectionProfile? _profile;
   String _draft = '';
+  ThemePreferences _themePrefs = const ThemePreferences();
 
   MemorySessionStorage([this._profile]);
 
@@ -39,12 +87,22 @@ class MemorySessionStorage implements SessionStorage {
   Future<void> saveDraft(String draft) async {
     _draft = draft;
   }
+
+  @override
+  Future<ThemePreferences> loadThemePreferences() async => _themePrefs;
+
+  @override
+  Future<void> saveThemePreferences(ThemePreferences prefs) async {
+    _themePrefs = prefs;
+  }
 }
 
 class FileSessionStorage implements SessionStorage {
   FileSessionStorage({File? file}) : _file = file ?? _defaultFile();
 
   final File _file;
+  Future<void> _themeSaveQueue = Future<void>.value();
+  int _tmpSeq = 0;
 
   /// 严禁退化写入全局可访问的 Directory.systemTemp，防止长期 Bearer Token 泄露。
   static File _defaultFile() {
@@ -146,6 +204,46 @@ class FileSessionStorage implements SessionStorage {
       }
     } catch (_) {
       // 草稿存储失败静默忽略，不干扰主对话
+    }
+  }
+
+  File _themeFile() => File('${_file.parent.path}/client_theme.json');
+
+  @override
+  Future<ThemePreferences> loadThemePreferences() async {
+    try {
+      final f = _themeFile();
+      if (!await f.exists()) return const ThemePreferences();
+      final decoded = jsonDecode(await f.readAsString());
+      if (decoded is! Map<String, dynamic>) return const ThemePreferences();
+      return ThemePreferences.fromJson(decoded);
+    } catch (_) {
+      return const ThemePreferences();
+    }
+  }
+
+  @override
+  Future<void> saveThemePreferences(ThemePreferences prefs) {
+    _themeSaveQueue = _themeSaveQueue.then((_) => _writeThemePreferences(prefs));
+    return _themeSaveQueue;
+  }
+
+  Future<void> _writeThemePreferences(ThemePreferences prefs) async {
+    try {
+      final f = _themeFile();
+      await f.parent.create(recursive: true);
+      _tmpSeq += 1;
+      final tmp = File('${f.path}.tmp.${DateTime.now().microsecondsSinceEpoch}.$_tmpSeq');
+      try {
+        await tmp.writeAsString(jsonEncode(prefs.toJson()), flush: true);
+        await tmp.rename(f.path);
+      } finally {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      }
+    } catch (_) {
+      // 主题偏好写入失败静默忽略，不阻塞切换体验
     }
   }
 }

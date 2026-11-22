@@ -102,6 +102,7 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(
@@ -114,13 +115,13 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: PsyberTheme.mineralCanvas,
+                color: colors.mineralCanvas,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: PsyberTheme.hairline),
+                border: Border.all(color: colors.hairline),
               ),
               child: Text(
                 '想起 ${widget.recallCount} 张卡',
-                style: const TextStyle(fontSize: 12, color: PsyberTheme.inkQuiet),
+                style: TextStyle(fontSize: 12, color: colors.inkQuiet),
               ),
             ),
           ),
@@ -129,9 +130,9 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: PsyberTheme.mineralCanvas,
+                color: colors.mineralCanvas,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: PsyberTheme.hairline),
+                border: Border.all(color: colors.hairline),
               ),
               child: _loading
                   ? const SizedBox(
@@ -142,7 +143,7 @@ class _RecallFeedbackBarState extends State<RecallFeedbackBar> {
                   : _error != null
                       ? Text(
                           _error!,
-                          style: const TextStyle(fontSize: 12, color: PsyberTheme.dangerInk),
+                          style: TextStyle(fontSize: 12, color: colors.dangerInk),
                         )
                       : Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

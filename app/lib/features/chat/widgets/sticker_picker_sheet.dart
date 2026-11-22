@@ -31,10 +31,10 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return Dialog(
-      backgroundColor: PsyberTheme.letterSurface,
+      backgroundColor: colors.letterSurface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: PsyberTheme.hairline),
+        side: BorderSide(color: colors.hairline),
       ),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 440, maxHeight: 460),
@@ -75,13 +75,13 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                     }
                     final items = snapshot.data ?? const <StickerView>[];
                     if (items.isEmpty) {
-                      return const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 20),
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 20),
                         child: Text(
                           '暂无可用贴纸，可将图片放入数据目录的 stickers/ 文件夹后重启同步。',
                           style: TextStyle(
                             fontSize: 13,
-                            color: PsyberTheme.inkQuiet,
+                            color: colors.inkQuiet,
                             height: 1.5,
                           ),
                         ),
@@ -159,9 +159,9 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                                 child: Container(
                                   padding: const EdgeInsets.all(6),
                                   decoration: BoxDecoration(
-                                    color: PsyberTheme.mineralCanvas,
+                                    color: colors.mineralCanvas,
                                     borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: PsyberTheme.hairline),
+                                    border: Border.all(color: colors.hairline),
                                   ),
                                   child: Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
@@ -193,9 +193,9 @@ class _StickerPickerDialogState extends State<StickerPickerDialog> {
                                       const SizedBox(height: 4),
                                       Text(
                                         sticker.label,
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontSize: 11,
-                                          color: PsyberTheme.inkQuiet,
+                                          color: colors.inkQuiet,
                                         ),
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,

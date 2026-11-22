@@ -666,6 +666,16 @@ class TimelineItem {
     final retracted = json['retracted'] == true || json['status'] == 'retracted';
     final retractedBy = (json['retractedBy'] ?? metaMap['retractedBy']) as String?;
     final urgent = json['urgent'] == true || metaMap['urgent'] == true;
+    StickerView? resolvedSticker =
+        rawSticker is Map<String, dynamic> ? StickerView.fromJson(rawSticker) : null;
+    if (resolvedSticker == null) {
+      for (var i = expressions.length - 1; i >= 0; i--) {
+        if (expressions[i].sticker != null) {
+          resolvedSticker = expressions[i].sticker;
+          break;
+        }
+      }
+    }
     return TimelineItem(
       id: json['id'] as String? ?? '',
       seq: (json['seq'] as num?)?.toInt() ?? 0,
@@ -681,11 +691,7 @@ class TimelineItem {
       content: retracted ? '' : (json['content'] as String? ?? ''),
       thinking: retracted ? null : (json['thinking'] as String?),
       attachments: retracted ? const <String>[] : attachments,
-      sticker: retracted
-          ? null
-          : (rawSticker is Map<String, dynamic>
-              ? StickerView.fromJson(rawSticker)
-              : null),
+      sticker: retracted ? null : resolvedSticker,
       expressions: retracted ? const <ExpressionPayload>[] : expressions,
       shares: retracted ? const <ShareCardItem>[] : shares,
       toolSummary: retracted ? const <ToolSummaryItem>[] : toolSummary,

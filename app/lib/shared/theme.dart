@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 
-/// Ring 1.5 五套克制暖调手账色板
+/// Ring 1.5 五套克制阅读/手账色板
 enum PsyberPalette {
   warmPaper('暖纸白', false, Color(0xFFF9F9F7), Color(0xFF3C3C38)),
   obsidianNight('曜夜暖黑', true, Color(0xFF1F1F1D), Color(0xFFDEDED7)),
-  duskGlow('暮色晚霞', false, Color(0xFFFAF4F0), Color(0xFF6B4E45)),
-  autumnLatte('秋日暖咖', false, Color(0xFFF6F1E9), Color(0xFF5A4636)),
-  vintageManor('复古庄园', true, Color(0xFF1E221E), Color(0xFFD5C7A3));
+  oldBookPaper('旧书暖纸', false, Color(0xFFEAE4DA), Color(0xFFA2644C)),
+  shoreLight('岸线·晨', false, Color(0xFFE2DDD6), Color(0xFF3B4B54)),
+  shoreDark('岸线·夜', true, Color(0xFF222B33), Color(0xFF8C9BA5));
 
   const PsyberPalette(this.label, this.isDark, this.swatchBg, this.swatchAccent);
 
@@ -16,9 +16,10 @@ enum PsyberPalette {
   final Color swatchAccent;
 }
 
-/// Psyber「静室信笺」配色系统（支持 5 套克制暖调手账色板 + 跟随系统）：
+/// Psyber「静室信笺」配色系统（支持 5 套克制阅读/手账色板 + 跟随系统）：
 /// - 日间态（Warm Paper）：暖纸白画布 (#F9F9F7)、纯白卡片 (#FFFFFF)、暖黑墨色 (#30302D)；
 /// - 夜间态（Warm Dark）：曜夜暖黑 (#1F1F1D)、暗调升面 (#292927)、纸白浅字 (#F1F1ED)；
+/// - 阅读系（旧书暖纸 / 岸线·晨 / 岸线·夜）自带无字纯纸纤维与颗粒微纹理；
 /// - 琥珀色仅留给门状态阈值与未读门缝纸条，克制零噪音。
 class PsyberColors extends ThemeExtension<PsyberColors> {
   const PsyberColors({
@@ -45,6 +46,9 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     required this.userBubble,
     required this.userText,
     required this.isDark,
+    this.hasPaperGrain = false,
+    this.useReadingChrome = false,
+    this.pageEdgeTint,
   });
 
   final Color mineralCanvas;
@@ -70,6 +74,9 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
   final Color userBubble;
   final Color userText;
   final bool isDark;
+  final bool hasPaperGrain;
+  final bool useReadingChrome;
+  final Color? pageEdgeTint;
 
   // 向后兼容旧调用，别名映射至暖质石墨/微灰无彩色，彻底移除突兀的纯绿大色块
   Color get pineAccent => accent;
@@ -127,85 +134,94 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     isDark: true,
   );
 
-  /// 暮色晚霞：低饱和浅暖杏纸 + 陶土深墨
-  static const duskGlow = PsyberColors(
-    mineralCanvas: Color(0xFFFAF4F0),
-    letterSurface: Color(0xFFFFFCF9),
-    celadonWash: Color(0xFFF3E9E2),
-    slipPaper: Color(0xFFFDF3E7),
-    codeSurface: Color(0xFFF2E8E1),
-    inkDeep: Color(0xFF362A26),
-    inkQuiet: Color(0xFF8E7B74),
-    inkFaint: Color(0xFFB5A49D),
-    hairline: Color(0xFFE9DDD5),
-    hairlineWarm: Color(0xFFE6D4C6),
-    accent: Color(0xFF6B4E45),
-    onAccent: Color(0xFFFFFFFF),
-    accentSoft: Color(0xFFF1E5DF),
-    accentBorder: Color(0xFFD8C2B8),
-    statusSuccess: Color(0xFF5D7A63),
-    statusSuccessSoft: Color(0xFFEEF3EF),
-    thresholdAmber: Color(0xFFB9721B),
-    thresholdAmberSoft: Color(0xFFFAF0E2),
-    dangerInk: Color(0xFFC06B52),
-    dangerSoft: Color(0xFFF9EAE4),
-    userBubble: Color(0xFFF2E7E0),
-    userText: Color(0xFF362A26),
+  /// 旧书暖纸：古籍米白底纸 (#EAE4DA) + 墨黑正文字 (#313131) + 赤陶强调 (#A2644C) + 纯纸纤维微纹理
+  static const oldBookPaper = PsyberColors(
+    mineralCanvas: Color(0xFFEAE4DA),
+    letterSurface: Color(0xFFF3EFE8),
+    celadonWash: Color(0xFFE1DBD0),
+    slipPaper: Color(0xFFEFE6D6),
+    codeSurface: Color(0xFFE4DDD2),
+    inkDeep: Color(0xFF313131),
+    inkQuiet: Color(0xFF7B746B),
+    inkFaint: Color(0xFFA69F95),
+    hairline: Color(0xFFD7CFC2),
+    hairlineWarm: Color(0xFFCCA391),
+    accent: Color(0xFFA2644C),
+    onAccent: Color(0xFFFAF7F2),
+    accentSoft: Color(0xFFE9DBD3),
+    accentBorder: Color(0xFFCFA898),
+    statusSuccess: Color(0xFF5E7A61),
+    statusSuccessSoft: Color(0xFFE6ECE6),
+    thresholdAmber: Color(0xFFA66D28),
+    thresholdAmberSoft: Color(0xFFF2E7D5),
+    dangerInk: Color(0xFF9E4B3A),
+    dangerSoft: Color(0xFFF2E1DC),
+    userBubble: Color(0xFFE2DBD0),
+    userText: Color(0xFF313131),
     isDark: false,
+    hasPaperGrain: true,
+    useReadingChrome: true,
+    pageEdgeTint: Color(0x0E8A6E4E),
   );
 
-  /// 秋日暖咖：燕麦牛皮纸 + 深烘咖啡墨
-  static const autumnLatte = PsyberColors(
-    mineralCanvas: Color(0xFFF6F1E9),
-    letterSurface: Color(0xFFFDFBF7),
-    celadonWash: Color(0xFFECE4D8),
-    slipPaper: Color(0xFFF9F0DE),
-    codeSurface: Color(0xFFECE5DA),
-    inkDeep: Color(0xFF332920),
-    inkQuiet: Color(0xFF8A7B6B),
-    inkFaint: Color(0xFFB0A394),
-    hairline: Color(0xFFE2D8C8),
-    hairlineWarm: Color(0xFFDCCEB7),
-    accent: Color(0xFF5A4636),
-    onAccent: Color(0xFFFFFFFF),
-    accentSoft: Color(0xFFEDE4D7),
-    accentBorder: Color(0xFFD0BFA8),
-    statusSuccess: Color(0xFF56735B),
-    statusSuccessSoft: Color(0xFFEDF2EE),
-    thresholdAmber: Color(0xFFB57214),
-    thresholdAmberSoft: Color(0xFFF9EEDB),
-    dangerInk: Color(0xFFB86646),
-    dangerSoft: Color(0xFFF7E8E1),
-    userBubble: Color(0xFFEBE3D7),
-    userText: Color(0xFF332920),
+  /// 岸线·晨：石灰纸底 (#E2DDD6) + 深海岩蓝墨 (#3B4B54) + 雾蓝点缀 (#8C9BA5) + 颗粒质感
+  static const shoreLight = PsyberColors(
+    mineralCanvas: Color(0xFFE2DDD6),
+    letterSurface: Color(0xFFECE9E3),
+    celadonWash: Color(0xFFD6D3CC),
+    slipPaper: Color(0xFFE9E5DC),
+    codeSurface: Color(0xFFDAD7D0),
+    inkDeep: Color(0xFF28343B),
+    inkQuiet: Color(0xFF64737D),
+    inkFaint: Color(0xFF939FA6),
+    hairline: Color(0xFFC8C5BE),
+    hairlineWarm: Color(0xFF8C9BA5),
+    accent: Color(0xFF3B4B54),
+    onAccent: Color(0xFFF2EFEA),
+    accentSoft: Color(0xFFD3D8DB),
+    accentBorder: Color(0xFF8C9BA5),
+    statusSuccess: Color(0xFF4F6F6D),
+    statusSuccessSoft: Color(0xFFDFE7E3),
+    thresholdAmber: Color(0xFF876A45),
+    thresholdAmberSoft: Color(0xFFEBE3D4),
+    dangerInk: Color(0xFF8E5258),
+    dangerSoft: Color(0xFFEBDDE0),
+    userBubble: Color(0xFFD8D5CE),
+    userText: Color(0xFF28343B),
     isDark: false,
+    hasPaperGrain: true,
+    useReadingChrome: true,
+    pageEdgeTint: Color(0x0C5E7382),
   );
 
-  /// 复古庄园：深松墨绿夜色 + 羊皮暖金字
-  static const vintageManor = PsyberColors(
-    mineralCanvas: Color(0xFF1C201D),
-    letterSurface: Color(0xFF252A26),
-    celadonWash: Color(0xFF2F3530),
-    slipPaper: Color(0xFF2B2821),
-    codeSurface: Color(0xFF202521),
-    inkDeep: Color(0xFFECE7DA),
-    inkQuiet: Color(0xFF989B90),
-    inkFaint: Color(0xFF6B7065),
-    hairline: Color(0xFF39403A),
-    hairlineWarm: Color(0xFF443E32),
-    accent: Color(0xFFD5C7A3),
-    onAccent: Color(0xFF20241F),
-    accentSoft: Color(0xFF353C35),
-    accentBorder: Color(0xFF535B4E),
-    statusSuccess: Color(0xFF6E9A7A),
-    statusSuccessSoft: Color(0xFF233227),
-    thresholdAmber: Color(0xFFD6A44C),
-    thresholdAmberSoft: Color(0xFF393121),
-    dangerInk: Color(0xFFD67B63),
-    dangerSoft: Color(0xFF3A2925),
-    userBubble: Color(0xFF2E342F),
-    userText: Color(0xFFECE7DA),
+  /// 岸线·夜：深海夜蓝 (#222B33) + 岩蓝升面 (#3B4B54) + 雾蓝主色 (#8C9BA5) + 柔白纸字 (#E2DDD6)
+  static const shoreDark = PsyberColors(
+    mineralCanvas: Color(0xFF222B33),
+    letterSurface: Color(0xFF2A353E),
+    celadonWash: Color(0xFF33404B),
+    slipPaper: Color(0xFF28333C),
+    codeSurface: Color(0xFF1C242B),
+    inkDeep: Color(0xFFE2DDD6),
+    inkQuiet: Color(0xFF9AA5AE),
+    inkFaint: Color(0xFF6B7984),
+    hairline: Color(0xFF3B4B54),
+    hairlineWarm: Color(0xFF566875),
+    accent: Color(0xFF8C9BA5),
+    onAccent: Color(0xFF182026),
+    accentSoft: Color(0xFF2F3D47),
+    accentBorder: Color(0xFF5A6C79),
+    statusSuccess: Color(0xFF7B9D99),
+    statusSuccessSoft: Color(0xFF233330),
+    thresholdAmber: Color(0xFFBFA374),
+    thresholdAmberSoft: Color(0xFF342E25),
+    dangerInk: Color(0xFFC48486),
+    dangerSoft: Color(0xFF3A292C),
+    userBubble: Color(0xFF2F3B45),
+    userText: Color(0xFFE2DDD6),
     isDark: true,
+    hasPaperGrain: true,
+    useReadingChrome: true,
+    pageEdgeTint: Color(0x180E141A),
   );
 
   static PsyberColors forPalette(PsyberPalette palette) {
@@ -214,12 +230,12 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
         return PsyberColors.light;
       case PsyberPalette.obsidianNight:
         return PsyberColors.dark;
-      case PsyberPalette.duskGlow:
-        return PsyberColors.duskGlow;
-      case PsyberPalette.autumnLatte:
-        return PsyberColors.autumnLatte;
-      case PsyberPalette.vintageManor:
-        return PsyberColors.vintageManor;
+      case PsyberPalette.oldBookPaper:
+        return PsyberColors.oldBookPaper;
+      case PsyberPalette.shoreLight:
+        return PsyberColors.shoreLight;
+      case PsyberPalette.shoreDark:
+        return PsyberColors.shoreDark;
     }
   }
 
@@ -248,6 +264,9 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
     Color? userBubble,
     Color? userText,
     bool? isDark,
+    bool? hasPaperGrain,
+    bool? useReadingChrome,
+    Color? pageEdgeTint,
   }) {
     return PsyberColors(
       mineralCanvas: mineralCanvas ?? this.mineralCanvas,
@@ -273,6 +292,9 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
       userBubble: userBubble ?? this.userBubble,
       userText: userText ?? this.userText,
       isDark: isDark ?? this.isDark,
+      hasPaperGrain: hasPaperGrain ?? this.hasPaperGrain,
+      useReadingChrome: useReadingChrome ?? this.useReadingChrome,
+      pageEdgeTint: pageEdgeTint ?? this.pageEdgeTint,
     );
   }
 
@@ -303,6 +325,9 @@ class PsyberColors extends ThemeExtension<PsyberColors> {
       userBubble: Color.lerp(userBubble, other.userBubble, t)!,
       userText: Color.lerp(userText, other.userText, t)!,
       isDark: t < 0.5 ? isDark : other.isDark,
+      hasPaperGrain: t < 0.5 ? hasPaperGrain : other.hasPaperGrain,
+      useReadingChrome: t < 0.5 ? useReadingChrome : other.useReadingChrome,
+      pageEdgeTint: Color.lerp(pageEdgeTint, other.pageEdgeTint, t),
     );
   }
 }
@@ -450,6 +475,50 @@ class PsyberTheme {
       ),
       dividerColor: colors.hairline,
       dividerTheme: DividerThemeData(color: colors.hairline, thickness: 1, space: 1),
+      dialogTheme: DialogThemeData(
+        backgroundColor: colors.letterSurface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: colors.hairline),
+        ),
+        titleTextStyle: TextStyle(
+          color: colors.inkDeep,
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+        ),
+        contentTextStyle: TextStyle(
+          color: colors.inkQuiet,
+          fontSize: 14,
+          height: 1.5,
+        ),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: colors.letterSurface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          side: BorderSide(color: colors.hairline),
+        ),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: colors.letterSurface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: colors.hairline),
+        ),
+        textStyle: TextStyle(color: colors.inkDeep, fontSize: 13.5),
+      ),
+      listTileTheme: ListTileThemeData(
+        textColor: colors.inkDeep,
+        iconColor: colors.inkQuiet,
+      ),
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: colors.accent,
+        selectionColor: colors.accentSoft,
+        selectionHandleColor: colors.accent,
+      ),
       extensions: <ThemeExtension<dynamic>>[colors],
     );
   }

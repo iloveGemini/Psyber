@@ -129,17 +129,17 @@ class _PairingPageState extends State<PairingPage> {
                     ],
                   ),
                   const SizedBox(height: 6),
-                  const Text(
+                  Text(
                     '连接到常驻在后台的住户空间，窗口只是推开那扇门的地方。',
-                    style: TextStyle(fontSize: 13.5, color: PsyberTheme.inkQuiet, height: 1.5),
+                    style: TextStyle(fontSize: 13.5, color: colors.inkQuiet, height: 1.5),
                   ),
                   const SizedBox(height: 20),
                   Container(
                     padding: const EdgeInsets.all(24),
                     decoration: BoxDecoration(
-                      color: PsyberTheme.letterSurface,
+                      color: colors.letterSurface,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: PsyberTheme.hairline),
+                      border: Border.all(color: colors.hairline),
                     ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -182,14 +182,14 @@ class _PairingPageState extends State<PairingPage> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                             decoration: BoxDecoration(
-                              color: PsyberTheme.dangerSoft,
+                              color: colors.dangerSoft,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
                               _errorText!,
                               key: const Key('pair_error_text'),
-                              style: const TextStyle(
-                                color: PsyberTheme.dangerInk,
+                              style: TextStyle(
+                                color: colors.dangerInk,
                                 fontSize: 13,
                               ),
                             ),
@@ -224,12 +224,12 @@ class _PairingPageState extends State<PairingPage> {
                           Icon(
                             _showHelp ? PhosphorIconsLight.caretUp : PhosphorIconsLight.question,
                             size: 15,
-                            color: PsyberTheme.inkQuiet,
+                            color: colors.inkQuiet,
                           ),
                           const SizedBox(width: 6),
-                          const Text(
+                          Text(
                             '如何获取配对码？',
-                            style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet),
+                            style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
                           ),
                         ],
                       ),
@@ -240,13 +240,13 @@ class _PairingPageState extends State<PairingPage> {
                       margin: const EdgeInsets.only(top: 4),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: PsyberTheme.letterSurface,
+                        color: colors.letterSurface,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: PsyberTheme.hairline),
+                        border: Border.all(color: colors.hairline),
                       ),
-                      child: const Text(
+                      child: Text(
                         '在运行后端的终端输入 p 并回车，或另开终端执行 bun run pair，即可生成 5 分钟内有效的一次性配对码。',
-                        style: TextStyle(fontSize: 12.5, color: PsyberTheme.inkQuiet, height: 1.5),
+                        style: TextStyle(fontSize: 12.5, color: colors.inkQuiet, height: 1.5),
                       ),
                     ),
                 ],

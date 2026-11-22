@@ -42,14 +42,52 @@ class TimelineDateDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = formatTimestamp(epochMs);
     if (label.isEmpty) return const SizedBox.shrink();
+    final colors = context.colors;
+    if (colors.useReadingChrome) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: PsyberTheme.readingMaxWidth),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Divider(
+                    height: 1,
+                    color: colors.hairline.withValues(alpha: 0.75),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text(
+                    '· $label ·',
+                    style: PsyberTheme.editorialSerif.copyWith(
+                      fontSize: 11.5,
+                      letterSpacing: 0.6,
+                      color: colors.inkFaint,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Divider(
+                    height: 1,
+                    color: colors.hairline.withValues(alpha: 0.75),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 14),
       child: Center(
         child: Text(
           label,
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 11.5,
-            color: PsyberTheme.inkFaint,
+            color: colors.inkFaint,
           ),
         ),
       ),
@@ -65,6 +103,7 @@ class SystemNoticeRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     final text = item.content.trim().isNotEmpty ? item.content.trim() : item.kind;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -81,8 +120,8 @@ class SystemNoticeRow extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 11.5,
                     color: item.kind == 'privacy.peeked'
-                        ? PsyberTheme.thresholdAmber
-                        : PsyberTheme.inkQuiet,
+                        ? colors.thresholdAmber
+                        : colors.inkQuiet,
                   ),
                 ),
               ),
@@ -110,6 +149,7 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Center(
@@ -123,22 +163,22 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                   decoration: BoxDecoration(
-                    color: PsyberTheme.letterSurface,
+                    color: colors.letterSurface,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: PsyberTheme.hairline),
+                    border: Border.all(color: colors.hairline),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Text(
+                      Text(
                         '✦ 整理记忆',
-                        style: TextStyle(fontSize: 11.5, color: PsyberTheme.inkQuiet),
+                        style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
                       ),
                       const SizedBox(width: 4),
                       Icon(
                         _expanded ? PhosphorIconsLight.caretUp : PhosphorIconsLight.caretDown,
                         size: 14,
-                        color: PsyberTheme.inkFaint,
+                        color: colors.inkFaint,
                       ),
                     ],
                   ),
@@ -149,15 +189,15 @@ class _MemoryTaskRowState extends State<MemoryTaskRow> {
                   margin: const EdgeInsets.only(top: 6),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
-                    color: PsyberTheme.letterSurface,
+                    color: colors.letterSurface,
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: PsyberTheme.hairline),
+                    border: Border.all(color: colors.hairline),
                   ),
                   child: Text(
                     widget.item.content,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 12,
-                      color: PsyberTheme.inkQuiet,
+                      color: colors.inkQuiet,
                       height: 1.45,
                     ),
                   ),
@@ -338,6 +378,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
 
   void _openContextActions() {
     final item = widget.item;
+    final colors = context.colors;
     final canEdit = widget.isLatestUserMessage &&
         (!widget.doorState.isDoorNoteMode || item.isDoorNote);
     final canReroll = item.isAssistant &&
@@ -352,9 +393,10 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     unawaited(
       showModalBottomSheet<void>(
         context: context,
-        backgroundColor: PsyberTheme.letterSurface,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        backgroundColor: colors.letterSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          side: BorderSide(color: colors.hairline),
         ),
         builder: (ctx) => SafeArea(
           child: Column(
@@ -362,8 +404,8 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
             children: [
               if (item.content.trim().isNotEmpty)
                 ListTile(
-                  leading: const Icon(PhosphorIconsLight.copy, size: 19),
-                  title: const Text('复制文字'),
+                  leading: Icon(PhosphorIconsLight.copy, size: 19, color: colors.inkQuiet),
+                  title: Text('复制文字', style: TextStyle(color: colors.inkDeep)),
                   onTap: () {
                     unawaited(Clipboard.setData(ClipboardData(text: item.content)));
                     Navigator.of(ctx).pop();
@@ -372,8 +414,8 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (canEdit)
                 ListTile(
                   key: Key('edit_msg_${item.id}'),
-                  leading: const Icon(PhosphorIconsLight.pencilSimple, size: 19),
-                  title: const Text('编辑并重发'),
+                  leading: Icon(PhosphorIconsLight.pencilSimple, size: 19, color: colors.inkQuiet),
+                  title: Text('编辑并重发', style: TextStyle(color: colors.inkDeep)),
                   onTap: () {
                     Navigator.of(ctx).pop();
                     unawaited(_handleEdit());
@@ -382,8 +424,8 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (canReroll)
                 ListTile(
                   key: Key('reroll_msg_${item.id}'),
-                  leading: const Icon(PhosphorIconsLight.arrowClockwise, size: 19),
-                  title: const Text('再说一次（Reroll）'),
+                  leading: Icon(PhosphorIconsLight.arrowClockwise, size: 19, color: colors.inkQuiet),
+                  title: Text('再说一次（Reroll）', style: TextStyle(color: colors.inkDeep)),
                   onTap: () {
                     Navigator.of(ctx).pop();
                     unawaited(_handleReroll());
@@ -392,8 +434,8 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (canRetract)
                 ListTile(
                   key: Key('retract_msg_${item.id}'),
-                  leading: const Icon(PhosphorIconsLight.arrowUDownLeft, size: 19),
-                  title: const Text('撤回这条消息（对方看不到内容）'),
+                  leading: Icon(PhosphorIconsLight.arrowUDownLeft, size: 19, color: colors.inkQuiet),
+                  title: Text('撤回这条消息（对方看不到内容）', style: TextStyle(color: colors.inkDeep)),
                   onTap: () {
                     Navigator.of(ctx).pop();
                     unawaited(_handleRetract());
@@ -402,14 +444,14 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
               if (!widget.doorState.isReadOnly)
                 ListTile(
                   key: Key('delete_msg_${item.id}'),
-                  leading: const Icon(
+                  leading: Icon(
                     PhosphorIconsLight.trash,
                     size: 19,
-                    color: PsyberTheme.dangerInk,
+                    color: colors.dangerInk,
                   ),
-                  title: const Text(
+                  title: Text(
                     '静默删除（修对话，不告知对方）',
-                    style: TextStyle(color: PsyberTheme.dangerInk),
+                    style: TextStyle(color: colors.dangerInk),
                   ),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -447,7 +489,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     final BoxDecoration? bubbleDecoration = showBubbleBox
         ? BoxDecoration(
             color: item.isDoorNote ? colors.slipPaper : colors.userBubble,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(colors.useReadingChrome ? 8 : 10),
             border: Border.all(
               color: item.isDoorNote ? colors.hairlineWarm : colors.hairline,
             ),
@@ -482,9 +524,22 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                       constraints: BoxConstraints(
                         maxWidth: isUser ? 540 : 580,
                       ),
-                      child: Container(
-                        padding: bubblePadding,
-                        decoration: bubbleDecoration,
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: widget.controller.isAppForegroundNotifier,
+                        builder: (context, isForeground, child) =>
+                            MotionBubbleWrapper(
+                          motion: isUser
+                              ? null
+                              : widget.controller.liveMotionForCommittedTurn(item.turnId),
+                          active: isForeground,
+                          onStarted: isUser
+                              ? null
+                              : () => widget.controller.markTurnMotionConsumed(item.turnId),
+                          child: child!,
+                        ),
+                        child: Container(
+                          padding: bubblePadding,
+                          decoration: bubbleDecoration,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -633,11 +688,11 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                 onOpen: widget.controller.openShare,
                               ),
                             if (item.aborted)
-                              const Padding(
-                                padding: EdgeInsets.only(top: 4),
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
                                 child: Text(
                                   '已中断',
-                                  style: TextStyle(fontSize: 11, color: PsyberTheme.inkFaint),
+                                  style: TextStyle(fontSize: 11, color: colors.inkFaint),
                                 ),
                               ),
                             if (item.isAssistant && item.versionCount > 1)
@@ -657,15 +712,15 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                         PhosphorIconsLight.caretLeft,
                                         size: 16,
                                         color: item.version > 1
-                                            ? PsyberTheme.inkQuiet
-                                            : PsyberTheme.inkFaint,
+                                            ? colors.inkQuiet
+                                            : colors.inkFaint,
                                       ),
                                     ),
                                     Text(
                                       '${item.version} / ${item.versionCount}',
-                                      style: const TextStyle(
+                                      style: TextStyle(
                                         fontSize: 11.5,
-                                        color: PsyberTheme.inkQuiet,
+                                        color: colors.inkQuiet,
                                       ),
                                     ),
                                     InkWell(
@@ -679,8 +734,8 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                         PhosphorIconsLight.caretRight,
                                         size: 16,
                                         color: item.version < item.versionCount
-                                            ? PsyberTheme.inkQuiet
-                                            : PsyberTheme.inkFaint,
+                                            ? colors.inkQuiet
+                                            : colors.inkFaint,
                                       ),
                                     ),
                                   ],
@@ -700,6 +755,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                       ),
                     ),
                   ),
+                ),
                   if (!isUser) _buildHoverActionPill(isLeft: false),
                 ],
               ),
@@ -797,10 +853,16 @@ class StreamingAssistantBubble extends StatelessWidget {
     super.key,
     required this.active,
     required this.onAbort,
+    this.isForeground = true,
+    this.profile,
+    this.onMotionStarted,
   });
 
   final ActiveTurnState active;
   final Future<void> Function() onAbort;
+  final bool isForeground;
+  final ConnectionProfile? profile;
+  final VoidCallback? onMotionStarted;
 
   @override
   Widget build(BuildContext context) {
@@ -809,6 +871,8 @@ class StreamingAssistantBubble extends StatelessWidget {
         active.tools.where((t) => t.isScreen).toList(growable: false);
     final hasJournal =
         active.thinking.isNotEmpty || active.tools.any((t) => !t.isScreen);
+    final liveSticker = active.latestExpression?.sticker;
+    final hasVisibleBody = active.text.isNotEmpty || liveSticker != null;
 
     return Center(
       child: ConstrainedBox(
@@ -818,7 +882,9 @@ class StreamingAssistantBubble extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 580),
             child: MotionBubbleWrapper(
-              motion: active.latestExpression?.motion,
+              motion: hasVisibleBody ? active.latestExpression?.motion : null,
+              active: isForeground,
+              onStarted: onMotionStarted,
               child: Container(
                 key: const Key('streaming_bubble'),
                 margin: const EdgeInsets.symmetric(vertical: 6),
@@ -839,6 +905,31 @@ class StreamingAssistantBubble extends StatelessWidget {
                         screenshotUrl: st.screenshotUrl,
                         isRunning: st.status == 'running',
                       ),
+                    if (liveSticker != null)
+                      Padding(
+                        padding: EdgeInsets.only(
+                          bottom: active.text.isNotEmpty ? 6 : 0,
+                        ),
+                        child: profile != null && liveSticker.url.isNotEmpty
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Image.network(
+                                  profile!.resolveMediaUrl(liveSticker.url),
+                                  headers: {'Authorization': 'Bearer ${profile!.token}'},
+                                  width: 96,
+                                  height: 96,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) => Text(
+                                    '[贴纸：${liveSticker.label}]',
+                                    style: TextStyle(fontSize: 13, color: colors.inkQuiet),
+                                  ),
+                                ),
+                              )
+                            : Text(
+                                '[贴纸：${liveSticker.label}]',
+                                style: TextStyle(fontSize: 13, color: colors.inkQuiet),
+                              ),
+                      ),
                     if (active.text.isNotEmpty)
                       RichMessageText(
                         text: active.text,
@@ -848,7 +939,7 @@ class StreamingAssistantBubble extends StatelessWidget {
                           color: colors.inkDeep,
                         ),
                       )
-                    else
+                    else if (liveSticker == null)
                       Row(
                         key: const Key('streaming_replying_placeholder'),
                         mainAxisSize: MainAxisSize.min,

@@ -154,12 +154,44 @@ describe("T11 (Ring 1): Bearer 鉴权、幂等发消息、贴纸校验、door �
     expect(synced).toBe(1);
     expect(ctx.events.getSticker("wave-hi")?.label).toBe("挥手打招呼");
 
+    // 5. 助手通过 express 发送贴纸（metadata.expressions）时，history 须带出 sticker 对象供前端渲染
+    ctx.events.append({
+      sessionId: "sess-1",
+      turnId: "turn-express-sticker",
+      role: "assistant",
+      kind: "chat",
+      content: "给你发个贴纸",
+      metadata: {
+        expressions: [
+          {
+            stickerId: "wave-hi",
+            motion: "shake",
+            sticker: {
+              id: "wave-hi",
+              label: "挥手打招呼",
+              url: "/api/v1/media/mockhash",
+            },
+          },
+        ],
+      },
+    });
+
     const histRes = await app.request("/api/v1/chat/history", {
       headers: { authorization: `Bearer ${ctx.authToken}` },
     });
-    const histJson = (await histRes.json()) as { items: Array<{ id: string; content: string; versionCount: number }> };
-    expect(histJson.items.length).toBe(1);
+    const histJson = (await histRes.json()) as {
+      items: Array<{
+        id: string;
+        content: string;
+        versionCount: number;
+        sticker?: { id: string; label: string; url: string };
+      }>;
+    };
+    expect(histJson.items.length).toBe(2);
     expect(histJson.items[0].content).toBe("门口放了热茶");
     expect(histJson.items[0].versionCount).toBe(1);
+    expect(histJson.items[1].sticker?.id).toBe("wave-hi");
+    expect(histJson.items[1].sticker?.label).toBe("挥手打招呼");
+    expect(histJson.items[1].sticker?.url).toContain("/api/v1/media/");
   });
 });
