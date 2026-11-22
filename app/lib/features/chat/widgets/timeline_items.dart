@@ -490,10 +490,12 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         ? BoxDecoration(
             color: item.isDoorNote ? colors.slipPaper : colors.userBubble,
             borderRadius: BorderRadius.circular(colors.useReadingChrome ? 8 : 10),
-            // 实心强调色气泡不描边，只给门缝纸条留暖色细边
+            // 实心强调色气泡不描边；浅色气泡（暖纸白/曜夜暖黑原色）用细边定形，不然会糊进背景
             border: item.isDoorNote
                 ? Border.all(color: colors.hairlineWarm)
-                : null,
+                : colors.userBubble == colors.accent
+                    ? null
+                    : Border.all(color: colors.hairline),
           )
         : null;
     final EdgeInsetsGeometry bubblePadding = showBubbleBox
