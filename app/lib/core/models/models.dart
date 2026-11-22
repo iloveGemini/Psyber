@@ -704,6 +704,8 @@ class TimelineItem {
     this.retracted = false,
     this.retractedBy,
     this.urgent = false,
+    this.openedAt,
+    this.readByResident = false,
   });
 
   final String id;
@@ -732,11 +734,14 @@ class TimelineItem {
   final bool retracted;
   final String? retractedBy;
   final bool urgent;
+  final int? openedAt;
+  final bool readByResident;
   final int createdAt;
 
   bool get isUser => role == 'user';
   bool get isAssistant => role == 'assistant';
   bool get isDoorNote => kind == 'door_note';
+  bool get isOpened => openedAt != null;
   bool get isMemoryTask => kind == 'memory_task';
   bool get isSilence => kind == 'silence';
   bool get isShareOpened => kind == 'share.opened';
@@ -845,7 +850,48 @@ class TimelineItem {
       retracted: retracted,
       retractedBy: retractedBy,
       urgent: urgent,
+      openedAt: (json['openedAt'] as num?)?.toInt() ??
+          (metaMap['openedAt'] as num?)?.toInt(),
+      readByResident: json['readByResident'] == true,
       createdAt: (json['createdAt'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  TimelineItem copyWith({
+    int? openedAt,
+    bool? readByResident,
+    List<ShareCardItem>? shares,
+  }) {
+    return TimelineItem(
+      id: id,
+      seq: seq,
+      sessionId: sessionId,
+      turnId: turnId,
+      clientMessageId: clientMessageId,
+      groupId: groupId,
+      version: version,
+      versionCount: versionCount,
+      activity: activity,
+      role: role,
+      kind: kind,
+      content: content,
+      thinking: thinking,
+      attachments: attachments,
+      sticker: sticker,
+      expressions: expressions,
+      shares: shares ?? this.shares,
+      toolSummary: toolSummary,
+      journalSteps: journalSteps,
+      model: model,
+      videoClip: videoClip,
+      recallCount: recallCount,
+      aborted: aborted,
+      retracted: retracted,
+      retractedBy: retractedBy,
+      urgent: urgent,
+      openedAt: openedAt ?? this.openedAt,
+      readByResident: readByResident ?? this.readByResident,
+      createdAt: createdAt,
     );
   }
 }
@@ -1081,6 +1127,13 @@ class SettingsSnapshot {
     this.desktopNotifyEnabled = true,
     this.webhookEnabled = false,
     this.webhookUrl = '',
+    this.barkEnabled = false,
+    this.barkServerUrl = '',
+    this.hasBarkKey = false,
+    this.ntfyEnabled = false,
+    this.ntfyServerUrl = '',
+    this.ntfyTopic = '',
+    this.hasNtfyToken = false,
     this.devices = const <PairedDeviceView>[],
     this.mcpServers = const <McpServerView>[],
     this.recallEvalNoticeResident = false,
@@ -1101,6 +1154,13 @@ class SettingsSnapshot {
   final bool desktopNotifyEnabled;
   final bool webhookEnabled;
   final String webhookUrl;
+  final bool barkEnabled;
+  final String barkServerUrl;
+  final bool hasBarkKey;
+  final bool ntfyEnabled;
+  final String ntfyServerUrl;
+  final String ntfyTopic;
+  final bool hasNtfyToken;
   final List<PairedDeviceView> devices;
   final List<McpServerView> mcpServers;
   final bool recallEvalNoticeResident;
@@ -1172,6 +1232,12 @@ class SettingsSnapshot {
     final webhookMap = rawChannels['webhook'] is Map<String, dynamic>
         ? rawChannels['webhook'] as Map<String, dynamic>
         : const <String, dynamic>{};
+    final barkMap = rawChannels['bark'] is Map<String, dynamic>
+        ? rawChannels['bark'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final ntfyMap = rawChannels['ntfy'] is Map<String, dynamic>
+        ? rawChannels['ntfy'] as Map<String, dynamic>
+        : const <String, dynamic>{};
 
     final rawDevices = json['devices'];
     final devices = <PairedDeviceView>[];
@@ -1201,6 +1267,13 @@ class SettingsSnapshot {
       desktopNotifyEnabled: desktopMap['enabled'] != false,
       webhookEnabled: webhookMap['enabled'] == true,
       webhookUrl: webhookMap['url'] as String? ?? '',
+      barkEnabled: barkMap['enabled'] == true,
+      barkServerUrl: barkMap['serverUrl'] as String? ?? '',
+      hasBarkKey: rawNotif['hasBarkKey'] == true,
+      ntfyEnabled: ntfyMap['enabled'] == true,
+      ntfyServerUrl: ntfyMap['serverUrl'] as String? ?? '',
+      ntfyTopic: ntfyMap['topic'] as String? ?? '',
+      hasNtfyToken: rawNotif['hasNtfyToken'] == true,
       devices: devices,
       mcpServers: (json['mcpServers'] is List<dynamic>)
           ? (json['mcpServers'] as List<dynamic>)
@@ -1483,6 +1556,30 @@ class LlmTestResult {
         latencyMs: (json['latencyMs'] as num?)?.toInt() ?? 0,
         error: json['error'] as String?,
       );
+}
+
+@immutable
+class NotificationTestResult {
+  const NotificationTestResult({
+    this.sentChannels = const <String>[],
+    this.failedChannels = const <String>[],
+    this.suppressedReason,
+  });
+
+  final List<String> sentChannels;
+  final List<String> failedChannels;
+  final String? suppressedReason;
+
+  factory NotificationTestResult.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(Object? raw) => raw is List<dynamic>
+        ? raw.whereType<String>().toList(growable: false)
+        : const <String>[];
+    return NotificationTestResult(
+      sentChannels: parseList(json['sentChannels']),
+      failedChannels: parseList(json['failedChannels']),
+      suppressedReason: json['suppressedReason'] as String?,
+    );
+  }
 }
 
 /// Ring 1.5 活动会话视图（如观影伴看 cinema）。

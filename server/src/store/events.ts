@@ -367,7 +367,7 @@ export class EventStore {
     const row = this.db
       .query(
         `SELECT COUNT(*) AS cnt FROM events
-         WHERE kind = 'door_note' AND status = 'active' AND id > ?`,
+         WHERE role = 'user' AND kind = 'door_note' AND status = 'active' AND id > ?`,
       )
       .get(cursor ?? "") as { cnt: number };
     return row.cnt;
@@ -388,7 +388,7 @@ export class EventStore {
     const rows = this.db
       .query(
         `SELECT * FROM events
-         WHERE kind = 'door_note' AND status = 'active' AND id > ?
+         WHERE role = 'user' AND kind = 'door_note' AND status = 'active' AND id > ?
          ORDER BY seq ASC`,
       )
       .all(cursor) as EventRow[];
@@ -747,12 +747,50 @@ export class EventStore {
     const row = this.db
       .query(
         `SELECT created_at FROM events
-         WHERE kind = 'door_note' AND status = 'active' AND id > ?
+         WHERE role = 'user' AND kind = 'door_note' AND status = 'active' AND id > ?
          ORDER BY seq ASC
          LIMIT 1`,
       )
       .get(cursor) as { created_at: number } | null;
     return row ? row.created_at : null;
+  }
+
+  /**
+   * 标记 Psyber 留下的门缝纸条首次被用户点开拆封（幂等保留首次 openedAt）。
+   */
+  openDoorNote(
+    id: string,
+  ): { ok: true; id: string; openedAt: number; firstOpen: boolean } | { ok: false; error: string } {
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query(
+          `SELECT * FROM events
+           WHERE id = ? AND role = 'assistant' AND kind = 'door_note' AND status = 'active'
+           LIMIT 1`,
+        )
+        .get(id) as EventRow | null;
+      if (!row) {
+        return { ok: false as const, error: "找不到对应的门缝纸条" };
+      }
+      let meta: Record<string, unknown> = {};
+      if (row.metadata) {
+        try {
+          meta = JSON.parse(row.metadata) as Record<string, unknown>;
+        } catch {
+          meta = {};
+        }
+      }
+      if (typeof meta.openedAt === "number") {
+        return { ok: true as const, id, openedAt: meta.openedAt, firstOpen: false };
+      }
+      const nowMs = this.clock.now();
+      meta.openedAt = nowMs;
+      this.db
+        .query("UPDATE events SET metadata = ? WHERE id = ?")
+        .run(JSON.stringify(meta), row.id);
+      return { ok: true as const, id, openedAt: nowMs, firstOpen: true };
+    });
+    return tx();
   }
 
   /**

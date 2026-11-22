@@ -9,6 +9,7 @@ import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import '../../core/media/image_picker.dart';
 import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
+import '../../core/notifications/local_notifier.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
@@ -805,6 +806,11 @@ class _SettingsSectionBody extends StatefulWidget {
 
 class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   final _webhookUrlCtrl = TextEditingController();
+  final _barkServerUrlCtrl = TextEditingController();
+  final _barkKeyCtrl = TextEditingController();
+  final _ntfyServerUrlCtrl = TextEditingController();
+  final _ntfyTopicCtrl = TextEditingController();
+  final _ntfyTokenCtrl = TextEditingController();
   final _baseUrlCtrl = TextEditingController();
   final _modelCtrl = TextEditingController();
   final _apiKeyCtrl = TextEditingController();
@@ -814,7 +820,12 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   bool _proactiveEnabled = true;
   bool _desktopNotifyEnabled = true;
   bool _webhookEnabled = false;
+  bool _barkEnabled = false;
+  bool _hasBarkKey = false;
+  bool _ntfyEnabled = false;
+  bool _hasNtfyToken = false;
   bool _savingRhythm = false;
+  bool _testingNotifications = false;
   String? _rhythmFeedback;
   String? _rhythmError;
   bool _hydrated = false;
@@ -852,12 +863,21 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
       _sleepStart = snap.circadian.sleepStart;
       _sleepEnd = snap.circadian.sleepEnd;
       _webhookUrlCtrl.text = snap.webhookUrl;
+      _barkServerUrlCtrl.text = snap.barkServerUrl;
+      _ntfyServerUrlCtrl.text = snap.ntfyServerUrl;
+      _ntfyTopicCtrl.text = snap.ntfyTopic;
       _proactiveEnabled = snap.circadian.proactiveEnabled;
       _desktopNotifyEnabled = snap.desktopNotifyEnabled;
       _webhookEnabled = snap.webhookEnabled;
+      _barkEnabled = snap.barkEnabled;
+      _hasBarkKey = snap.hasBarkKey;
+      _ntfyEnabled = snap.ntfyEnabled;
+      _hasNtfyToken = snap.hasNtfyToken;
       _hydrateModelFields(snap);
       _hydrated = true;
     } else if (!_editingModelInline) {
+      _hasBarkKey = snap.hasBarkKey;
+      _hasNtfyToken = snap.hasNtfyToken;
       _hydrateModelFields(snap);
     }
     if (mounted) setState(() {});
@@ -876,6 +896,11 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   void dispose() {
     widget.controller.settingsNotifier.removeListener(_onSettingsChanged);
     _webhookUrlCtrl.dispose();
+    _barkServerUrlCtrl.dispose();
+    _barkKeyCtrl.dispose();
+    _ntfyServerUrlCtrl.dispose();
+    _ntfyTopicCtrl.dispose();
+    _ntfyTokenCtrl.dispose();
     _baseUrlCtrl.dispose();
     _modelCtrl.dispose();
     _apiKeyCtrl.dispose();
@@ -932,7 +957,12 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     });
     try {
       final webhookUrl = _webhookUrlCtrl.text.trim();
-      await widget.controller.patchSettings({
+      final barkServer = _barkServerUrlCtrl.text.trim();
+      final barkKey = _barkKeyCtrl.text.trim();
+      final ntfyServer = _ntfyServerUrlCtrl.text.trim();
+      final ntfyTopic = _ntfyTopicCtrl.text.trim();
+      final ntfyToken = _ntfyTokenCtrl.text.trim();
+      final patch = <String, dynamic>{
         'circadian': {
           'sleepStart': _sleepStart,
           'sleepEnd': _sleepEnd,
@@ -945,9 +975,29 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
               'enabled': _webhookEnabled,
               'url': webhookUrl,
             },
+          if (_barkEnabled || barkServer.isNotEmpty || barkKey.isNotEmpty || _hasBarkKey)
+            'bark': {
+              'enabled': _barkEnabled,
+              if (barkServer.isNotEmpty) 'serverUrl': barkServer,
+            },
+          if (_ntfyEnabled || ntfyTopic.isNotEmpty || ntfyServer.isNotEmpty)
+            'ntfy': {
+              'enabled': _ntfyEnabled,
+              'topic': ntfyTopic,
+              if (ntfyServer.isNotEmpty) 'serverUrl': ntfyServer,
+            },
         },
-      });
+      };
+      if (barkKey.isNotEmpty || ntfyToken.isNotEmpty) {
+        patch['notificationSecrets'] = {
+          if (barkKey.isNotEmpty) 'barkDeviceKey': barkKey,
+          if (ntfyToken.isNotEmpty) 'ntfyToken': ntfyToken,
+        };
+      }
+      await widget.controller.patchSettings(patch);
       if (!mounted) return;
+      _barkKeyCtrl.clear();
+      _ntfyTokenCtrl.clear();
       setState(() {
         _savingRhythm = false;
         _rhythmFeedback = '已自动保存并即时生效';
@@ -963,6 +1013,51 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
       setState(() {
         _savingRhythm = false;
         _rhythmError = '保存失败，请检查网络或输入格式（如 23:30）';
+      });
+    }
+  }
+
+  Future<void> _handleTestNotifications() async {
+    if (_testingNotifications) return;
+    setState(() {
+      _testingNotifications = true;
+      _rhythmFeedback = null;
+      _rhythmError = null;
+    });
+    try {
+      if (LocalNotificationService.isSupported && _desktopNotifyEnabled) {
+        await LocalNotificationService.requestPermission();
+        await LocalNotificationService.show(
+          id: 'test_${DateTime.now().millisecondsSinceEpoch}',
+          title: 'Psyber 测试通知',
+          body: 'Mac 客户端原生通知已连通。',
+        );
+      }
+      final res = await widget.controller.testNotifications();
+      if (!mounted || res == null) return;
+      setState(() {
+        _testingNotifications = false;
+        if (res.suppressedReason == 'no_channels') {
+          _rhythmError = '当前未启用任何离线通知通道';
+        } else if (res.failedChannels.isNotEmpty && res.sentChannels.isEmpty) {
+          _rhythmError = '发送失败：${res.failedChannels.join('、')}';
+        } else if (res.failedChannels.isNotEmpty) {
+          _rhythmFeedback = '已发送至 ${res.sentChannels.join('、')}（${res.failedChannels.join('、')} 失败）';
+        } else {
+          _rhythmFeedback = '测试通知已发送至：${res.sentChannels.join('、')}';
+        }
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testingNotifications = false;
+        _rhythmError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _testingNotifications = false;
+        _rhythmError = '测试通知发送失败，请检查网络';
       });
     }
   }
@@ -1553,6 +1648,137 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
                     ],
                   ),
                 ],
+                _QuietSwitchTile(
+                  key: const Key('bark_enabled_switch'),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                  title: 'Bark 推送 (iOS)',
+                  subtitle: _hasBarkKey ? '设备 Key 已配置' : '零证书直达 iOS 锁屏',
+                  value: _barkEnabled,
+                  onChanged: (v) {
+                    setState(() => _barkEnabled = v);
+                    unawaited(_saveCircadianAndNotifications());
+                  },
+                ),
+                if (_barkEnabled || _hasBarkKey) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    key: const Key('bark_key_field'),
+                    controller: _barkKeyCtrl,
+                    obscureText: true,
+                    style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                    decoration: InputDecoration(
+                      labelText: _hasBarkKey ? 'Bark Device Key（留空保持不变）' : 'Bark Device Key',
+                      hintText: '从 Bark App 复制的 Key',
+                      isDense: true,
+                    ),
+                    onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          key: const Key('bark_server_field'),
+                          controller: _barkServerUrlCtrl,
+                          style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                          decoration: const InputDecoration(
+                            labelText: 'Bark 服务器（可选）',
+                            hintText: 'https://api.day.app',
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _savingRhythm
+                            ? null
+                            : () => unawaited(_saveCircadianAndNotifications()),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        ),
+                        child: const Text('保存', style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ],
+                  ),
+                ],
+                _QuietSwitchTile(
+                  key: const Key('ntfy_enabled_switch'),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
+                  title: 'ntfy 推送 (跨端)',
+                  subtitle: '支持 Android / iOS / 桌面自建',
+                  value: _ntfyEnabled,
+                  onChanged: (v) {
+                    setState(() => _ntfyEnabled = v);
+                    unawaited(_saveCircadianAndNotifications());
+                  },
+                ),
+                if (_ntfyEnabled || _ntfyTopicCtrl.text.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    key: const Key('ntfy_topic_field'),
+                    controller: _ntfyTopicCtrl,
+                    style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                    decoration: const InputDecoration(
+                      labelText: 'ntfy Topic（必填）',
+                      hintText: '例如 psyber-my-room',
+                      isDense: true,
+                    ),
+                    onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    key: const Key('ntfy_server_field'),
+                    controller: _ntfyServerUrlCtrl,
+                    style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                    decoration: const InputDecoration(
+                      labelText: 'ntfy 服务器（可选）',
+                      hintText: 'https://ntfy.sh',
+                      isDense: true,
+                    ),
+                    onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          key: const Key('ntfy_token_field'),
+                          controller: _ntfyTokenCtrl,
+                          obscureText: true,
+                          style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                          decoration: InputDecoration(
+                            labelText: _hasNtfyToken ? '鉴权 Token（留空保持不变）' : '鉴权 Token（可选）',
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => unawaited(_saveCircadianAndNotifications()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _savingRhythm
+                            ? null
+                            : () => unawaited(_saveCircadianAndNotifications()),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        ),
+                        child: const Text('保存', style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  key: const Key('test_notifications_button'),
+                  onPressed: _testingNotifications
+                      ? null
+                      : () => unawaited(_handleTestNotifications()),
+                  icon: const Icon(PhosphorIconsLight.bellRinging, size: 15),
+                  label: Text(
+                    _testingNotifications ? '正在发送测试…' : '发一条测试通知',
+                    style: const TextStyle(fontSize: 12.5),
+                  ),
+                ),
                 if (_rhythmError != null) ...[
                   const SizedBox(height: 8),
                   Text(

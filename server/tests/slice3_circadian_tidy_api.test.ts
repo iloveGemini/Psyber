@@ -146,6 +146,125 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     ctx.clock.setTime(Date.UTC(2026, 10, 20, 15, 45, 0));
     const rNight = await hub.notify({ kind: "wake", title: "Psyber", body: "晚安" });
     expect(rNight.suppressedReason).toBe("sleep_window");
+
+    // 开启勿扰模式后，即使在白天，wake 也被 user_undisturbed 拦截；而 bypassSuppression 可穿透测试
+    ctx.clock.setTime(Date.UTC(2026, 10, 20, 6, 0, 0));
+    ctx.config.userStatus = { undisturbed: true, updatedAt: ctx.clock.now() };
+    const rDnd = await hub.notify({ kind: "wake", title: "Psyber", body: "你在吗" });
+    expect(rDnd.suppressedReason).toBe("user_undisturbed");
+
+    const rTestBypass = await hub.notify(
+      { kind: "test", title: "Psyber", body: "测试通知" },
+      { bypassSuppression: true },
+    );
+    expect(rTestBypass.sentChannels).toEqual(["desktop", "webhook"]);
+  });
+
+  test("NotificationHub & /settings: Bark + ntfy 扇出与凭证脱敏落盘、/notifications/test 穿透测试", async () => {
+    ctx = await createTestContext({
+      initialTimeMs: Date.UTC(2026, 10, 20, 6, 0, 0),
+    });
+    const pairing = new PairingManager(ctx.clock);
+    const issued = pairing.issueCode();
+
+    const pushedCalls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
+    const hub = new NotificationHub({
+      clock: ctx.clock,
+      getConfig: () => ctx!.config,
+      hasActiveForegroundClient: () => true, // 即使前台在线，/notifications/test 也应穿透发送
+      desktopSender: async () => {},
+      getCredential: async (key) => {
+        const { loadCredentials } = await import("../src/core/credentials.ts");
+        const creds = await loadCredentials(ctx!.dataDir);
+        return creds.channelTokens?.[key] ?? null;
+      },
+      fetchImpl: (async (url, init) => {
+        pushedCalls.push({
+          url: String(url),
+          headers: (init?.headers ?? {}) as Record<string, string>,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch,
+    });
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: ctx.clock,
+      getConfig: () => ctx!.config,
+      events: ctx.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: ctx.dataDir,
+      db: ctx.db,
+      memoryIndex: ctx.index,
+      pairing,
+      notifications: hub,
+    });
+
+    const pairRes = await app.request("/api/v1/auth/pair", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: issued.code, deviceName: "iPhone", platform: "ios" }),
+    });
+    const pairJson = (await pairRes.json()) as { token: string };
+    const authHeaders = {
+      authorization: `Bearer ${pairJson.token}`,
+      "content-type": "application/json",
+    };
+
+    // 1. 保存 Bark + ntfy 配置与密钥：密钥应落入 credentials.json，不出现在 config.json 与 GET /settings
+    const patchRes = await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        notifications: {
+          bark: { enabled: true, serverUrl: "https://bark.example.com" },
+          ntfy: { enabled: true, serverUrl: "https://ntfy.example.com", topic: "psyber-room" },
+        },
+        notificationSecrets: {
+          barkDeviceKey: "bark-secret-key-001",
+          ntfyToken: "ntfy-secret-tok-002",
+        },
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patchJson = (await patchRes.json()) as {
+      settings: {
+        notifications: {
+          hasBarkKey?: boolean;
+          hasNtfyToken?: boolean;
+          bark: { enabled: boolean; serverUrl?: string };
+          ntfy: { enabled: boolean; serverUrl?: string; topic?: string };
+        };
+      };
+    };
+    expect(patchJson.settings.notifications.bark.enabled).toBe(true);
+    expect(patchJson.settings.notifications.hasBarkKey).toBe(true);
+    expect(patchJson.settings.notifications.ntfy.enabled).toBe(true);
+    expect(patchJson.settings.notifications.ntfy.topic).toBe("psyber-room");
+    expect(patchJson.settings.notifications.hasNtfyToken).toBe(true);
+
+    const configText = await fs.readFile(path.join(ctx.dataDir, "config.json"), "utf8");
+    expect(configText).not.toContain("bark-secret-key-001");
+    expect(configText).not.toContain("ntfy-secret-tok-002");
+
+    // 2. 调用 POST /api/v1/notifications/test 验证穿透前台抑制并正确扇出到 Bark 与 ntfy
+    const testRes = await app.request("/api/v1/notifications/test", {
+      method: "POST",
+      headers: authHeaders,
+    });
+    expect(testRes.status).toBe(200);
+    const testJson = (await testRes.json()) as { sentChannels: string[]; failedChannels: string[] };
+    expect(testJson.sentChannels).toEqual(["desktop", "bark", "ntfy"]);
+    expect(testJson.failedChannels).toEqual([]);
+
+    expect(pushedCalls.length).toBe(2);
+    expect(pushedCalls[0].url).toBe("https://bark.example.com/push");
+    expect(pushedCalls[0].body.device_key).toBe("bark-secret-key-001");
+    expect(pushedCalls[0].body.url).toBe("psyber://open");
+    expect(pushedCalls[1].url).toBe("https://ntfy.example.com");
+    expect(pushedCalls[1].body.topic).toBe("psyber-room");
+    expect(pushedCalls[1].headers.authorization).toBe("Bearer ntfy-secret-tok-002");
   });
 
   test("runMemoryTidyTask: 沙箱外越界路径绝不进回滚备份；模型异常回滚磁盘；bedtime 先排空对话再汇总当日卡片", async () => {

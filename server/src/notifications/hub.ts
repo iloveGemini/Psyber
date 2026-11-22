@@ -5,14 +5,14 @@ import {
 } from "../core/config.ts";
 
 export interface NotificationPayload {
-  kind: "wake" | "door_updated";
+  kind: "wake" | "door_updated" | "approval_required" | "test";
   title: string;
   body: string;
   turnId?: string;
 }
 
 export interface NotificationDispatchResult {
-  suppressedReason?: "foreground_active" | "sleep_window" | "no_channels";
+  suppressedReason?: "foreground_active" | "sleep_window" | "user_undisturbed" | "no_channels";
   sentChannels: string[];
   failedChannels: string[];
 }
@@ -23,7 +23,7 @@ export interface NotificationHubDeps {
   hasActiveForegroundClient: () => boolean;
   /** 注入睡眠窗判定回调，严格维持 notifications/ 仅依赖 core/（不反向导入 mood/） */
   isInSleepWindow?: () => boolean;
-  /** 可选凭证解析器：按 credentialKey 从 credentials.json 读取 Webhook Bearer Token */
+  /** 可选凭证解析器：按 credentialKey 从 credentials.json 读取通道密钥 */
   getCredential?: (key: string) => Promise<string | null>;
   /** 可注入桌面通知发送器，测试环境 100% 离线模拟 */
   desktopSender?: (payload: NotificationPayload) => Promise<void>;
@@ -72,25 +72,36 @@ async function runWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promi
 }
 
 /**
- * Ring 1 极简离线通知中心（desktop + 通用 webhook），带前台活跃抑制、睡眠静默窗与 5s 超时隔离。
+ * 离线通知中心（desktop + webhook + bark + ntfy），带前台抑制、睡眠窗与勿扰抑制及 5s 超时隔离。
  */
 export class NotificationHub {
   constructor(private readonly deps: NotificationHubDeps) {}
 
-  async notify(payload: NotificationPayload): Promise<NotificationDispatchResult> {
-    if (this.deps.hasActiveForegroundClient()) {
-      return { suppressedReason: "foreground_active", sentChannels: [], failedChannels: [] };
-    }
-
-    if (payload.kind === "wake" && this.deps.isInSleepWindow?.()) {
-      return { suppressedReason: "sleep_window", sentChannels: [], failedChannels: [] };
-    }
-
+  async notify(
+    payload: NotificationPayload,
+    opts?: { bypassSuppression?: boolean },
+  ): Promise<NotificationDispatchResult> {
     const cfg = this.deps.getConfig();
+    if (!opts?.bypassSuppression) {
+      if (this.deps.hasActiveForegroundClient()) {
+        return { suppressedReason: "foreground_active", sentChannels: [], failedChannels: [] };
+      }
+
+      if (payload.kind === "wake" && cfg.userStatus?.undisturbed) {
+        return { suppressedReason: "user_undisturbed", sentChannels: [], failedChannels: [] };
+      }
+
+      if (payload.kind === "wake" && this.deps.isInSleepWindow?.()) {
+        return { suppressedReason: "sleep_window", sentChannels: [], failedChannels: [] };
+      }
+    }
+
     const notifCfg = cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG;
     const tasks: Array<{ channel: string; run: () => Promise<void> }> = [];
+    const fetchFn = this.deps.fetchImpl ?? fetch;
 
-    if (notifCfg.desktop?.enabled) {
+    // macOS 桌面通知已由客户端 App 原生 UNUserNotificationCenter 接管，不再从服务端调用 osascript（脚本编辑器）
+    if (notifCfg.desktop?.enabled && (this.deps.desktopSender || process.platform === "linux")) {
       const sender = this.deps.desktopSender ?? defaultDesktopNotify;
       tasks.push({
         channel: "desktop",
@@ -100,7 +111,6 @@ export class NotificationHub {
 
     if (notifCfg.webhook?.enabled && notifCfg.webhook.url) {
       const webhook = notifCfg.webhook;
-      const fetchFn = this.deps.fetchImpl ?? fetch;
       tasks.push({
         channel: "webhook",
         run: async () => {
@@ -125,6 +135,70 @@ export class NotificationHub {
           });
           if (!res.ok) {
             throw new Error(`Webhook HTTP ${res.status}`);
+          }
+        },
+      });
+    }
+
+    if (notifCfg.bark?.enabled) {
+      const bark = notifCfg.bark;
+      tasks.push({
+        channel: "bark",
+        run: async () => {
+          const keyName = bark.deviceKeyRef?.trim() || "bark_device_key";
+          const deviceKey = this.deps.getCredential ? await this.deps.getCredential(keyName) : null;
+          if (!deviceKey) {
+            throw new Error("Bark deviceKey 未配置");
+          }
+          const rawBase = bark.serverUrl?.trim() || "https://api.day.app";
+          const base = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
+          const res = await fetchFn(`${base}/push`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              device_key: deviceKey,
+              title: payload.title,
+              body: payload.body,
+              group: bark.group?.trim() || "Psyber",
+              url: "psyber://open",
+            }),
+            signal: AbortSignal.timeout(CHANNEL_TIMEOUT_MS),
+          });
+          if (!res.ok) {
+            throw new Error(`Bark HTTP ${res.status}`);
+          }
+        },
+      });
+    }
+
+    if (notifCfg.ntfy?.enabled && notifCfg.ntfy.topic?.trim()) {
+      const ntfy = notifCfg.ntfy;
+      tasks.push({
+        channel: "ntfy",
+        run: async () => {
+          const rawBase = ntfy.serverUrl?.trim() || "https://ntfy.sh";
+          const base = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
+          const headers: Record<string, string> = {
+            "content-type": "application/json",
+          };
+          if (ntfy.credentialKey && this.deps.getCredential) {
+            const token = await this.deps.getCredential(ntfy.credentialKey);
+            if (token) {
+              headers.authorization = `Bearer ${token}`;
+            }
+          }
+          const res = await fetchFn(base, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              topic: ntfy.topic.trim(),
+              title: payload.title,
+              message: payload.body,
+            }),
+            signal: AbortSignal.timeout(CHANNEL_TIMEOUT_MS),
+          });
+          if (!res.ok) {
+            throw new Error(`ntfy HTTP ${res.status}`);
           }
         },
       });

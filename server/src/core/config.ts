@@ -64,7 +64,7 @@ export const DEFAULT_CIRCADIAN_CONFIG: CircadianConfig = {
   proactiveCooldownMin: 180,
 };
 
-/** Ring 1 离线通知配置（仅桌面本地通知 + 通用 Webhook，绝不存明文密钥） */
+/** 离线通知配置（桌面本地通知 + Webhook + Bark + ntfy，绝不存明文密钥） */
 export interface NotificationsConfig {
   desktop: { enabled: boolean };
   webhook?: {
@@ -74,6 +74,24 @@ export interface NotificationsConfig {
     credentialKey?: string;
     /** 附加自定义 HTTP 请求头（不含明文密钥） */
     headers?: Record<string, string>;
+  };
+  bark?: {
+    enabled: boolean;
+    /** 默认 https://api.day.app */
+    serverUrl?: string;
+    /** 引用 credentials.json 中 channelTokens 的键名（默认 bark_device_key） */
+    deviceKeyRef?: string;
+    /** Bark 分组名（默认 Psyber） */
+    group?: string;
+  };
+  ntfy?: {
+    enabled: boolean;
+    /** 默认 https://ntfy.sh */
+    serverUrl?: string;
+    /** 订阅主题 */
+    topic: string;
+    /** 可选鉴权 Token 键名（存 credentials.json 中 channelTokens） */
+    credentialKey?: string;
   };
 }
 

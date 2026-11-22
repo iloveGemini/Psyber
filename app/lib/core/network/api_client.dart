@@ -150,6 +150,9 @@ abstract class PsyberApiClient {
   /// Ring 1.5：首次点开 Psyber 分享卡上报拆阅回执。
   Future<int?> openShare(ConnectionProfile profile, String shareId);
 
+  /// 首次点开 Psyber 留下的门缝纸条上报拆封。
+  Future<int?> openDoorNote(ConnectionProfile profile, String messageId);
+
   /// Ring 1.5：读取用户双人状态签（心绪短句 + 勿扰开关）。
   Future<UserStatus> getUserStatus(ConnectionProfile profile);
 
@@ -226,6 +229,9 @@ abstract class PsyberApiClient {
     required String provider,
     required String model,
   });
+
+  /// 发送一条测试离线通知。
+  Future<NotificationTestResult> testNotifications(ConnectionProfile profile);
 
   /// Ring 1.5：上传双人头像（who 为 user 或 resident）。
   Future<String> uploadAvatar(
@@ -726,6 +732,20 @@ class HttpPsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<int?> openDoorNote(ConnectionProfile profile, String messageId) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/door-notes/$messageId/open',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return (json['openedAt'] as num?)?.toInt();
+  }
+
+  @override
   Future<UserStatus> getUserStatus(ConnectionProfile profile) async {
     final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/user-status');
     try {
@@ -1006,6 +1026,19 @@ class HttpPsyberApiClient implements PsyberApiClient {
       timeout: const Duration(seconds: 20),
     );
     return LlmTestResult.fromJson(json);
+  }
+
+  @override
+  Future<NotificationTestResult> testNotifications(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/notifications/test');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+      timeout: const Duration(seconds: 10),
+    );
+    return NotificationTestResult.fromJson(json);
   }
 
   @override

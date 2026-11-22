@@ -89,6 +89,8 @@ export interface TurnStreamCallbacks {
   onTextDelta?: (delta: string) => void;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
+  onDoorNotePersisted?: (event: StoredEvent) => void;
+  onDoorNotesRead?: (upToId: string) => void;
   onMessageRetracted?: (event: StoredEvent) => void;
   onAssistantPersisted?: (event: StoredEvent) => void;
   onSystemNoticePersisted?: (event: StoredEvent) => void;
@@ -121,6 +123,7 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   look_at_screen: "看了一眼你的屏幕",
   retract_message: "撤回了一条消息",
   share: "递出了一张分享卡",
+  leave_door_note: "在门缝下留了一张纸条",
   drawer_read: "翻看了上锁抽屉",
   drawer_write: "往抽屉里封存了一篇日记",
 };
@@ -137,6 +140,7 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
   look_at_screen: "看了一眼你的屏幕",
   retract_message: "撤回了一条消息",
   share: "留了一张分享卡",
+  leave_door_note: "趁你不在，在门缝下留了一张纸条",
   drawer_read: "趁你不在，翻看了上锁抽屉",
   drawer_write: "趁你不在，往抽屉里封存了一篇日记",
 };
@@ -584,12 +588,14 @@ export class DirectEngine {
           content,
           timestamp: ev.createdAt,
         });
-      } else if (ev.role === "assistant" && (ev.kind === "chat" || ev.kind === "wake")) {
+      } else if (ev.role === "assistant" && (ev.kind === "chat" || ev.kind === "wake" || ev.kind === "door_note")) {
         // 跨轮历史严格剥除 thinking；Psyber自己撤回的消息在自身上下文里保留原话
+        const baseContent =
+          ev.kind === "door_note" ? `[我留在门缝下的纸条] ${ev.content}` : ev.content;
         const content =
           ev.status === "retracted"
-            ? `${ev.content}\n（我后来撤回了这条消息，${userLabel}看不到内容）`
-            : ev.content;
+            ? `${baseContent}\n（我后来撤回了这条消息，${userLabel}看不到内容）`
+            : baseContent;
         history.push({ role: "assistant", content, timestamp: ev.createdAt });
       }
     }
@@ -1019,6 +1025,7 @@ export class DirectEngine {
       signal: opts.signal,
       onExpression: (p) => opts.callbacks?.onExpression?.(p),
       onDoorUpdated: (s, n) => opts.callbacks?.onDoorUpdated?.(s, n),
+      onDoorNotePersisted: (ev) => opts.callbacks?.onDoorNotePersisted?.(ev),
       onMessageRetracted: (ev) => opts.callbacks?.onMessageRetracted?.(ev),
       requestApproval: opts.callbacks?.onRequestApproval,
     };
@@ -1498,6 +1505,7 @@ export class DirectEngine {
       // Spec 01 §2.2：只要交互/唤醒轮正常完成（含 wake [SILENT]），推进 door_notes_read 游标
       if (!lastError && !aborted && injectedDoorNoteMaxId) {
         this.deps.events.setCursor("door_notes_read", injectedDoorNoteMaxId);
+        opts.callbacks?.onDoorNotesRead?.(injectedDoorNoteMaxId);
       }
 
       if (isSilent) {

@@ -106,7 +106,16 @@ function sanitizeSettings(
     },
     recallEvalNoticeResident: Boolean(cfg.recallEvalNoticeResident),
     circadian: cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG,
-    notifications: cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG,
+    notifications: {
+      ...(cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG),
+      hasBarkKey: Boolean(
+        creds.channelTokens[cfg.notifications?.bark?.deviceKeyRef || "bark_device_key"],
+      ),
+      hasNtfyToken: Boolean(
+        cfg.notifications?.ntfy?.credentialKey &&
+          creds.channelTokens[cfg.notifications.ntfy.credentialKey],
+      ),
+    },
     recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
     mcpServers,
     devices: (cfg.auth?.devices ?? []).map((d) => ({
@@ -157,6 +166,12 @@ function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
 function validateNotificationsPatch(patch: Partial<NotificationsConfig>): string | null {
   if (patch.webhook?.url !== undefined && patch.webhook.url !== "" && !isValidHttpUrl(patch.webhook.url)) {
     return "notifications.webhook.url 必须为合法的 http:// 或 https:// 地址";
+  }
+  if (patch.bark?.serverUrl !== undefined && patch.bark.serverUrl !== "" && !isValidHttpUrl(patch.bark.serverUrl)) {
+    return "notifications.bark.serverUrl 必须为合法的 http:// 或 https:// 地址";
+  }
+  if (patch.ntfy?.serverUrl !== undefined && patch.ntfy.serverUrl !== "" && !isValidHttpUrl(patch.ntfy.serverUrl)) {
+    return "notifications.ntfy.serverUrl 必须为合法的 http:// 或 https:// 地址";
   }
   return null;
 }
@@ -410,6 +425,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       timezone?: string;
       circadian?: Partial<CircadianConfig>;
       notifications?: Partial<NotificationsConfig>;
+      notificationSecrets?: { barkDeviceKey?: string; ntfyToken?: string };
       recall?: Partial<RecallConfig>;
       llm?: Partial<LlmConfig>;
       credentials?: Record<string, { apiKey?: string }>;
@@ -456,7 +472,44 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       cfg.circadian = { ...(cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG), ...body.circadian };
     }
     if (body.notifications && typeof body.notifications === "object") {
-      cfg.notifications = { ...(cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG), ...body.notifications };
+      const prev = cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG;
+      cfg.notifications = {
+        ...prev,
+        ...body.notifications,
+        desktop: {
+          ...prev.desktop,
+          ...(body.notifications.desktop ?? {}),
+        },
+        ...(prev.webhook || body.notifications.webhook
+          ? {
+              webhook: {
+                enabled: false,
+                url: "",
+                ...(prev.webhook ?? {}),
+                ...(body.notifications.webhook ?? {}),
+              },
+            }
+          : {}),
+        ...(prev.bark || body.notifications.bark
+          ? {
+              bark: {
+                enabled: false,
+                ...(prev.bark ?? {}),
+                ...(body.notifications.bark ?? {}),
+              },
+            }
+          : {}),
+        ...(prev.ntfy || body.notifications.ntfy
+          ? {
+              ntfy: {
+                enabled: false,
+                topic: "",
+                ...(prev.ntfy ?? {}),
+                ...(body.notifications.ntfy ?? {}),
+              },
+            }
+          : {}),
+      };
     }
     if (body.recall && typeof body.recall === "object") {
       cfg.recall = { ...(cfg.recall ?? DEFAULT_RECALL_CONFIG), ...body.recall };
@@ -523,6 +576,30 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
           }
         }
       }
+      if (body.notificationSecrets && typeof body.notificationSecrets === "object") {
+        creds.channelTokens ??= {};
+        const { barkDeviceKey, ntfyToken } = body.notificationSecrets;
+        if (typeof barkDeviceKey === "string" && barkDeviceKey.trim()) {
+          const keyRef = cfg.notifications?.bark?.deviceKeyRef || "bark_device_key";
+          creds.channelTokens[keyRef] = barkDeviceKey.trim();
+          if (cfg.notifications?.bark) {
+            cfg.notifications.bark.deviceKeyRef = keyRef;
+          }
+          credsChanged = true;
+        }
+        if (typeof ntfyToken === "string") {
+          const keyRef = cfg.notifications?.ntfy?.credentialKey || "ntfy_token";
+          if (ntfyToken.trim()) {
+            creds.channelTokens[keyRef] = ntfyToken.trim();
+            if (cfg.notifications?.ntfy) {
+              cfg.notifications.ntfy.credentialKey = keyRef;
+            }
+          } else {
+            delete creds.channelTokens[keyRef];
+          }
+          credsChanged = true;
+        }
+      }
       if (credsChanged) {
         await saveCredentials(deps.dataDir, creds);
       }
@@ -538,6 +615,22 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
       : undefined;
     return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps.mcp, identity) });
+  });
+
+  // Ring 1.5 离线通知测试（绕过前台/睡眠窗抑制，直接检测所有已启用通道）
+  app.post("/api/v1/notifications/test", async (c) => {
+    if (!deps.notifications) {
+      return c.json({ error: { code: "NOTIFICATIONS_UNAVAILABLE", message: "通知服务未就绪" } }, 503);
+    }
+    const res = await deps.notifications.notify(
+      {
+        kind: "test",
+        title: "Psyber 测试通知",
+        body: "离线触达通道已连通，静默时段不会打扰你。",
+      },
+      { bypassSuppression: true },
+    );
+    return c.json({ ok: true, ...res });
   });
 
   // Ring 1.5 外部 MCP 生态预设与单服手动重连

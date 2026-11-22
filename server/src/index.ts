@@ -394,6 +394,12 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
                 body: note ? `门牌：${note}` : `当前门状态：${state}`,
               });
             },
+            onDoorNotePersisted: (ev) => {
+              sse.emit("message.created", { message: ev });
+            },
+            onDoorNotesRead: (upToId) => {
+              sse.emit("door_notes.read", { upToId });
+            },
             onTurnSilence: (info) => {
               // 仅当前端正处于前台观看时才推轻呼吸痕，绝不唤醒后台客户端或发推送
               if (sse.foregroundSubscriberCount > 0) {
@@ -490,6 +496,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     pairing,
     media,
     mcp,
+    notifications,
     approvalTimeoutMs: opts.approvalTimeoutMs,
     onUserMessagePersisted: () => {
       consecutiveUnansweredWakes = 0;

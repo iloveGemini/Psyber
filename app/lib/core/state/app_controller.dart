@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/theme.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
+import '../notifications/local_notifier.dart';
 import '../storage/session_storage.dart';
 
 enum ConnectionPhase {
@@ -61,6 +63,7 @@ class AppController {
   AppController({
     required PsyberApiClient api,
     required SessionStorage storage,
+    LocalNotificationSender? localNotifier,
     Duration offlineHintDelay = const Duration(seconds: 5),
     List<Duration> reconnectBackoff = const [
       Duration(seconds: 2),
@@ -70,11 +73,13 @@ class AppController {
     ],
   })  : _api = api,
         _storage = storage,
+        _localNotifier = localNotifier,
         _offlineHintDelay = offlineHintDelay,
         _reconnectBackoff = reconnectBackoff;
 
   final PsyberApiClient _api;
   final SessionStorage _storage;
+  final LocalNotificationSender? _localNotifier;
   final Duration _offlineHintDelay;
   final List<Duration> _reconnectBackoff;
   final Random _random = Random();
@@ -218,7 +223,9 @@ class AppController {
   Timer? _offlineHintTimer;
   int _reconnectAttempt = 0;
   bool _isPaused = false;
+  bool _inBackgroundStream = false;
   bool _disposed = false;
+  final Set<String> _notifiedEventIds = <String>{};
   bool _hasMoreHistory = false;
   bool _hasLoadedOlder = false;
   String? _nextBeforeId;
@@ -231,6 +238,9 @@ class AppController {
   Future<void> saveDraft(String draft) => _storage.saveDraft(draft);
 
   Future<void> initialize() async {
+    if (LocalNotificationService.isSupported && _localNotifier == null) {
+      unawaited(LocalNotificationService.requestPermission());
+    }
     final themePrefs = await _storage.loadThemePreferences();
     if (_disposed) return;
     lightPaletteNotifier.value = themePrefs.lightPalette;
@@ -441,7 +451,7 @@ class AppController {
       _offlineHintTimer?.cancel();
       showReconnectingHintNotifier.value = false;
       connectionNotifier.value = ConnectionPhase.connected;
-      _startSse(profile);
+      _startSse(profile, foreground: !_inBackgroundStream);
     } on CanceledException {
       // 预期内取消，静默忽略
     } catch (_) {
@@ -542,18 +552,33 @@ class AppController {
     timelineNotifier.value = List<TimelineItem>.unmodifiable(merged);
   }
 
-  /// App 切后台：主动静默中止 SSE，绝不触发红色错误条。
+  bool get _isDesktopPlatform =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux);
+
+  /// App 切后台：移动端静默中止 SSE 省电；桌面端保留 foreground=false 后台 SSE 以接收本地通知。
   void onAppPaused() {
-    _isPaused = true;
     isAppForegroundNotifier.value = false;
+    if (_isDesktopPlatform && profileNotifier.value != null) {
+      _isPaused = false;
+      _inBackgroundStream = true;
+      _cancelSseAndTimers();
+      _startSse(profileNotifier.value!, foreground: false);
+      return;
+    }
+    _isPaused = true;
+    _inBackgroundStream = false;
     _cancelSseAndTimers();
   }
 
   /// App 切回前台：合并为单次静默重连并拉取最新历史与门状态。
   void onAppResumed() {
     isAppForegroundNotifier.value = true;
-    if (!_isPaused) return;
+    if (!_isPaused && !_inBackgroundStream) return;
     _isPaused = false;
+    _inBackgroundStream = false;
     _reconnectAttempt = 0;
     if (profileNotifier.value != null) {
       unawaited(connectAndSync());
@@ -734,6 +759,20 @@ class AppController {
     }
   }
 
+  Future<void> openDoorNote(String messageId) async {
+    final profile = profileNotifier.value;
+    if (profile == null || messageId.isEmpty) return;
+    final localNow = DateTime.now().millisecondsSinceEpoch;
+    _markDoorNoteOpenedLocal(messageId, localNow);
+    try {
+      final openedAt = await _api.openDoorNote(profile, messageId);
+      if (_disposed || openedAt == null) return;
+      _markDoorNoteOpenedLocal(messageId, openedAt);
+    } catch (_) {
+      // 拆封回执网络失败静默降级，本地已展开不打断阅读
+    }
+  }
+
   Future<void> updateUserStatus({
     String? moodText,
     bool clearMood = false,
@@ -814,6 +853,12 @@ class AppController {
     final profile = profileNotifier.value;
     if (profile == null) return null;
     return _api.testLlmModel(profile, provider: provider, model: model);
+  }
+
+  Future<NotificationTestResult?> testNotifications() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.testNotifications(profile);
   }
 
   Future<String?> uploadAvatar({
@@ -920,11 +965,11 @@ class AppController {
     recallEvalModeNotifier.value = enabled;
   }
 
-  void _startSse(ConnectionProfile profile) {
+  void _startSse(ConnectionProfile profile, {bool foreground = true}) {
     _sseSub = _api
         .openEventStream(
           profile,
-          foreground: true,
+          foreground: foreground,
           lastEventId: _lastStreamSeq,
         )
         .listen(
@@ -972,6 +1017,7 @@ class AppController {
               activeTurnNotifier.value?.turnId == item.turnId) {
             activeTurnNotifier.value = null;
           }
+          _maybeNotifyMessageInBackground(item);
         }
         return;
       case 'message.updated':
@@ -991,6 +1037,7 @@ class AppController {
         }
         return;
       case 'door.updated':
+        final prevDoorState = doorNotifier.value.state;
         final nextState = DoorState.fromWire(frame.data['state'] as String?);
         final rawUnread = frame.data['unreadDoorNotes'];
         final nextUnread = rawUnread is num
@@ -998,6 +1045,10 @@ class AppController {
             : (nextState == DoorState.open
                 ? 0
                 : doorNotifier.value.unreadDoorNotes);
+        final nextNote = frame.data['note'] as String?;
+        if (nextState != prevDoorState) {
+          _maybeNotifyDoorInBackground(nextState, nextNote);
+        }
         doorNotifier.value = doorNotifier.value.copyWith(
           state: nextState,
           note: frame.data['note'] as String?,
@@ -1022,6 +1073,19 @@ class AppController {
         final openedAt = (frame.data['openedAt'] as num?)?.toInt();
         if (shareId != null && shareId.isNotEmpty && openedAt != null) {
           _markShareOpenedLocal(shareId, openedAt);
+        }
+        return;
+      case 'door_note.opened':
+        final noteId = frame.data['id'] as String?;
+        final openedAt = (frame.data['openedAt'] as num?)?.toInt();
+        if (noteId != null && noteId.isNotEmpty && openedAt != null) {
+          _markDoorNoteOpenedLocal(noteId, openedAt);
+        }
+        return;
+      case 'door_notes.read':
+        final upToId = frame.data['upToId'] as String?;
+        if (upToId != null && upToId.isNotEmpty) {
+          _markDoorNotesReadLocal(upToId);
         }
         return;
       case 'turn.start':
@@ -1171,7 +1235,9 @@ class AppController {
         }
         return;
       case 'turn.approval_required':
-        pendingApprovalNotifier.value = PendingToolApproval.fromJson(frame.data);
+        final approval = PendingToolApproval.fromJson(frame.data);
+        pendingApprovalNotifier.value = approval;
+        _maybeNotifyApprovalInBackground(approval);
         return;
       case 'turn.approval_resolved':
         final resolvedId = frame.data['approvalId'] as String?;
@@ -1280,36 +1346,36 @@ class AppController {
       final hasTarget = item.shares.any((s) => s.id == shareId && s.openedAt == null);
       if (!hasTarget) return item;
       changed = true;
-      return TimelineItem(
-        id: item.id,
-        seq: item.seq,
-        sessionId: item.sessionId,
-        turnId: item.turnId,
-        clientMessageId: item.clientMessageId,
-        groupId: item.groupId,
-        version: item.version,
-        versionCount: item.versionCount,
-        activity: item.activity,
-        role: item.role,
-        kind: item.kind,
-        content: item.content,
-        thinking: item.thinking,
-        attachments: item.attachments,
-        sticker: item.sticker,
-        expressions: item.expressions,
+      return item.copyWith(
         shares: item.shares
             .map((s) => s.id == shareId ? s.copyWith(openedAt: openedAt) : s)
             .toList(growable: false),
-        toolSummary: item.toolSummary,
-        model: item.model,
-        videoClip: item.videoClip,
-        recallCount: item.recallCount,
-        aborted: item.aborted,
-        retracted: item.retracted,
-        retractedBy: item.retractedBy,
-        urgent: item.urgent,
-        createdAt: item.createdAt,
       );
+    }).toList(growable: false);
+    if (changed) {
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(next);
+    }
+  }
+
+  void _markDoorNoteOpenedLocal(String messageId, int openedAt) {
+    var changed = false;
+    final next = timelineNotifier.value.map((item) {
+      if (item.id != messageId || item.openedAt == openedAt) return item;
+      changed = true;
+      return item.copyWith(openedAt: openedAt);
+    }).toList(growable: false);
+    if (changed) {
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(next);
+    }
+  }
+
+  void _markDoorNotesReadLocal(String upToId) {
+    var changed = false;
+    final next = timelineNotifier.value.map((item) {
+      if (!item.isUser || !item.isDoorNote || item.readByResident) return item;
+      if (item.id.compareTo(upToId) > 0) return item;
+      changed = true;
+      return item.copyWith(readByResident: true);
     }).toList(growable: false);
     if (changed) {
       timelineNotifier.value = List<TimelineItem>.unmodifiable(next);
@@ -1333,6 +1399,75 @@ class AppController {
     _reconnectTimer = Timer(delay, () {
       unawaited(connectAndSync());
     });
+  }
+
+  void _maybeNotifyMessageInBackground(TimelineItem item) {
+    if (!item.isAssistant ||
+        item.isDoorNote ||
+        item.isSilence ||
+        item.isMemoryTask ||
+        item.isShareOpened ||
+        item.retracted) {
+      return;
+    }
+    if (userStatusNotifier.value.undisturbed && !item.urgent) return;
+    final raw = item.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final body = raw.isNotEmpty
+        ? (raw.length > 80 ? '${raw.substring(0, 80)}…' : raw)
+        : (item.sticker != null
+            ? '[贴纸：${item.sticker!.label}]'
+            : (item.attachments.isNotEmpty ? '[发来一张图片]' : '发来一条新消息'));
+    _dispatchBackgroundLocalNotification(
+      id: 'msg_${item.id}',
+      title: item.urgent
+          ? '${identityNotifier.value.displayResidentName} · 紧急消息'
+          : identityNotifier.value.displayResidentName,
+      body: body,
+    );
+  }
+
+  void _maybeNotifyDoorInBackground(DoorState nextState, String? note) {
+    if (userStatusNotifier.value.undisturbed) return;
+    final trimmed = note?.trim() ?? '';
+    final body = switch (nextState) {
+      DoorState.open => trimmed.isNotEmpty ? '门打开了：$trimmed' : '门打开了',
+      DoorState.closed => trimmed.isNotEmpty ? '门关上了：$trimmed' : '门关上了',
+      DoorState.quiet => trimmed.isNotEmpty ? '安静一会儿：$trimmed' : '安静一会儿',
+      DoorState.coolingOff => '暂时静一静',
+      DoorState.departed => '已经离开',
+    };
+    _dispatchBackgroundLocalNotification(
+      id: 'door_${nextState.name}_${DateTime.now().millisecondsSinceEpoch ~/ 5000}',
+      title: identityNotifier.value.displayResidentName,
+      body: body,
+    );
+  }
+
+  void _maybeNotifyApprovalInBackground(PendingToolApproval approval) {
+    _dispatchBackgroundLocalNotification(
+      id: 'apr_${approval.approvalId}',
+      title: '需要确认 · ${approval.toolName}',
+      body: approval.summary.isNotEmpty
+          ? approval.summary
+          : '有外部工具调用正在等待你的确认',
+    );
+  }
+
+  void _dispatchBackgroundLocalNotification({
+    required String id,
+    required String title,
+    required String body,
+  }) {
+    if (isAppForegroundNotifier.value) return;
+    if (!(settingsNotifier.value?.desktopNotifyEnabled ?? true)) return;
+    final sender = _localNotifier ??
+        (LocalNotificationService.isSupported ? LocalNotificationService.show : null);
+    if (sender == null) return;
+    if (!_notifiedEventIds.add(id)) return;
+    if (_notifiedEventIds.length > 200) {
+      _notifiedEventIds.remove(_notifiedEventIds.first);
+    }
+    unawaited(sender(id: id, title: title, body: body));
   }
 
   void _cancelSseAndTimers() {

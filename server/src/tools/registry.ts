@@ -55,6 +55,7 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   onExpression?: (payload: ExpressionPayload) => void;
   onDoorUpdated?: (state: DoorState, note: string | null) => void;
+  onDoorNotePersisted?: (event: StoredEvent) => void;
   onMessageRetracted?: (event: StoredEvent) => void;
   requestApproval?: (req: ToolApprovalRequest) => Promise<ToolApprovalResult>;
 }

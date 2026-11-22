@@ -14,6 +14,7 @@ import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
 import { readIdentityProfile } from "../memory/genesis.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
+import type { NotificationHub } from "../notifications/hub.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
 import { registerAdminRoutes } from "./admin_routes.ts";
 import type { PairingManager } from "./pairing.ts";
@@ -85,6 +86,12 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     meta.videoClip && typeof meta.videoClip === "object" ? meta.videoClip : undefined;
   const urgent = meta.urgent === true ? true : undefined;
   const shares = Array.isArray(meta.shares) ? meta.shares : undefined;
+  const openedAt = typeof meta.openedAt === "number" ? meta.openedAt : undefined;
+  let readByResident: boolean | undefined;
+  if (ev.role === "user" && ev.kind === "door_note") {
+    const cursor = events.getCursor("door_notes_read");
+    readByResident = Boolean(cursor && ev.id <= cursor);
+  }
 
   const versionCount = ev.role === "assistant" && ev.groupId ? events.countGroupVersions(ev.groupId) : 1;
 
@@ -99,6 +106,8 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     ...(videoClip !== undefined ? { videoClip } : {}),
     ...(urgent ? { urgent: true } : {}),
     ...(shares !== undefined ? { shares } : {}),
+    ...(openedAt !== undefined ? { openedAt } : {}),
+    ...(readByResident !== undefined ? { readByResident } : {}),
     ...(resolvedSticker ? { sticker: resolvedSticker } : {}),
   };
 }
@@ -118,6 +127,7 @@ export interface AppDeps {
   pairing?: PairingManager;
   media?: MediaStore;
   mcp?: McpManager;
+  notifications?: NotificationHub;
   /** 同步高风险工具审批超时（毫秒，默认 120_000） */
   approvalTimeoutMs?: number;
   /** 用户新消息（chat / door_note）落盘时回调，用于立即重置 consecutiveUnansweredWakes = 0 */
@@ -217,6 +227,10 @@ export function createApp(deps: AppDeps): Hono {
             deps.sse?.emit("turn.expression", { turnId: activeTurnId, ...payload }),
           onDoorUpdated: (state, note) =>
             deps.sse?.emit("door.updated", { state, note, updatedAt: deps.clock.now() }),
+          onDoorNotePersisted: (ev) =>
+            deps.sse?.emit("message.created", { message: toTimelineItem(ev, deps.events) }),
+          onDoorNotesRead: (upToId) =>
+            deps.sse?.emit("door_notes.read", { upToId }),
           onMessageRetracted: (ev) =>
             deps.sse?.emit("message.updated", {
               action: "retract",
@@ -251,6 +265,7 @@ export function createApp(deps: AppDeps): Hono {
             const timeoutMs = deps.approvalTimeoutMs ?? 120_000;
             const expiresAt = deps.clock.now() + timeoutMs;
             return new Promise((resolve) => {
+              let notifyTimer: ReturnType<typeof setTimeout> | undefined;
               const finish = (res: {
                 decision: "allow" | "deny";
                 scope?: "once" | "session";
@@ -258,6 +273,7 @@ export function createApp(deps: AppDeps): Hono {
               }) => {
                 const entry = pendingApprovals.get(approvalId);
                 if (!entry) return;
+                if (notifyTimer !== undefined) clearTimeout(notifyTimer);
                 clearTimeout(entry.timer);
                 pendingApprovals.delete(approvalId);
                 resolve(res);
@@ -292,6 +308,31 @@ export function createApp(deps: AppDeps): Hono {
                 arguments: req.arguments,
                 expiresAt,
               });
+              if (deps.notifications) {
+                const hasFg = (deps.sse?.foregroundSubscriberCount ?? 0) > 0;
+                if (!hasFg) {
+                  void deps.notifications.notify({
+                    kind: "approval_required",
+                    title: "需要确认操作",
+                    body: req.summary,
+                    turnId: req.turnId,
+                  });
+                } else {
+                  notifyTimer = setTimeout(() => {
+                    if (pendingApprovals.has(approvalId)) {
+                      void deps.notifications?.notify(
+                        {
+                          kind: "approval_required",
+                          title: "需要确认操作",
+                          body: req.summary,
+                          turnId: req.turnId,
+                        },
+                        { bypassSuppression: true },
+                      );
+                    }
+                  }, 15_000);
+                }
+              }
             });
           },
           onTurnSilence: (info) => deps.sse?.emit("turn.silence", info),
@@ -901,6 +942,29 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({
       ok: true,
       shareId: res.shareId,
+      openedAt: res.openedAt,
+      firstOpen: res.firstOpen,
+    });
+  });
+
+  app.post("/api/v1/door-notes/:id/open", (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法门缝纸条 ID" } }, 400);
+    }
+    const res = deps.events.openDoorNote(id);
+    if (!res.ok) {
+      return c.json({ error: { code: "NOT_FOUND", message: res.error } }, 404);
+    }
+    if (res.firstOpen) {
+      deps.sse?.emit("door_note.opened", {
+        id: res.id,
+        openedAt: res.openedAt,
+      });
+    }
+    return c.json({
+      ok: true,
+      id: res.id,
       openedAt: res.openedAt,
       firstOpen: res.firstOpen,
     });

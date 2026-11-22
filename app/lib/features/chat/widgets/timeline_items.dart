@@ -8,6 +8,7 @@ import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
 import '../../../expression/expression_renderer.dart';
+import '../../../shared/paper_grain.dart';
 import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
 import 'recall_feedback_bar.dart';
@@ -494,17 +495,50 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     final hasText = item.content.trim().isNotEmpty;
     final separateUserMedia = isUser && !item.isDoorNote;
     final showBubbleBox = item.isDoorNote || (separateUserMedia && (hasText || item.urgent));
+    final bool isUrgentCard = item.urgent && isUser;
+    final bool isFoldedResidentNote =
+        item.isDoorNote && !isUser && !item.isOpened;
+    // 纸卡片固定材质色：五主题通用，深色主题下略降纸面亮度不刺眼
+    final paperCardBg =
+        colors.isDark ? const Color(0xFFDAD1C2) : const Color(0xFFEFE6D6);
+    const paperCardInk = Color(0xFF313131);
+    const paperCardQuiet = Color(0xFF7B746B);
+    const paperCardAccent = Color(0xFFA2644C);
+    const paperCardHairline = Color(0xFFCCA391);
+    // 紧急卡片采用深砖红实心底，与旧书暖纸普通气泡 (#A2644C) 拉开区分
+    const urgentCardBg = Color(0xFF8C4332);
+    const urgentCardInk = Color(0xFFFAF6EE);
 
     final BoxDecoration? bubbleDecoration = showBubbleBox
         ? BoxDecoration(
-            color: item.isDoorNote ? colors.slipPaper : colors.userBubble,
-            borderRadius: BorderRadius.circular(colors.useReadingChrome ? 8 : 10),
-            // 实心强调色气泡不描边；浅色气泡（暖纸白/曜夜暖黑原色）用细边定形，不然会糊进背景
+            color: item.isDoorNote
+                ? paperCardBg
+                : isUrgentCard
+                    ? urgentCardBg
+                    : colors.userBubble,
+            borderRadius: BorderRadius.circular(item.isDoorNote
+                ? 3
+                : isUrgentCard
+                    ? 12
+                    : colors.useReadingChrome
+                        ? 8
+                        : 10),
             border: item.isDoorNote
-                ? Border.all(color: colors.hairlineWarm)
-                : colors.userBubble == colors.accent
-                    ? null
-                    : Border.all(color: colors.hairline),
+                ? Border.all(color: paperCardHairline)
+                : isUrgentCard
+                    ? Border.all(color: urgentCardInk.withValues(alpha: 0.18))
+                    : colors.userBubble == colors.accent
+                        ? null
+                        : Border.all(color: colors.hairline),
+            boxShadow: (item.isDoorNote || isUrgentCard)
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: colors.isDark ? 0.24 : 0.10),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
           )
         : null;
     final double stickerExtent = !hasText ? 112 : 96;
@@ -613,30 +647,70 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                   bottomGap: (hasText || item.urgent) ? 6 : 0,
                 ),
               if (hasText || item.urgent)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: bubbleDecoration,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(isUrgentCard ? 12 : (colors.useReadingChrome ? 8 : 10)),
+                  child: Stack(
                     children: [
-                      if (item.urgent)
-                        Padding(
-                          padding: EdgeInsets.only(bottom: hasText ? 5 : 0),
-                          child: Text(
-                            '紧急直达',
-                            style: PsyberTheme.editorialSerif.copyWith(
-                              fontSize: 11,
-                              color: colors.dangerInk,
-                            ),
-                          ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                        decoration: bubbleDecoration,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (item.urgent) ...[
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    PhosphorIconsLight.bell,
+                                    size: 13.5,
+                                    color: urgentCardInk,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '紧急直达',
+                                    style: PsyberTheme.editorialSerif.copyWith(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w500,
+                                      color: urgentCardInk,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (hasText) ...[
+                                const SizedBox(height: 8),
+                                Container(
+                                  height: 1,
+                                  color: urgentCardInk.withValues(alpha: 0.22),
+                                ),
+                                const SizedBox(height: 8),
+                              ],
+                            ],
+                            if (hasText)
+                              RichMessageText(
+                                text: item.content,
+                                baseStyle: item.urgent
+                                    ? PsyberTheme.editorialSerif.copyWith(
+                                        fontSize: 15,
+                                        height: 1.64,
+                                        color: urgentCardInk,
+                                      )
+                                    : TextStyle(
+                                        fontSize: 15,
+                                        height: 1.62,
+                                        color: colors.userText,
+                                      ),
+                              ),
+                          ],
                         ),
-                      if (hasText)
-                        RichMessageText(
-                          text: item.content,
-                          baseStyle: TextStyle(
-                            fontSize: 15,
-                            height: 1.62,
-                            color: colors.userText,
+                      ),
+                      if (isUrgentCard)
+                        const Positioned.fill(
+                          child: IgnorePointer(
+                            child: Opacity(
+                              opacity: 0.45,
+                              child: PaperGrainOverlay(isDark: true),
+                            ),
                           ),
                         ),
                     ],
@@ -661,21 +735,31 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                       '门缝纸条',
                       style: PsyberTheme.editorialSerif.copyWith(
                         fontSize: 11.5,
-                        color: colors.thresholdAmber,
+                        color: paperCardAccent,
                       ),
                     ),
                   ),
-                if (item.urgent && isUser)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 5),
-                    child: Text(
-                      '紧急直达',
-                      style: PsyberTheme.editorialSerif.copyWith(
-                        fontSize: 11,
-                        color: colors.dangerInk,
+                if (item.urgent && isUser) ...[
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        PhosphorIconsLight.bell,
+                        size: 13.5,
+                        color: urgentCardInk,
                       ),
-                    ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '紧急直达',
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 11.5,
+                          color: urgentCardInk,
+                        ),
+                      ),
+                    ],
                   ),
+                  const SizedBox(height: 8),
+                ],
                 if (hasJournal)
                   TurnJournalCard(
                     thinking: item.thinking ?? '',
@@ -699,16 +783,22 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                 if (item.content.isNotEmpty)
                   RichMessageText(
                     text: item.content,
-                    baseStyle: isUser
+                    baseStyle: (isUser && !item.isDoorNote && !item.urgent)
+                        // 用户气泡用主题 userText（实心强调色上的反白字）
                         ? TextStyle(
                             fontSize: 15,
                             height: 1.62,
                             color: colors.userText,
                           )
+                        // 纸卡片用固定色（浅纸配深字）；住户消息用主题墨色
                         : PsyberTheme.editorialSerif.copyWith(
                             fontSize: 15,
                             height: 1.66,
-                            color: colors.inkDeep,
+                            color: item.isDoorNote
+                                ? paperCardInk
+                                : isUrgentCard
+                                    ? urgentCardInk
+                                    : colors.inkDeep,
                           ),
                   ),
                 for (final share in item.shares)
@@ -779,9 +869,123 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     turnId: item.turnId!,
                     recallCount: item.recallCount!,
                   ),
+                if (item.isDoorNote && isUser)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        item.readByResident ? '看过了' : '压在门缝下',
+                        key: Key('door_note_status_${item.id}'),
+                        style: PsyberTheme.editorialSerif.copyWith(
+                          fontSize: 11,
+                          color: paperCardQuiet,
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           );
+
+    // 留言条做成真纸片：Psyber 留下的未拆封纸条先折起（方案A），点开后贴平展开
+    final Widget displayBody = item.isDoorNote
+        ? (isFoldedResidentNote
+            ? InkWell(
+                key: Key('door_note_folded_${item.id}'),
+                borderRadius: BorderRadius.circular(3),
+                onTap: () => unawaited(widget.controller.openDoorNote(item.id)),
+                child: Stack(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                      decoration: bubbleDecoration,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: colors.thresholdAmber,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Icon(
+                            PhosphorIconsLight.envelopeSimple,
+                            size: 15,
+                            color: paperCardAccent,
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              '门缝里压着一张新纸条 · 轻点拆开',
+                              style: PsyberTheme.editorialSerif.copyWith(
+                                fontSize: 13.5,
+                                color: paperCardInk,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.all(Radius.circular(3)),
+                          child: PaperGrainOverlay(isDark: false),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            : Transform.rotate(
+                angle: (item.id.hashCode % 2 == 0) ? -0.022 : 0.018,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    messageBody,
+                    // 纸纹盖在纸面上（极淡，不影响读字）
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.all(Radius.circular(3)),
+                          // 纸卡片是浅纸，纹理也固定用浅色那套，不跟主题深浅走
+                          child: PaperGrainOverlay(isDark: false),
+                        ),
+                      ),
+                    ),
+                    // 胶带（加细描边与微投影，在暖纸白下也清晰可见）
+                    Positioned(
+                      top: -7,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: Container(
+                          width: 56,
+                          height: 16,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFAF7F0).withValues(alpha: 0.72),
+                            border: Border.all(
+                              color: paperCardInk.withValues(alpha: 0.14),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.05),
+                                blurRadius: 2,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ))
+        : messageBody;
 
     return Center(
       child: ConstrainedBox(
@@ -818,7 +1022,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               : () => widget.controller.markTurnMotionConsumed(item.turnId),
                           child: child!,
                         ),
-                        child: messageBody,
+                        child: displayBody,
                       ),
                     ),
                   ),

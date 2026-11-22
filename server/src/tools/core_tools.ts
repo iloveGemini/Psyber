@@ -461,6 +461,40 @@ export function registerCoreTier1Tools(
     },
   });
 
+  registry.register({
+    name: "leave_door_note",
+    tier: 3,
+    security: "auto",
+    description:
+      "在门缝下留一张纸条给对方（不会发离线通知打扰，对方下次自己打开 App 时会看到折起来的纸条，点开才看到正文）。",
+    tags: ["door", "note", "纸条", "门缝", "留言"],
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "留在门缝里的纸条正文" },
+      },
+      required: ["content"],
+    },
+    execute: async (args, ctx) => {
+      const content = typeof args.content === "string" ? args.content.trim() : "";
+      if (!content) {
+        return { ok: false, output: "leave_door_note 缺少纸条正文 content" };
+      }
+      const { event } = events.append({
+        sessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        role: "assistant",
+        kind: "door_note",
+        content,
+      });
+      ctx.onDoorNotePersisted?.(event);
+      return {
+        ok: true,
+        output: "已把纸条轻轻塞到门缝下（不打扰对方，下次打开 App 时会看到）。",
+      };
+    },
+  });
+
   if (drawer) {
     registry.register({
       name: "drawer_read",

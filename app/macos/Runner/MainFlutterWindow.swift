@@ -1,9 +1,11 @@
 import AVFoundation
 import Cocoa
 import FlutterMacOS
+import UserNotifications
 
-class MainFlutterWindow: NSWindow, NSDraggingDestination {
+class MainFlutterWindow: NSWindow, NSDraggingDestination, UNUserNotificationCenterDelegate {
   private var desktopMediaChannel: FlutterMethodChannel?
+  private var localNotificationsChannel: FlutterMethodChannel?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -29,6 +31,16 @@ class MainFlutterWindow: NSWindow, NSDraggingDestination {
     }
     self.desktopMediaChannel = channel
     self.registerForDraggedTypes([.fileURL])
+
+    let notifyChannel = FlutterMethodChannel(
+      name: "psyber/local_notifications",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    notifyChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handleLocalNotificationsCall(call, result: result)
+    }
+    self.localNotificationsChannel = notifyChannel
+    UNUserNotificationCenter.current().delegate = self
 
     super.awakeFromNib()
     self.title = "Psyber"
@@ -155,5 +167,57 @@ class MainFlutterWindow: NSWindow, NSDraggingDestination {
 
   private func hasSupportedDraggedFiles(_ sender: NSDraggingInfo) -> Bool {
     return !readDraggedFileUrls(sender).isEmpty
+  }
+
+  private func handleLocalNotificationsCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    let center = UNUserNotificationCenter.current()
+    switch call.method {
+    case "requestPermission":
+      center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+        DispatchQueue.main.async { result(granted) }
+      }
+    case "showNotification":
+      guard let args = call.arguments as? [String: Any],
+            let title = args["title"] as? String,
+            let body = args["body"] as? String else {
+        result(nil)
+        return
+      }
+      let identifier = (args["id"] as? String) ?? UUID().uuidString
+      let content = UNMutableNotificationContent()
+      content.title = title
+      content.body = body
+      content.sound = .default
+      let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+      center.add(request) { _ in
+        DispatchQueue.main.async { result(nil) }
+      }
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    if #available(macOS 11.0, *) {
+      completionHandler([.banner, .sound])
+    } else {
+      completionHandler([.alert, .sound])
+    }
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    DispatchQueue.main.async {
+      NSApp.activate(ignoringOtherApps: true)
+      self.makeKeyAndOrderFront(nil)
+      completionHandler()
+    }
   }
 }

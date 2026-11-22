@@ -71,6 +71,7 @@ class FakePsyberApiClient implements PsyberApiClient {
   UserStatus userStatus = UserStatus.initial;
   final List<String> retractedIds = <String>[];
   final List<String> openedShareIds = <String>[];
+  final List<String> openedDoorNoteIds = <String>[];
   UsageStatsSnapshot usageStats = const UsageStatsSnapshot(
     today: UsageBucket(
       turnCount: 3,
@@ -97,6 +98,7 @@ class FakePsyberApiClient implements PsyberApiClient {
   );
   final List<String> uploadedAvatars = <String>[];
   int llmTestCount = 0;
+  int notificationTestCount = 0;
   final List<String> reconnectedMcpIds = <String>[];
   final List<Map<String, Object?>> resolvedApprovals = <Map<String, Object?>>[];
   List<McpPresetView> mcpPresets = const [
@@ -450,6 +452,12 @@ class FakePsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<int?> openDoorNote(ConnectionProfile profile, String messageId) async {
+    openedDoorNoteIds.add(messageId);
+    return 1795046900000;
+  }
+
+  @override
   Future<UserStatus> getUserStatus(ConnectionProfile profile) async => userStatus;
 
   @override
@@ -600,6 +608,12 @@ class FakePsyberApiClient implements PsyberApiClient {
   }) async {
     llmTestCount += 1;
     return const LlmTestResult(ok: true, latencyMs: 128);
+  }
+
+  @override
+  Future<NotificationTestResult> testNotifications(ConnectionProfile profile) async {
+    notificationTestCount += 1;
+    return const NotificationTestResult(sentChannels: ['bark', 'ntfy'], failedChannels: []);
   }
 
   @override
@@ -2398,6 +2412,175 @@ void main() {
       lessThan(tester.getTopLeft(find.text('第二步思考')).dy),
     );
   });
+  testWidgets('双向门缝纸条：Psyber 纸条默认折起点击拆封，用户纸条显示「压在门缝下」->「看过了」', (tester) async {
+    final api = FakePsyberApiClient()
+      ..door = const DoorStatus(
+        state: DoorState.closed,
+        note: '先静一静',
+        updatedAt: 1795046400000,
+        unreadDoorNotes: 1,
+      )
+      ..history = [
+        const TimelineItem(
+          id: 'ev_unote_1',
+          seq: 1,
+          sessionId: 'sess_1',
+          role: 'user',
+          kind: 'door_note',
+          content: '给你带了热可可放在门口。',
+          readByResident: false,
+          createdAt: 1795046401000,
+        ),
+        const TimelineItem(
+          id: 'ev_anote_1',
+          seq: 2,
+          sessionId: 'sess_1',
+          role: 'assistant',
+          kind: 'door_note',
+          content: '谢谢，我等会儿出来拿。',
+          createdAt: 1795046402000,
+        ),
+      ];
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(PsyberApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 1. 用户纸条未读时显示「压在门缝下」，Psyber 纸条默认折起隐藏正文
+    expect(find.text('压在门缝下'), findsOneWidget);
+    expect(find.text('门缝里压着一张新纸条 · 轻点拆开'), findsOneWidget);
+    expect(find.text('谢谢，我等会儿出来拿。'), findsNothing);
+
+    // 2. 点击拆封 Psyber 纸条后上报并展开正文
+    await tester.tap(find.byKey(const Key('door_note_folded_ev_anote_1')));
+    await tester.pumpAndSettle();
+    expect(api.openedDoorNoteIds, ['ev_anote_1']);
+    expect(find.text('谢谢，我等会儿出来拿。'), findsOneWidget);
+
+    // 3. 收到 door_notes.read SSE 后，用户纸条状态变为「看过了」
+    api.emitSse('door_notes.read', {'upToId': 'ev_unote_1'});
+    await tester.pumpAndSettle();
+    expect(find.text('看过了'), findsOneWidget);
+    expect(find.text('压在门缝下'), findsNothing);
+  });
+
+  testWidgets(
+    'Mac 桌面端切后台保持 foreground=false SSE 并触发本地系统通知（跳过 door_note）',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'tok-bg-notify',
+          deviceId: 'dev-mac',
+          instanceId: 'inst-test-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final localNotifs = <Map<String, String?>>[];
+      final controller = AppController(
+        api: api,
+        storage: storage,
+        localNotifier: ({required String title, required String body, String? id}) async {
+          localNotifs.add({'id': id, 'title': title, 'body': body});
+        },
+      );
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      // 1. 前台时不弹本地通知
+      api.emitSse('message.created', {
+        'message': {
+          'id': 'ev_fg_1',
+          'seq': 1,
+          'sessionId': 'sess_1',
+          'role': 'assistant',
+          'kind': 'chat',
+          'content': '前台消息不弹窗',
+          'createdAt': 1795046401000,
+        },
+      });
+      await tester.pump();
+      expect(localNotifs, isEmpty);
+
+      // 2. 切后台：Mac 桌面端保持 SSE 连接（重新打开一次后台流）
+      final prevStreams = api.streamOpenCount;
+      controller.onAppPaused();
+      await tester.pump();
+      expect(controller.isAppForegroundNotifier.value, isFalse);
+      expect(api.streamOpenCount, prevStreams + 1);
+
+      // 3. 后台收到普通助手消息、门状态变化、工具审批 -> 均触发本地通知；door_note 保持静默
+      api.emitSse('message.created', {
+        'message': {
+          'id': 'ev_bg_note',
+          'seq': 2,
+          'sessionId': 'sess_1',
+          'role': 'assistant',
+          'kind': 'door_note',
+          'content': '悄悄塞给你的纸条',
+          'createdAt': 1795046402000,
+        },
+      });
+      api.emitSse('message.created', {
+        'message': {
+          'id': 'ev_bg_chat',
+          'seq': 3,
+          'sessionId': 'sess_1',
+          'role': 'assistant',
+          'kind': 'chat',
+          'content': '我忙完回来啦',
+          'createdAt': 1795046403000,
+        },
+      });
+      api.emitSse('door.updated', {
+        'state': 'closed',
+        'note': '去泡茶了',
+        'updatedAt': 1795046404000,
+      });
+      api.emitSse('turn.approval_required', {
+        'approvalId': 'apr_bg_1',
+        'turnId': 'turn_bg_1',
+        'toolName': 'mcp.fetch.get',
+        'summary': '抓取网页正文',
+        'arguments': {'url': 'https://example.com'},
+        'expiresAt': 1795046999000,
+      });
+      await tester.pump();
+
+      expect(localNotifs.length, 3);
+      expect(localNotifs[0]['body'], '我忙完回来啦');
+      expect(localNotifs[1]['body'], '门关上了：去泡茶了');
+      expect(localNotifs[2]['title'], contains('mcp.fetch.get'));
+
+      // 4. 切回前台恢复 foreground=true
+      controller.onAppResumed();
+      await tester.pumpAndSettle();
+      expect(controller.isAppForegroundNotifier.value, isTrue);
+      expect(api.streamOpenCount, greaterThan(prevStreams + 1));
+    },
+  );
 }
 
 class _PaginatedFakeApiClient extends FakePsyberApiClient {
