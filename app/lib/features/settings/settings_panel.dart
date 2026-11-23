@@ -2561,6 +2561,13 @@ String _formatEpochTime(int? ms) {
   return '${dt.year}-${p2(dt.month)}-${p2(dt.day)} ${p2(dt.hour)}:${p2(dt.minute)}';
 }
 
+String _defaultBaseUrlForKind(String kind) => switch (kind) {
+      'openai' => 'https://api.openai.com/v1',
+      'anthropic' => 'https://api.anthropic.com',
+      'google' => 'https://generativelanguage.googleapis.com/v1beta',
+      _ => '',
+    };
+
 /// 模型服务商池：左侧服务商列表 + 右侧地址/密钥/连通测试/模型标签与元数据覆盖。
 class _ModelProvidersSection extends StatefulWidget {
   const _ModelProvidersSection({required this.controller, required this.snap});
@@ -2616,7 +2623,8 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
 
   void _syncInputsFor(String id) {
     final p = widget.snap?.providers[id];
-    _baseUrlCtrl.text = p?.baseUrl ?? '';
+    final savedUrl = p?.baseUrl?.trim() ?? '';
+    _baseUrlCtrl.text = savedUrl.isNotEmpty ? savedUrl : _defaultBaseUrlForKind(p?.kind ?? '');
     _apiKeyCtrl.clear();
     _feedback = null;
     _discoveredById = const <String, DiscoveredModelView>{};
@@ -2642,7 +2650,7 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
             p.id: {
               'kind': p.kind,
               'baseUrl': baseUrl,
-              'auth': {'mode': p.authMode},
+              'authMode': p.authMode,
               'models': p.models,
               if (p.modelOverrides.isNotEmpty)
                 'modelOverrides': {for (final e in p.modelOverrides.entries) e.key: e.value.toJson()},
@@ -2688,8 +2696,8 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
     });
     try {
       await widget.controller.patchSettings({
-        'llm': {
-          'apiKeys': {p.id: key},
+        'credentials': {
+          p.id: {'apiKey': key},
         },
       });
       if (!mounted) return;
@@ -2794,7 +2802,7 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
           p.id: {
             'kind': p.kind,
             if (p.baseUrl != null && p.baseUrl!.isNotEmpty) 'baseUrl': p.baseUrl,
-            'auth': {'mode': p.authMode},
+            'authMode': p.authMode,
             'models': nextModels,
             if (p.modelOverrides.isNotEmpty)
               'modelOverrides': {for (final e in p.modelOverrides.entries) e.key: e.value.toJson()},
@@ -2805,77 +2813,18 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
   }
 
   Future<void> _openAddModelDialog(ProviderSettingsView p) async {
-    final ctrl = TextEditingController();
     final added = await showDialog<String>(
       context: context,
-      builder: (ctx) {
-        final colors = ctx.colors;
-        return Dialog(
-          backgroundColor: colors.letterSurface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: BorderSide(color: colors.hairline),
-          ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 380),
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text('添加模型到 ${p.id}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep)),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: ctrl,
-                    autofocus: true,
-                    style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
-                    decoration: const InputDecoration(
-                      labelText: '模型 ID',
-                      hintText: '例如 claude-sonnet-4-5 / gpt-4.1',
-                      isDense: true,
-                    ),
-                    onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
-                  ),
-                  if (_discoveredById.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    Text('或从已拉取列表快速点选：', style: TextStyle(fontSize: 11.5, color: colors.inkQuiet)),
-                    const SizedBox(height: 6),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 150),
-                      child: SingleChildScrollView(
-                        child: Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: [
-                            for (final m in _discoveredById.values.take(24))
-                              if (!p.models.contains(m.id))
-                                ActionChip(
-                                  label: Text(m.id, style: PsyberTheme.monoStyle.copyWith(fontSize: 11)),
-                                  onPressed: () => Navigator.of(ctx).pop(m.id),
-                                ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 14),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
-                      const SizedBox(width: 8),
-                      FilledButton(onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()), child: const Text('添加')),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+      builder: (_) => _AddModelDialog(
+        provider: p,
+        controller: widget.controller,
+        initialDiscovered: _discoveredById,
+        onDiscovered: (map) {
+          if (!mounted) return;
+          setState(() => _discoveredById = map);
+        },
+      ),
     );
-    ctrl.dispose();
     if (added != null && added.isNotEmpty && !p.models.contains(added)) {
       await _updateProviderModels(p, [...p.models, added]);
     }
@@ -3084,8 +3033,10 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
                     child: TextField(
                       controller: _baseUrlCtrl,
                       style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
-                      decoration: const InputDecoration(
-                        hintText: 'https://api.example.com/v1（官方服务可留空）',
+                      decoration: InputDecoration(
+                        hintText: _defaultBaseUrlForKind(p.kind).isNotEmpty
+                            ? _defaultBaseUrlForKind(p.kind)
+                            : 'https://api.example.com/v1',
                         isDense: true,
                       ),
                     ),
@@ -3293,6 +3244,183 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
   }
 }
 
+class _AddModelDialog extends StatefulWidget {
+  const _AddModelDialog({
+    required this.provider,
+    required this.controller,
+    required this.initialDiscovered,
+    required this.onDiscovered,
+  });
+
+  final ProviderSettingsView provider;
+  final AppController controller;
+  final Map<String, DiscoveredModelView> initialDiscovered;
+  final ValueChanged<Map<String, DiscoveredModelView>> onDiscovered;
+
+  @override
+  State<_AddModelDialog> createState() => _AddModelDialogState();
+}
+
+class _AddModelDialogState extends State<_AddModelDialog> {
+  final _ctrl = TextEditingController();
+  late Map<String, DiscoveredModelView> _discovered;
+  bool _loading = false;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _discovered = Map<String, DiscoveredModelView>.from(widget.initialDiscovered);
+    if (_discovered.isEmpty) {
+      unawaited(_fetchModels());
+    }
+  }
+
+  Future<void> _fetchModels() async {
+    setState(() {
+      _loading = true;
+      _loadError = null;
+    });
+    try {
+      final list = await widget.controller.loadLlmModels(provider: widget.provider.id);
+      if (!mounted) return;
+      final map = {for (final m in list) m.id: m};
+      setState(() {
+        _discovered = map;
+        _loading = false;
+      });
+      widget.onDiscovered(map);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = '拉取模型列表失败，可直接手动输入模型 ID';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final p = widget.provider;
+    final query = _ctrl.text.trim().toLowerCase();
+    final filtered = _discovered.values
+        .where((m) => !p.models.contains(m.id))
+        .where(
+          (m) =>
+              query.isEmpty ||
+              m.id.toLowerCase().contains(query) ||
+              m.name.toLowerCase().contains(query),
+        )
+        .take(60)
+        .toList(growable: false);
+
+    return Dialog(
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '添加模型到 ${p.id}',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _ctrl,
+                autofocus: true,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: '模型 ID（支持输入关键词筛选下方列表）',
+                  hintText: '例如 gemini-decision-1 / claude-sonnet-4-5',
+                  isDense: true,
+                ),
+                onChanged: (_) => setState(() {}),
+                onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
+              ),
+              if (_loading) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(strokeWidth: 1.8),
+                    ),
+                    const SizedBox(width: 8),
+                    Text('正在拉取可用模型…', style: TextStyle(fontSize: 11.5, color: colors.inkQuiet)),
+                  ],
+                ),
+              ] else if (_loadError != null && _discovered.isEmpty) ...[
+                const SizedBox(height: 8),
+                Text(_loadError!, style: TextStyle(fontSize: 11.5, color: colors.inkQuiet)),
+              ] else if (_discovered.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '从已拉取列表点选（匹配 ${filtered.length} / ${_discovered.length}）：',
+                  style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                ),
+                const SizedBox(height: 6),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: SingleChildScrollView(
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final m in filtered)
+                          ActionChip(
+                            label: Text(m.id, style: PsyberTheme.monoStyle.copyWith(fontSize: 11)),
+                            onPressed: () => Navigator.of(context).pop(m.id),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('取消'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pop(_ctrl.text.trim()),
+                    child: const Text('添加'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _AddProviderDialog extends StatefulWidget {
   const _AddProviderDialog({required this.controller});
   final AppController controller;
@@ -3307,6 +3435,7 @@ class _AddProviderDialogState extends State<_AddProviderDialog> {
   final _apiKeyCtrl = TextEditingController();
   final _modelCtrl = TextEditingController();
   String _kind = 'openai-compat';
+  String _lastAutoBaseUrl = '';
   bool _saving = false;
   String? _err;
 
@@ -3342,12 +3471,15 @@ class _AddProviderDialogState extends State<_AddProviderDialog> {
             id: {
               'kind': _kind,
               if (_baseUrlCtrl.text.trim().isNotEmpty) 'baseUrl': _baseUrlCtrl.text.trim(),
-              'auth': {'mode': 'api_key'},
+              'authMode': 'api_key',
               if (initModel.isNotEmpty) 'models': [initModel],
             },
           },
-          if (key.isNotEmpty) 'apiKeys': {id: key},
         },
+        if (key.isNotEmpty)
+          'credentials': {
+            id: {'apiKey': key},
+          },
       });
       if (mounted) Navigator.of(context).pop(id);
     } on ApiException catch (e) {
@@ -3400,14 +3532,29 @@ class _AddProviderDialogState extends State<_AddProviderDialog> {
                   DropdownMenuItem(value: 'google', child: Text('Google Gemini')),
                 ],
                 onChanged: (v) {
-                  if (v != null) setState(() => _kind = v);
+                  if (v == null) return;
+                  setState(() {
+                    _kind = v;
+                    final nextDefault = _defaultBaseUrlForKind(v);
+                    final current = _baseUrlCtrl.text.trim();
+                    if (current.isEmpty || current == _lastAutoBaseUrl) {
+                      _baseUrlCtrl.text = nextDefault;
+                      _lastAutoBaseUrl = nextDefault;
+                    }
+                  });
                 },
               ),
               const SizedBox(height: 10),
               TextField(
                 controller: _baseUrlCtrl,
                 style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
-                decoration: const InputDecoration(labelText: '服务地址 Base URL', hintText: 'https://api.example.com/v1', isDense: true),
+                decoration: InputDecoration(
+                  labelText: '服务地址 Base URL',
+                  hintText: _defaultBaseUrlForKind(_kind).isNotEmpty
+                      ? _defaultBaseUrlForKind(_kind)
+                      : 'https://api.example.com/v1',
+                  isDense: true,
+                ),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -3515,7 +3662,7 @@ class _ModelMetadataOverrideDialogState extends State<_ModelMetadataOverrideDial
               'kind': widget.provider.kind,
               if (widget.provider.baseUrl != null && widget.provider.baseUrl!.isNotEmpty)
                 'baseUrl': widget.provider.baseUrl,
-              'auth': {'mode': widget.provider.authMode},
+              'authMode': widget.provider.authMode,
               'models': widget.provider.models,
               'modelOverrides': nextOverrides,
             },
@@ -3663,6 +3810,7 @@ class _ModelAllocationSectionState extends State<_ModelAllocationSection> {
       addSlot(snap.chatSlot);
       addSlot(snap.memoryTaskSlot);
       addSlot(snap.digestSlot);
+      addSlot(snap.decisionSlot);
       addSlot(snap.embeddingSlot);
       addSlot(snap.rerankerSlot);
       addSlot(snap.visionSlot);
@@ -3921,6 +4069,14 @@ class _ModelAllocationSectionState extends State<_ModelAllocationSection> {
                 subtitle: '睡前整理记忆卡片与日/周梗概，可选性价比更高的小模型',
                 current: snap?.memoryTaskSlot,
                 emptyLabel: '默认跟随主对话模型',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'decision',
+                title: '决策门控',
+                subtitle: '判断日/周反思触发与按轮记忆召回；推荐 Google gemini-decision-1，也可选 OpenRouter 等轻量模型',
+                current: snap?.decisionSlot,
+                emptyLabel: '默认跟随摘要/整理模型',
               ),
               Divider(height: 1, color: colors.hairline),
               buildSlotRow(

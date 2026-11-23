@@ -59,9 +59,9 @@ const MAX_TIDY_STEPS = 12;
 
 const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
   daily_wrapup:
-    "我整理游标后的近期对话：在 episodes/YYYY/MM/DD/ep-<slug>.md 记录值得留存的情景切片（一事一卡、500–800 字内；已收进 threads/、favorite/、entities/ 的只留一句钩子 + 链接），若有值得留痕的心路或观念变化，在同目录写 rf-<slug>.md 并按作用范围把成果分流到 core/、threads/、lessons/ 或 core/open.md；若聊天中出现新的短期状态或恢复/变更，同步更新 core/state.md（带 [至 YYYY-MM-DD] 到期日与出处链接）；若明说相处边界、承诺或重要原话，按需更新 core/boundaries.md、core/open.md 或 favorite/；若识别出反复出现的跨天内容线或实体，对照 threads/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。本轮不写 index.md 梗概。",
+    "我整理游标后的近期对话，只负责事实与归档：① 在 episodes/YYYY/MM/DD/ep-<slug>.md 记录值得留存的情景切片（一事一卡、500–800 字内；已收进 threads/、favorite/、entities/ 的只留一句钩子 + 链接）；② 若聊天中出现新的短期状态或恢复/变更，同步更新 core/state.md（带 [至 YYYY-MM-DD] 到期日与出处链接）；③ 若出现值得逐字留存的重要原话或附件，收进 favorite/；④ 若识别出反复出现的跨天内容线或实体，对照 threads/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。本轮不写 index.md 梗概，也不写 rf-*.md 反思或修改 core/mirror.md、core/boundaries.md、core/open.md、lessons/。",
   bedtime:
-    "我回顾今日已整理的卡片摘要、剩余未整理片段与现行 core/ 文件：① 按 <tidy_context> 指定路径直接 write 今日日梗概 episodes/YYYY/MM/DD/index.md（150–250 字，上限 300 字，只留主题脉络、情绪/关系变化与挂念）；参照 <tidy_context> 中的时间梗概水位，由我自己判断是否需要把较早的日梗概滚入 episodes/YYYY/MM/index.md（≤ 600 字，frontmatter 必填 covered_until: YYYY-MM-DD），或把较早的月梗概滚入 episodes/YYYY/index.md（≤ 1000 字，frontmatter 必填 covered_until: YYYY-MM）；水位接近或达到软提醒线（80%）时优先收拢腾出空间，充裕时想保留最近几天的日梗概可直接留着不滚；② 对照 core/state.md 清理已恢复或 [至 YYYY-MM-DD] 已过期的条目，并清理 core/open.md 中已闭环或久无下文的线索；③ 若今日反思（rf-*.md）或跨天反馈已经沉淀出清晰成果，克制地分流：全局结论局部 edit 到 core/boundaries.md、core/mirror.md（单条 ≤ 80 字 + 挂 rf- 链接）、core/self.md（定名/自定代词同步改 name/pronoun）或 core/user.md（更新称呼同步改 name，对方代词已在初始化时写好无需修改），有场景限制的写进对应 threads/、entities/ 或 lessons/（必填 when_to_recall）；④ 兜底补记值得逐字保留的原话到 favorite/。",
+    "我回顾今日已整理的卡片摘要、剩余未整理片段与现行 core/state.md：① 按 <tidy_context> 指定路径直接 write 今日日梗概 episodes/YYYY/MM/DD/index.md（150–250 字，上限 300 字，只留主题脉络、情绪/关系变化与挂念）；参照 <tidy_context> 中的时间梗概水位，由我自己判断是否需要把较早的日梗概滚入 episodes/YYYY/MM/index.md（≤ 600 字，frontmatter 必填 covered_until: YYYY-MM-DD），或把较早的月梗概滚入 episodes/YYYY/index.md（≤ 1000 字，frontmatter 必填 covered_until: YYYY-MM）；水位接近或达到软提醒线（80%）时优先收拢腾出空间，充裕时想保留最近几天的日梗概可直接留着不滚；② 对照 core/state.md 清理已恢复或 [至 YYYY-MM-DD] 已过期的条目；③ 兜底补记值得逐字保留的原话到 favorite/，或补齐遗漏的 threads/、entities/ 归档。本轮不做深度反思，不写 rf-*.md，也不修改 core/mirror.md、core/boundaries.md、core/open.md 或 lessons/。",
 };
 
 async function readOptional(absPath: string): Promise<string | null> {
@@ -117,7 +117,7 @@ function buildTidyContextBlock(opts: {
     "<tidy_context>",
     `当前日期：${opts.targetDay}（${weekday}）`,
     `任务类型：${opts.taskType}`,
-    `今日情景目录：${dayDir}/（切片 ep-<slug>.md，反思 rf-<slug>.md）`,
+    `今日情景目录：${dayDir}/（切片 ep-<slug>.md）`,
   ];
   if (opts.taskType === "bedtime") {
     lines.push(`日梗概目标：${dayDir}/index.md（单日 150–250 字，上限 300 字）`);
@@ -176,24 +176,13 @@ function getBedtimeLastRunAt(db: Database, nowMs: number, timeZone: string): num
   return localDateStartMs(localDay(nowMs, timeZone), timeZone);
 }
 
-/** 读取现行 core/ 四份常驻文件供整理轮防重与状态对账（采用尾部保留防最新条目被截断） */
+/** 读取现行 core/state.md 供高频整理轮进行短期状态对账（采用尾部保留防最新条目被截断） */
 async function buildCoreSummaryMaterial(memoryDir: string): Promise<string | null> {
-  const coreFiles = [
-    "core/state.md",
-    "core/boundaries.md",
-    "core/open.md",
-    "core/mirror.md",
-  ] as const;
-  const parts: string[] = [];
-  for (const rel of coreFiles) {
-    const raw = await readOptional(path.join(memoryDir, rel));
-    if (!raw) continue;
-    const body = stripFrontmatter(raw).trim();
-    if (!body) continue;
-    parts.push(`## ${rel}\n${tailSlice(body, 1500)}`);
-  }
-  if (parts.length === 0) return null;
-  return `# 现行 core/ 常驻记录（防重复写入与状态对账）\n${parts.join("\n\n")}`;
+  const raw = await readOptional(path.join(memoryDir, "core/state.md"));
+  if (!raw) return null;
+  const body = stripFrontmatter(raw).trim();
+  if (!body) return null;
+  return `# 现行 core/state.md（短期状态对账）\n${tailSlice(body, 1500)}`;
 }
 
 /** 执行单批整理写作轮（内部复用，严格校验沙箱路径后再记录内存回滚备份） */
@@ -598,7 +587,7 @@ export async function runMemoryTidyTask(
         (r.updated_at >= sinceMs || allTouched.has(r.path)) &&
         (r.space === "episodes" ||
           r.space.startsWith("thread:") ||
-          r.space === "lessons" ||
+          r.space.startsWith("entity:") ||
           r.space === "favorite"),
     );
   if (recentCards.length > 0) {

@@ -24,8 +24,9 @@ import {
   type ChatStreamChunk,
   type ChatStreamRequest,
 } from "./client.ts";
+import { GeminiDecisionClient, isGeminiDecisionModel } from "./decision.ts";
 
-export type LlmSlotName = "chat" | "memory_task";
+export type LlmSlotName = "chat" | "memory_task" | "digest" | "decision";
 
 export type ProviderKind = "anthropic" | "openai" | "google" | "openai-compat";
 
@@ -135,7 +136,10 @@ function resolveModelRef(
 }
 
 /**
- * 按当前配置与 0600 凭证解析目标槽位（memory_task 缺省自动共用 chat 槽位）。
+ * 按当前配置与 0600 凭证解析目标槽位：
+ * - memory_task 缺省共用 chat
+ * - digest 缺省回落 memory_task -> chat
+ * - decision 缺省回落 digest -> memory_task -> chat
  */
 export function resolveByokSlot(
   config: PsyberConfig,
@@ -143,7 +147,14 @@ export function resolveByokSlot(
   slot: LlmSlotName = "chat",
 ): ResolveSlotResult {
   const slots = config.llm?.slots;
-  const ref = slot === "memory_task" ? (slots?.memory_task ?? slots?.chat) : slots?.chat;
+  const ref =
+    slot === "decision"
+      ? (slots?.decision ?? slots?.digest ?? slots?.memory_task ?? slots?.chat)
+      : slot === "digest"
+        ? (slots?.digest ?? slots?.memory_task ?? slots?.chat)
+        : slot === "memory_task"
+          ? (slots?.memory_task ?? slots?.chat)
+          : slots?.chat;
   return resolveModelRef(config, creds, ref);
 }
 
@@ -379,13 +390,97 @@ export async function discoverProviderModels(
       }
     }
     if (p.kind === "anthropic" || p.kind === "openai" || p.kind === "google") {
+      const apiKey = creds.apiKeys[providerId]?.trim() ?? "";
+      // 若已配置 API Key，优先拉取官网实时 /models 列表（5s 超时，失败静默回落内置目录）
+      if (apiKey) {
+        try {
+          if (p.kind === "google") {
+            const base = (p.baseUrl?.trim() || "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
+            const url = `${base}/models?pageSize=200`;
+            const res = await fetchImpl(url, {
+              headers: { "x-goog-api-key": apiKey },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              const json = (await res.json()) as {
+                models?: Array<{
+                  name?: string;
+                  displayName?: string;
+                  inputTokenLimit?: number;
+                  outputTokenLimit?: number;
+                  supportedGenerationMethods?: string[];
+                }>;
+              };
+              if (Array.isArray(json.models)) {
+                for (const m of json.models) {
+                  const rawName = typeof m?.name === "string" ? m.name.trim() : "";
+                  if (!rawName) continue;
+                  const id = rawName.replace(/^models\//, "");
+                  if (!id) continue;
+                  addUnique(
+                    enrich(providerId, id, {
+                      name: m.displayName?.trim() || id,
+                      contextWindow: m.inputTokenLimit,
+                      maxTokens: m.outputTokenLimit,
+                      source: "catalog",
+                    }),
+                  );
+                }
+              }
+            }
+          } else if (p.kind === "openai") {
+            const base = (p.baseUrl?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
+            const res = await fetchImpl(`${base}/models`, {
+              headers: { authorization: `Bearer ${apiKey}` },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              const json = (await res.json()) as { data?: Array<{ id?: string }> };
+              if (Array.isArray(json.data)) {
+                for (const item of json.data.slice(0, 150)) {
+                  if (typeof item?.id === "string" && item.id.trim()) {
+                    addUnique(enrich(providerId, item.id.trim()));
+                  }
+                }
+              }
+            }
+          } else if (p.kind === "anthropic") {
+            const base = (p.baseUrl?.trim() || "https://api.anthropic.com").replace(/\/+$/, "");
+            const url = base.endsWith("/v1") ? `${base}/models?limit=100` : `${base}/v1/models?limit=100`;
+            const res = await fetchImpl(url, {
+              headers: {
+                "x-api-key": apiKey,
+                "anthropic-version": "2023-06-01",
+              },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              const json = (await res.json()) as { data?: Array<{ id?: string; display_name?: string }> };
+              if (Array.isArray(json.data)) {
+                for (const item of json.data) {
+                  if (typeof item?.id === "string" && item.id.trim()) {
+                    addUnique(
+                      enrich(providerId, item.id.trim(), {
+                        name: item.display_name?.trim() || item.id.trim(),
+                      }),
+                    );
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          // 网络受限或网关不支持 /models 时静默回落 pi-ai 内置目录
+        }
+      }
+
       const models = createModels();
       if (p.kind === "anthropic") models.setProvider(anthropicProvider());
       else if (p.kind === "openai") models.setProvider(openaiProvider());
       else models.setProvider(googleProvider());
 
       const list = models.getModels(p.kind);
-      for (const m of list.slice(0, 40)) {
+      for (const m of list) {
         addUnique(
           enrich(providerId, m.id, {
             name: m.name || m.id,
@@ -397,6 +492,22 @@ export async function discoverProviderModels(
             source: "pi-ai",
           }),
         );
+      }
+      if (p.kind === "google") {
+        addUnique({
+          id: "gemini-decision-1",
+          name: "Gemini Decision 1 (Decisions API)",
+          provider: providerId,
+          contextWindow: 262_144,
+          maxTokens: 0,
+          inputModalities: ["text", "image", "audio", "video"],
+          outputModalities: ["decision"],
+          reasoning: false,
+          toolCall: false,
+          cost: { input: 0.1, output: 0 },
+          source: "fallback",
+          thinkingLevels: ["off"],
+        });
       }
     } else if (p.kind === "openai-compat" && p.baseUrl) {
       const apiKey = creds.apiKeys[providerId]?.trim() ?? "";
@@ -430,6 +541,7 @@ export async function discoverProviderModels(
     ...(slots?.fallbacks ?? []),
     ...(slots?.memory_task ? [slots.memory_task] : []),
     ...(slots?.digest ? [slots.digest] : []),
+    ...(slots?.decision ? [slots.decision] : []),
     ...(slots?.vision ? [slots.vision] : []),
     ...(slots?.embedding ? [slots.embedding] : []),
     ...(slots?.reranker ? [slots.reranker] : []),
@@ -454,6 +566,7 @@ export async function testModelConnection(opts: {
   providerId: string;
   modelId: string;
   clientFactory?: (resolved: ResolvedByokSlot) => ChatModelClient;
+  fetchImpl?: typeof fetch;
 }): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const start = Date.now();
   const resolved = resolveModelRef(opts.config, opts.creds, {
@@ -463,6 +576,27 @@ export async function testModelConnection(opts: {
   });
   if (!resolved.ok) {
     return { ok: false, latencyMs: Date.now() - start, error: resolved.reason };
+  }
+  if (resolved.slot.kind === "google" && isGeminiDecisionModel(resolved.slot.modelId)) {
+    const decisionClient = new GeminiDecisionClient({
+      apiKey: resolved.slot.apiKey,
+      modelId: resolved.slot.modelId,
+      baseUrl: resolved.slot.baseUrl,
+      fetchImpl: opts.fetchImpl,
+    });
+    try {
+      await decisionClient.decide({
+        input: "ping",
+        questions: { ok: { type: "noul", instructions: "Is this a ping message?" } },
+      });
+      return { ok: true, latencyMs: Date.now() - start };
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : "Decisions API 连通测试失败",
+      };
+    }
   }
   const client = (opts.clientFactory ?? buildPiAiChatClient)(resolved.slot);
   const ac = new AbortController();

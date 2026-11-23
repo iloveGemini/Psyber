@@ -141,6 +141,8 @@ export interface LlmConfig {
     fallbacks?: ModelRef[];
     memory_task?: ModelRef;
     digest?: ModelRef;
+    /** 轻量决策门控槽位（推荐 Google gemini-decision-1；用于日/周反思门控及后续按轮召回判定） */
+    decision?: ModelRef;
     vision?: ModelRef;
     embedding?: ModelRef;
     reranker?: ModelRef;

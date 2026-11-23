@@ -130,3 +130,56 @@ export async function recoverUncommittedTrackedCards(
     "recovery(memory): preserve uncommitted changes on startup",
   );
 }
+
+/** 获取 memory/.git 当前 HEAD commit hash；尚未有任何提交时返回 null */
+export async function getMemoryHeadCommit(dataDir: string): Promise<string | null> {
+  const memoryDir = path.join(dataDir, "memory");
+  const res = await runGit(memoryDir, ["rev-parse", "--verify", "HEAD"]);
+  if (res.code !== 0) return null;
+  const hash = res.stdout.trim();
+  return hash.length > 0 ? hash : null;
+}
+
+/**
+ * 列出自 sinceCommit 以来在 memory/ 中发生变更（新增/修改/重命名/删除）的相对路径。
+ * - 若 sinceCommit 为 null 或仓库中不存在该提交，则退化为列出当前已跟踪的全部文件（git ls-files）。
+ * - 若 sinceCommit === HEAD，直接返回空数组。
+ */
+export async function listChangedMemoryPathsSince(
+  dataDir: string,
+  sinceCommit: string | null,
+): Promise<string[]> {
+  const memoryDir = path.join(dataDir, "memory");
+  const head = await getMemoryHeadCommit(dataDir);
+  if (!head) return [];
+
+  if (sinceCommit && sinceCommit === head) {
+    return [];
+  }
+
+  if (sinceCommit) {
+    const verify = await runGit(memoryDir, ["cat-file", "-e", `${sinceCommit}^{commit}`]);
+    if (verify.code === 0) {
+      const diff = await runGit(memoryDir, [
+        "-c",
+        "core.quotepath=false",
+        "diff",
+        "--name-only",
+        `${sinceCommit}..HEAD`,
+      ]);
+      if (diff.code === 0) {
+        return diff.stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+  }
+
+  const ls = await runGit(memoryDir, ["-c", "core.quotepath=false", "ls-files"]);
+  if (ls.code !== 0) return [];
+  return ls.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}

@@ -24,6 +24,13 @@ import { MediaStore } from "./core/media.ts";
 import { AsyncMutex } from "./core/mutex.ts";
 import { ulid } from "./core/ulid.ts";
 import { DirectEngine } from "./engine/direct.ts";
+import {
+  evaluateAndRunReflect,
+  maybeRunReflectAfterBedtime,
+  type DecisionClient,
+  type ReflectScope,
+  type ReflectTaskOutcome,
+} from "./engine/reflect.ts";
 import { SseHub } from "./engine/sse.ts";
 import {
   runMemoryTidyTask,
@@ -34,6 +41,7 @@ import { syncStaticStickers } from "./expression/stickers.ts";
 import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import { ModelCatalogService } from "./llm/catalog.ts";
 import type { ChatModelClient } from "./llm/client.ts";
+import { DynamicDecisionClient, LlmFallbackDecisionClient } from "./llm/decision.ts";
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
 import { readIdentityProfile } from "./memory/genesis.ts";
@@ -69,6 +77,8 @@ export interface BootOptions {
   clock?: Clock;
   /** 可注入对话模型客户端，供离线测试阻断外网调用 */
   chatModel?: ChatModelClient;
+  /** 可注入决策模型客户端（供离线测试验证反思门控） */
+  decisionClient?: DecisionClient;
   /** 可注入桌面通知发送器，供离线测试阻断系统弹窗 */
   desktopSender?: (payload: NotificationPayload) => Promise<void>;
   /** 可注入 fetch 实现，供离线测试阻断外网请求 */
@@ -106,6 +116,8 @@ export interface PsyberRuntime {
   tickHeartbeat: () => Promise<HeartbeatDecision>;
   /** 将异步记忆整理任务排入单队列（自动去重，不阻塞前台对话） */
   enqueueTidy: (taskType: TidyTaskType, nightDate?: string) => Promise<TidyTaskOutcome | null>;
+  /** 手动触发一次日/周深度反思门控与执行（用于测试或 CLI 调试） */
+  triggerReflect: (scope: ReflectScope, targetDay?: string) => Promise<ReflectTaskOutcome>;
   /** 手动触发一次 SQLite VACUUM INTO 本地日原子热备 */
   triggerBackup: () => Promise<string | null>;
   /** 等待当前队列中的异步整理与备份任务收尾 */
@@ -206,6 +218,16 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       slot: "memory_task",
       catalog: modelCatalog,
     });
+  const decisionClient: DecisionClient =
+    opts.decisionClient ??
+    (opts.chatModel
+      ? new LlmFallbackDecisionClient(opts.chatModel, "injected-chat-model")
+      : new DynamicDecisionClient({
+          dataDir,
+          getConfig: () => config,
+          catalog: modelCatalog,
+          fetchImpl: opts.fetchImpl,
+        }));
 
   // 运行时作息与异步队列状态
   let lastBedtimeNightDate = events.getBedtimeNightDate();
@@ -311,7 +333,33 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           }
           if (taskType === "bedtime" && res.ok && targetNight) {
             lastBedtimeNightDate = targetNight;
-            // Spec 05 §4.1：bedtime 睡前整理完成后自动触发一次 VACUUM INTO 本地日原子热备
+            // 睡前整理完成后按 Git 变更 + Decision 门控自动评估日反思与周日回顾反思
+            const reflectRes = await maybeRunReflectAfterBedtime(
+              {
+                db,
+                dataDir,
+                promptsDir,
+                clock,
+                memoryIndex,
+                memoryTools,
+                chatModel: tidyModel,
+                decisionClient,
+                getConfig: () => config,
+              },
+              { targetDay: targetNight },
+            );
+            const reflectTouched = [
+              ...reflectRes.daily.touchedMemoryPaths,
+              ...(reflectRes.weekly?.touchedMemoryPaths ?? []),
+            ];
+            if (
+              reflectTouched.includes("core/self.md") ||
+              reflectTouched.includes("core/user.md")
+            ) {
+              const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
+              sse.emit("identity.updated", { ...identity });
+            }
+            // Spec 05 §4.1：bedtime 睡前整理与反思完成后自动触发一次 VACUUM INTO 本地日原子热备
             await triggerBackup();
             bedtimeDigestedEventId = res.lastProcessedEventId;
             shouldNotifyBedtimeDone = true;
@@ -562,6 +610,23 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     engine,
     tickHeartbeat,
     enqueueTidy,
+    triggerReflect: (scope: ReflectScope, targetDay?: string) =>
+      tidyMutex.runExclusive(() =>
+        evaluateAndRunReflect(
+          {
+            db,
+            dataDir,
+            promptsDir,
+            clock,
+            memoryIndex,
+            memoryTools,
+            chatModel: tidyModel,
+            decisionClient,
+            getConfig: () => config,
+          },
+          { scope, targetDay },
+        ),
+      ),
     triggerBackup,
     waitForIdle,
     stop,

@@ -460,7 +460,10 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       notifications?: Partial<NotificationsConfig>;
       notificationSecrets?: { barkDeviceKey?: string; ntfyToken?: string };
       recall?: Partial<RecallConfig>;
-      llm?: Partial<LlmConfig> & { deleteProviderIds?: string[] };
+      llm?: Partial<LlmConfig> & {
+        deleteProviderIds?: string[];
+        apiKeys?: Record<string, string>;
+      };
       credentials?: Record<string, { apiKey?: string }>;
       mcpServers?: McpServerConfig[];
       mcpSecrets?: Record<string, string>;
@@ -634,6 +637,15 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         for (const [provider, entry] of Object.entries(body.credentials)) {
           if (entry && typeof entry.apiKey === "string" && entry.apiKey.trim()) {
             creds.apiKeys[provider] = entry.apiKey.trim();
+            credsChanged = true;
+          }
+        }
+      }
+      // 兼容客户端通过 llm.apiKeys 扁平字典提交的 API Key
+      if (body.llm?.apiKeys && typeof body.llm.apiKeys === "object") {
+        for (const [provider, rawKey] of Object.entries(body.llm.apiKeys)) {
+          if (typeof rawKey === "string" && rawKey.trim()) {
+            creds.apiKeys[provider] = rawKey.trim();
             credsChanged = true;
           }
         }
@@ -824,6 +836,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       clientFactory:
         deps.llmTestClientFactory ??
         ((resolved) => buildPiAiChatClient(resolved, deps.modelCatalog)),
+      fetchImpl: deps.fetchImpl,
     });
     return c.json(result);
   });

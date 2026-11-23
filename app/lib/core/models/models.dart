@@ -1316,6 +1316,7 @@ class SettingsSnapshot {
     this.fallbackSlots = const <ModelSlotView>[],
     this.memoryTaskSlot,
     this.digestSlot,
+    this.decisionSlot,
     this.embeddingSlot,
     this.rerankerSlot,
     this.visionSlot,
@@ -1352,6 +1353,7 @@ class SettingsSnapshot {
   final List<ModelSlotView> fallbackSlots;
   final ModelSlotView? memoryTaskSlot;
   final ModelSlotView? digestSlot;
+  final ModelSlotView? decisionSlot;
   final ModelSlotView? embeddingSlot;
   final ModelSlotView? rerankerSlot;
   final ModelSlotView? visionSlot;
@@ -1474,6 +1476,7 @@ class SettingsSnapshot {
       fallbackSlots: fallbackSlots,
       memoryTaskSlot: parseSlot('memory_task'),
       digestSlot: parseSlot('digest'),
+      decisionSlot: parseSlot('decision'),
       embeddingSlot: parseSlot('embedding'),
       rerankerSlot: parseSlot('reranker'),
       visionSlot: parseSlot('vision'),

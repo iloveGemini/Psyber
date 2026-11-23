@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "pair": "bun run src/index.ts --pair",
+    "replay": "bun run scripts/replay.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

@@ -37,10 +37,30 @@ class _GenesisPageState extends State<GenesisPage> {
   String? _error;
 
   static const _providers = [
-    (id: 'openai', label: 'OpenAI', hintModel: 'gpt-4o'),
-    (id: 'anthropic', label: 'Anthropic', hintModel: 'claude-sonnet-4-5'),
-    (id: 'google', label: 'Google', hintModel: 'gemini-2.5-flash'),
-    (id: 'openai-compat', label: 'OpenAI 兼容', hintModel: 'deepseek-chat'),
+    (
+      id: 'openai',
+      label: 'OpenAI',
+      hintModel: 'gpt-4o',
+      defaultUrl: 'https://api.openai.com/v1',
+    ),
+    (
+      id: 'anthropic',
+      label: 'Anthropic',
+      hintModel: 'claude-sonnet-4-5',
+      defaultUrl: 'https://api.anthropic.com',
+    ),
+    (
+      id: 'google',
+      label: 'Google',
+      hintModel: 'gemini-2.5-flash',
+      defaultUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    ),
+    (
+      id: 'openai-compat',
+      label: 'OpenAI 兼容',
+      hintModel: 'deepseek-chat',
+      defaultUrl: '',
+    ),
   ];
 
   @override
@@ -289,7 +309,9 @@ class _GenesisPageState extends State<GenesisPage> {
                                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                               ),
                               child: Text(
-                                _showCustomBaseUrl ? '收起自定义接口地址' : '使用自定义 Base URL',
+                                _showCustomBaseUrl
+                                    ? '收起自定义接口地址'
+                                    : '使用自定义 Base URL（默认 ${activeMeta.defaultUrl}）',
                                 style: const TextStyle(fontSize: 12),
                               ),
                             ),
@@ -304,8 +326,10 @@ class _GenesisPageState extends State<GenesisPage> {
                             decoration: InputDecoration(
                               labelText: _providerKind == 'openai-compat'
                                   ? '自定义接口地址 Base URL（必填）'
-                                  : '自定义接口地址 Base URL（可选）',
-                              hintText: 'https://api.example.com/v1',
+                                  : '自定义接口地址 Base URL（留空使用官方默认）',
+                              hintText: activeMeta.defaultUrl.isNotEmpty
+                                  ? activeMeta.defaultUrl
+                                  : 'https://api.example.com/v1',
                             ),
                           ),
                         ],
