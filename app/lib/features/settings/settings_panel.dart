@@ -12,6 +12,7 @@ import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
 import '../../core/notifications/local_notifier.dart';
 import '../../core/state/app_controller.dart';
+import '../../shared/qr_code_view.dart';
 import '../../shared/theme.dart';
 
 /// 设置分组：服务商池与模型槽位拆分，辅以用量、作息、外观、全量工具/设备与关于数据。
@@ -1576,6 +1577,36 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
                 ],
                 Divider(height: 1, color: colors.hairline),
               ],
+              ListTile(
+                key: const Key('pair_new_device_qr_button'),
+                leading: Icon(
+                  PhosphorIconsLight.qrCode,
+                  size: 18,
+                  color: colors.inkDeep,
+                ),
+                title: Text(
+                  '配对新设备（扫码 / 配对码）',
+                  style: TextStyle(fontSize: 13.5, color: colors.inkDeep),
+                ),
+                subtitle: Text(
+                  '生成 5 分钟有效的一次性二维码供手机扫码直连',
+                  style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                ),
+                trailing: Icon(
+                  PhosphorIconsLight.caretRight,
+                  size: 15,
+                  color: colors.inkFaint,
+                ),
+                onTap: () => unawaited(
+                  showDialog<void>(
+                    context: context,
+                    builder: (_) => _PairNewDeviceQrDialog(
+                      controller: widget.controller,
+                    ),
+                  ),
+                ),
+              ),
+              Divider(height: 1, color: colors.hairline),
               ListTile(
                 key: const Key('disconnect_device_button'),
                 leading: Icon(
@@ -4702,6 +4733,241 @@ class _AboutDataSectionState extends State<_AboutDataSection> {
           Text(_syncMsg!, style: TextStyle(fontSize: 12, color: colors.inkQuiet)),
         ],
       ],
+    );
+  }
+}
+
+/// 已配对设备端展示的「配对新设备」二维码弹窗（5 分钟一次性配对码 + 候选局域网地址）。
+class _PairNewDeviceQrDialog extends StatefulWidget {
+  const _PairNewDeviceQrDialog({required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_PairNewDeviceQrDialog> createState() => _PairNewDeviceQrDialogState();
+}
+
+class _PairNewDeviceQrDialogState extends State<_PairNewDeviceQrDialog> {
+  IssuedPairCodeView? _issued;
+  bool _loading = true;
+  String? _error;
+  String? _copiedHint;
+  Timer? _countdownTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_issue());
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _issue() async {
+    _countdownTimer?.cancel();
+    setState(() {
+      _loading = true;
+      _error = null;
+      _copiedHint = null;
+    });
+    try {
+      final res = await widget.controller.issueNewDevicePairCode();
+      if (!mounted) return;
+      if (res == null) {
+        setState(() {
+          _loading = false;
+          _error = '当前未连接到服务端';
+        });
+        return;
+      }
+      setState(() {
+        _issued = res;
+        _loading = false;
+      });
+      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '生成配对二维码失败，请确认服务端在线';
+      });
+    }
+  }
+
+  String _formatRemaining(int expiresAtMs) {
+    final diffSec =
+        ((expiresAtMs - DateTime.now().millisecondsSinceEpoch) / 1000).ceil();
+    if (diffSec <= 0) return '已过期，请重新生成';
+    final min = diffSec ~/ 60;
+    final sec = diffSec % 60;
+    return '剩余 ${min.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _copy(String label, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!mounted) return;
+    setState(() => _copiedHint = '已复制$label');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final issued = _issued;
+
+    return Dialog(
+      key: const Key('pair_new_device_qr_dialog'),
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    '扫码配对新设备',
+                    style: PsyberTheme.editorialSerif.copyWith(
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.w500,
+                      color: colors.inkDeep,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(PhosphorIconsLight.x, size: 17),
+                    constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                    padding: EdgeInsets.zero,
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '用手机端 Psyber 扫描二维码即可自动填入地址并完成一次性绑定，二维码不含长期密钥。',
+                style: TextStyle(fontSize: 12, color: colors.inkQuiet, height: 1.45),
+              ),
+              const SizedBox(height: 14),
+              if (_loading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 48),
+                  child: Center(
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                )
+              else if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(fontSize: 12.5, color: colors.dangerInk),
+                  ),
+                )
+              else if (issued != null) ...[
+                Center(
+                  child: QrCodeView(
+                    key: const Key('pair_qr_code_view'),
+                    data: issued.qrPayload,
+                    size: 196,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Center(
+                  child: Text(
+                    issued.code,
+                    key: const Key('pair_qr_code_text'),
+                    style: PsyberTheme.monoStyle.copyWith(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 2.2,
+                      color: colors.inkDeep,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Center(
+                  child: Text(
+                    _formatRemaining(issued.expiresAt),
+                    style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                  ),
+                ),
+                if (issued.urls.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '候选地址：${issued.urls.join(' · ')}',
+                    textAlign: TextAlign.center,
+                    style: PsyberTheme.monoStyle.copyWith(
+                      fontSize: 11,
+                      color: colors.inkQuiet,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                if (_copiedHint != null) ...[
+                  const SizedBox(height: 6),
+                  Center(
+                    child: Text(
+                      _copiedHint!,
+                      style: TextStyle(fontSize: 11.5, color: colors.statusSuccess),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => unawaited(_copy('配对码', issued.code)),
+                        child: const Text('复制配对码', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => unawaited(_copy('二维码内容', issued.qrPayload)),
+                        child: const Text('复制二维码内容', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton.icon(
+                    onPressed: _loading ? null : () => unawaited(_issue()),
+                    icon: const Icon(PhosphorIconsLight.arrowClockwise, size: 15),
+                    label: const Text('重新生成', style: TextStyle(fontSize: 12.5)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -29,6 +29,7 @@ import {
 } from "../memory/genesis.ts";
 import type { AppDeps } from "./app.ts";
 import { hashBearerToken } from "./app.ts";
+import { buildPairQrPayload, normalizeClientIp } from "./pairing.ts";
 
 const HH_MM_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
 
@@ -211,6 +212,40 @@ function validateNotificationsPatch(patch: Partial<NotificationsConfig>): string
 
 /** 注册配对、创世引导、媒体仓与脱敏设置子路由，避免 app.ts 单文件发散膨胀 */
 export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
+  const resolveClientIp = (req: Request, xff?: string): string =>
+    normalizeClientIp(
+      deps.getClientIp?.(req) ??
+        (deps.trustProxy ? xff?.split(",")[0]?.trim() : undefined) ??
+        "direct",
+    );
+
+  const persistPairedDevice = async (info: {
+    deviceId: string;
+    token: string;
+    deviceName: string;
+    platform: string;
+  }) => {
+    const cfg = deps.getConfig();
+    const now = deps.clock.now();
+    cfg.auth.devices.push({
+      deviceId: info.deviceId,
+      tokenHash: hashBearerToken(info.token),
+      deviceName: info.deviceName.trim(),
+      platform: info.platform.trim(),
+      createdAt: now,
+      lastSeenAt: now,
+    });
+    if (deps.dataDir) {
+      await saveConfig(deps.dataDir, cfg);
+    }
+    return {
+      deviceId: info.deviceId,
+      token: info.token,
+      instanceId: cfg.instanceId,
+      serverVersion: deps.version,
+    };
+  };
+
   // 一次性配对码兑换长期 Bearer Token（免鉴权，默认不信任可伪造的 x-forwarded-for）
   app.post("/api/v1/auth/pair", async (c) => {
     if (!deps.pairing) {
@@ -226,34 +261,64 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       return c.json({ error: { code: "INVALID_PAIR_REQUEST", message: "缺少 code、deviceName 或 platform" } }, 400);
     }
 
-    const clientIp =
-      deps.getClientIp?.(c.req.raw) ??
-      (deps.trustProxy ? c.req.header("x-forwarded-for")?.split(",")[0]?.trim() : undefined) ??
-      "direct";
+    const clientIp = resolveClientIp(c.req.raw, c.req.header("x-forwarded-for"));
     const res = deps.pairing.verifyAndConsume(body.code, clientIp);
     if (!res.ok) {
       return c.json({ error: { code: res.code, message: res.message } }, res.status);
     }
 
-    const cfg = deps.getConfig();
-    const now = deps.clock.now();
-    cfg.auth.devices.push({
-      deviceId: res.deviceId,
-      tokenHash: hashBearerToken(res.token),
-      deviceName: body.deviceName.trim(),
-      platform: body.platform.trim(),
-      createdAt: now,
-      lastSeenAt: now,
-    });
-    if (deps.dataDir) {
-      await saveConfig(deps.dataDir, cfg);
-    }
+    return c.json(
+      await persistPairedDevice({
+        deviceId: res.deviceId,
+        token: res.token,
+        deviceName: body.deviceName,
+        platform: body.platform,
+      }),
+    );
+  });
 
+  // 仅限本机桌面端免码配对：严格要求来源为回环 IP、无浏览器 Origin 头且携带 0600 local_pair.json 中的启动密钥
+  app.post("/api/v1/auth/local-pair", async (c) => {
+    if (!deps.pairing) {
+      return c.json({ error: { code: "PAIRING_UNAVAILABLE", message: "当前未启用配对服务" } }, 503);
+    }
+    let body: { secret?: string; deviceName?: string; platform?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    if (!body.secret || !body.deviceName || !body.platform) {
+      return c.json({ error: { code: "INVALID_PAIR_REQUEST", message: "缺少 secret、deviceName 或 platform" } }, 400);
+    }
+    const clientIp = resolveClientIp(c.req.raw, c.req.header("x-forwarded-for"));
+    const res = deps.pairing.verifyLocalSecret(body.secret, clientIp);
+    if (!res.ok) {
+      return c.json({ error: { code: res.code, message: res.message } }, res.status);
+    }
+    return c.json(
+      await persistPairedDevice({
+        deviceId: res.deviceId,
+        token: res.token,
+        deviceName: body.deviceName,
+        platform: body.platform,
+      }),
+    );
+  });
+
+  // 已配对设备签发新设备一次性配对码与扫码二维码载荷（需 Bearer Token 鉴权）
+  app.post("/api/v1/auth/pair-code", (c) => {
+    if (!deps.pairing) {
+      return c.json({ error: { code: "PAIRING_UNAVAILABLE", message: "当前未启用配对服务" } }, 503);
+    }
+    const issued = deps.pairing.issueCode();
+    const urls = deps.getPairUrls?.() ?? [];
+    const qrPayload = buildPairQrPayload(urls, issued.code);
     return c.json({
-      deviceId: res.deviceId,
-      token: res.token,
-      instanceId: cfg.instanceId,
-      serverVersion: deps.version,
+      code: issued.code,
+      expiresAt: issued.expiresAt,
+      urls,
+      qrPayload,
     });
   });
 
@@ -619,6 +684,8 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         body.revokeDeviceIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0),
       );
       cfg.auth.devices = (cfg.auth.devices ?? []).filter((d) => !toRevoke.has(d.deviceId));
+      // 对齐 Spec 04 §1.1：吊销设备后立即踢断其全部活跃 SSE 长连接
+      deps.sse?.disconnectDevices(toRevoke);
     }
 
     let creds: StoredCredentials = { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };

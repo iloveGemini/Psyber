@@ -37,6 +37,8 @@ type Listener = (frame: SseFrame) => void;
 interface SubscriptionMeta {
   listener: Listener;
   foreground: boolean;
+  deviceId?: string;
+  onClose?: () => void;
 }
 
 export interface SseReplayResult {
@@ -46,22 +48,67 @@ export interface SseReplayResult {
 }
 
 /**
- * SSE 广播中心：支持实时广播、前后台连接计数，以及 500 帧内存环形缓冲（streamSeq 断线续传 / sync.reset）。
+ * SSE 广播中心：支持实时广播、前后台连接计数、按设备吊销即时断流，
+ * 以及 500 帧内存环形缓冲（streamSeq 断线续传 / sync.reset）。
  */
 export class SseHub {
   private readonly subscriptions = new Set<SubscriptionMeta>();
   private readonly replayBuffer: Array<SseFrame & { id: number }> = [];
   private nextSeq = 0;
 
-  subscribe(listener: Listener, opts: { foreground?: boolean } = {}): () => void {
+  subscribe(
+    listener: Listener,
+    opts: { foreground?: boolean; deviceId?: string; onClose?: () => void } = {},
+  ): () => void {
     const entry: SubscriptionMeta = {
       listener,
       foreground: opts.foreground !== false,
+      deviceId: opts.deviceId,
+      onClose: opts.onClose,
     };
     this.subscriptions.add(entry);
     return () => {
       this.subscriptions.delete(entry);
     };
+  }
+
+  /**
+   * 立即断开指定 deviceId 集合的全部活跃 SSE 连接（对齐 Spec 04 §1.1 设备吊销要求）。
+   */
+  disconnectDevices(deviceIds: Iterable<string>): number {
+    const target = new Set(deviceIds);
+    if (target.size === 0) return 0;
+    const toClose: SubscriptionMeta[] = [];
+    for (const sub of this.subscriptions) {
+      if (sub.deviceId && target.has(sub.deviceId)) {
+        toClose.push(sub);
+      }
+    }
+    for (const sub of toClose) {
+      this.subscriptions.delete(sub);
+      try {
+        sub.onClose?.();
+      } catch {
+        // 单个连接关闭异常不影响其余设备吊销
+      }
+    }
+    return toClose.length;
+  }
+
+  /**
+   * 立即断开所有活跃 SSE 连接（用于服务端停机时释放长连接与心跳定时器）。
+   */
+  disconnectAll(): number {
+    const all = Array.from(this.subscriptions);
+    this.subscriptions.clear();
+    for (const sub of all) {
+      try {
+        sub.onClose?.();
+      } catch {
+        // 单个连接关闭异常不影响停机流程
+      }
+    }
+    return all.length;
   }
 
   emit(event: Ring1SseEventName, data: Record<string, unknown>): void {

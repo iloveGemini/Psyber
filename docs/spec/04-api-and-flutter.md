@@ -30,11 +30,16 @@
    - 校验通过后立即销毁一次性 `code`，生成 32 字节加密随机 `token`（前缀 `psb_`），**仅将 `SHA-256(token)`** 与 `{ deviceId, deviceName, platform, createdAt, lastSeenAt }` 存入 `<dataDir>/config.json` 的 `auth.devices[]`（绝不明文落盘 Token）；
    - 响应 `200 OK`：`{ "deviceId": string, "token": string, "instanceId": string, "serverVersion": string }`（同步返回 `instanceId` 供客户端持久化用于后续多地址防串连校验）；
    - 失败错误码：`401 PAIR_CODE_INVALID` / `410 PAIR_CODE_EXPIRED` / `429 PAIR_RATE_LIMITED`（单 IP 5 分钟内失败 5 次锁定 10 分钟）。
-3. **请求鉴权与设备吊销**：
+3. **仅对本机桌面端免码（`POST /api/v1/auth/local-pair`）与局域网自动发现**：
+   - 服务端启动时生成 32 字节随机启动密钥写入 `0600` 权限的 `<dataDir>/local_pair.json`（停机自动清理）；`POST /api/v1/auth/local-pair` 严格要求来源 IP 为回环地址（`127.0.0.1` / `::1`）、禁止携带浏览器 `Origin` 头且密钥常量时间校验通过，仅供同机桌面端免码连入；
+   - 已配对端可调用 `POST /api/v1/auth/pair-code` 签发 5 分钟一次性配对码与扫码二维码载荷；
+   - 局域网自动发现（默认 UDP `37219`，`PSYBER_DISCOVERY=0` 可关闭）仅应答 `instanceId`、称呼与候选 URL 等非敏感元信息，绝不广播配对码或密钥；
+   - 可通过 `PSYBER_TLS_CERT` 与 `PSYBER_TLS_KEY` 开启原生 HTTPS/TLS 加密传输，且服务端对跨站写请求执行 `Origin` 校验。
+4. **请求鉴权与设备吊销**：
    - 常规 REST：请求头 `Authorization: Bearer <token>`；
    - SSE `/api/v1/stream` 与媒体 `/api/v1/media/:hash`（兼容 Web `EventSource` / `<img>` 无法带自定义 Header 的场景）：优先读 `Authorization` 头，其次允许 Query `?token=<token>`（服务端访问日志必须自动脱敏 `token=` 参数，绝不打印明文）；
    - **设备吊销**：通过 `PATCH /api/v1/settings` 提交 `revokeDeviceIds: string[]`，服务端立即从 `auth.devices[]` 移除对应设备、删除 `credentials.json` 中的 `pushTokens[deviceId]`，并主动关闭该设备的全部活跃 SSE 连接。
-4. **错误码**：缺失、无效或已吊销令牌统一返回 `401 UNAUTHORIZED`。
+5. **错误码**：缺失、无效或已吊销令牌统一返回 `401 UNAUTHORIZED`。
 
 ---
 

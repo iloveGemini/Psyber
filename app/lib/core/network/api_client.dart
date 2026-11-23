@@ -72,6 +72,17 @@ abstract class PsyberApiClient {
     required String platform,
   });
 
+  /// 仅限本机桌面端免码配对（读取 0600 local_pair.json 密钥）。
+  Future<ConnectionProfile> localPair({
+    required String baseUrl,
+    required String secret,
+    required String deviceName,
+    required String platform,
+  });
+
+  /// 已配对设备为新设备签发 5 分钟一次性配对码与扫码二维码载荷。
+  Future<IssuedPairCodeView> issuePairCode(ConnectionProfile profile);
+
   Future<GenesisStatus> getGenesis(ConnectionProfile profile);
 
   Future<void> submitGenesis(
@@ -372,6 +383,45 @@ class HttpPsyberApiClient implements PsyberApiClient {
       instanceId: json['instanceId'] as String? ?? '',
       deviceName: deviceName.trim(),
     );
+  }
+
+  @override
+  Future<ConnectionProfile> localPair({
+    required String baseUrl,
+    required String secret,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final cleanBase = normalizeBaseUrl(baseUrl);
+    final uri = Uri.parse('$cleanBase/api/v1/auth/local-pair');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      body: {
+        'secret': secret.trim(),
+        'deviceName': deviceName.trim(),
+        'platform': platform,
+      },
+    );
+    return ConnectionProfile(
+      baseUrl: cleanBase,
+      token: json['token'] as String? ?? '',
+      deviceId: json['deviceId'] as String? ?? '',
+      instanceId: json['instanceId'] as String? ?? '',
+      deviceName: deviceName.trim(),
+    );
+  }
+
+  @override
+  Future<IssuedPairCodeView> issuePairCode(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/auth/pair-code');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+    );
+    return IssuedPairCodeView.fromJson(json);
   }
 
   @override

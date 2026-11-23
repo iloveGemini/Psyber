@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../shared/theme.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
+import '../network/lan_discovery.dart';
 import '../notifications/local_notifier.dart';
 import '../storage/session_storage.dart';
 
@@ -64,6 +65,8 @@ class AppController {
     required PsyberApiClient api,
     required SessionStorage storage,
     LocalNotificationSender? localNotifier,
+    LanDiscoveryService? lanDiscovery,
+    Future<LocalPairHint?> Function()? localPairHintLoader,
     Duration offlineHintDelay = const Duration(seconds: 5),
     List<Duration> reconnectBackoff = const [
       Duration(seconds: 2),
@@ -74,15 +77,20 @@ class AppController {
   })  : _api = api,
         _storage = storage,
         _localNotifier = localNotifier,
+        _lanDiscovery = lanDiscovery ?? const UdpLanDiscoveryService(),
+        _localPairHintLoader = localPairHintLoader ?? readLocalDesktopPairHint,
         _offlineHintDelay = offlineHintDelay,
         _reconnectBackoff = reconnectBackoff;
 
   final PsyberApiClient _api;
   final SessionStorage _storage;
   final LocalNotificationSender? _localNotifier;
+  final LanDiscoveryService _lanDiscovery;
+  final Future<LocalPairHint?> Function() _localPairHintLoader;
   final Duration _offlineHintDelay;
   final List<Duration> _reconnectBackoff;
   final Random _random = Random();
+  bool _manuallyDisconnected = false;
 
   final ValueNotifier<ConnectionProfile?> profileNotifier =
       ValueNotifier<ConnectionProfile?>(null);
@@ -105,6 +113,7 @@ class AppController {
   final ValueNotifier<ExpressionPayload?> expressionNotifier =
       ValueNotifier<ExpressionPayload?>(null);
   final ValueNotifier<String?> turnErrorNotifier = ValueNotifier<String?>(null);
+  final ValueNotifier<bool> instanceMismatchNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<TurnFailureState?> turnFailureNotifier =
       ValueNotifier<TurnFailureState?>(null);
   final ValueNotifier<TurnSilenceNotice?> turnSilenceNotifier =
@@ -255,12 +264,60 @@ class AppController {
     final saved = await _storage.load();
     if (_disposed) return;
     if (saved == null) {
-      connectionNotifier.value = ConnectionPhase.unpaired;
+      if (_isDesktopPlatform && !_manuallyDisconnected) {
+        final hint = await _localPairHintLoader();
+        if (!_disposed && hint != null) {
+          try {
+            await localPairAndConnect(
+              baseUrl: hint.baseUrl,
+              secret: hint.secret,
+              deviceName: _defaultDesktopDeviceName(),
+              platform: _defaultDesktopWirePlatform(),
+            );
+            return;
+          } catch (_) {
+            // 本机免码失败时静默回退至配对页，不阻断手动或扫码配对
+          }
+        }
+      }
+      if (!_disposed) {
+        connectionNotifier.value = ConnectionPhase.unpaired;
+      }
       return;
     }
     profileNotifier.value = saved;
     unawaited(connectAndSync());
   }
+
+  String _defaultDesktopDeviceName() {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.macOS:
+        return 'Mac';
+      case TargetPlatform.windows:
+        return 'Windows';
+      case TargetPlatform.linux:
+        return 'Linux';
+      default:
+        return 'Desktop';
+    }
+  }
+
+  String _defaultDesktopWirePlatform() {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.macOS:
+        return 'macos';
+      case TargetPlatform.windows:
+        return 'windows';
+      case TargetPlatform.linux:
+        return 'linux';
+      default:
+        return 'macos';
+    }
+  }
+
+  Future<List<DiscoveredServer>> discoverLanServers() => _lanDiscovery.discover();
+
+  Future<LocalPairHint?> loadLocalDesktopPairHint() => _localPairHintLoader();
 
   /// 首次通过一次性配对码绑定后端并落盘长期 Token + instanceId。
   Future<void> pairAndConnect({
@@ -275,10 +332,72 @@ class AppController {
       deviceName: deviceName,
       platform: platform,
     );
+    _manuallyDisconnected = false;
     await _storage.save(profile);
     if (_disposed) return;
     profileNotifier.value = profile;
     await connectAndSync();
+  }
+
+  /// 仅限本机桌面端免码配对：使用 0600 local_pair.json 启动密钥换取常规长期 Token。
+  Future<void> localPairAndConnect({
+    required String baseUrl,
+    required String secret,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final profile = await _api.localPair(
+      baseUrl: baseUrl,
+      secret: secret,
+      deviceName: deviceName,
+      platform: platform,
+    );
+    _manuallyDisconnected = false;
+    await _storage.save(profile);
+    if (_disposed) return;
+    profileNotifier.value = profile;
+    await connectAndSync();
+  }
+
+  /// 通过扫码或粘贴二维码载荷完成配对：自动探测候选地址中首个可达节点再兑换 Token。
+  Future<void> pairFromQrPayload({
+    required String rawPayload,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final parsed = parsePairQrPayload(rawPayload);
+    if (parsed == null) {
+      throw const ApiException(
+        statusCode: 400,
+        code: 'INVALID_QR_PAYLOAD',
+        message: '二维码内容无效，请重新扫码',
+      );
+    }
+    var chosenUrl = parsed.urls.first;
+    if (parsed.urls.length > 1) {
+      for (final candidate in parsed.urls) {
+        try {
+          await _api.checkHealth(candidate);
+          chosenUrl = candidate;
+          break;
+        } catch (_) {
+          // 继续尝试下一个候选地址
+        }
+      }
+    }
+    await pairAndConnect(
+      baseUrl: chosenUrl,
+      code: parsed.code,
+      deviceName: deviceName,
+      platform: platform,
+    );
+  }
+
+  /// 已配对设备为新设备签发 5 分钟一次性配对码与扫码二维码载荷。
+  Future<IssuedPairCodeView?> issueNewDevicePairCode() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    return _api.issuePairCode(profile);
   }
 
   Future<void> completeGenesis({
@@ -378,6 +497,7 @@ class AppController {
 
   /// 断开当前连接并清除本地凭证，返回配对页。
   Future<void> disconnect({bool notifyServer = true}) async {
+    _manuallyDisconnected = true;
     final profile = profileNotifier.value;
     if (notifyServer && profile != null && profile.deviceId.isNotEmpty) {
       try {
@@ -404,6 +524,7 @@ class AppController {
     userStatusNotifier.value = UserStatus.initial;
     activeTurnNotifier.value = null;
     turnErrorNotifier.value = null;
+    instanceMismatchNotifier.value = false;
     turnFailureNotifier.value = null;
     turnSilenceNotifier.value = null;
     contextUsageNotifier.value = null;
@@ -431,9 +552,42 @@ class AppController {
       if (profile.instanceId.isNotEmpty &&
           health.instanceId.isNotEmpty &&
           health.instanceId != profile.instanceId) {
-        turnErrorNotifier.value = '当前地址对应的实例 ID 与配对记录不一致，请检查后端地址';
+        // 本机桌面端切换本地实例时，若 0600 local_pair.json 与当前健康检查实例一致，自动免码切入新实例
+        if (_isDesktopPlatform && isLoopbackUrl(profile.baseUrl)) {
+          final hint = await _localPairHintLoader();
+          if (!_disposed && hint != null && hint.instanceId == health.instanceId) {
+            try {
+              _initialSnapshotLoaded = false;
+              _highestSeqSeen = 0;
+              _hasLoadedOlder = false;
+              _hasMoreHistory = false;
+              _nextBeforeId = null;
+              _lastStreamSeq = null;
+              timelineNotifier.value = const <TimelineItem>[];
+              activeTurnNotifier.value = null;
+              instanceMismatchNotifier.value = false;
+              turnErrorNotifier.value = null;
+              await localPairAndConnect(
+                baseUrl: profile.baseUrl,
+                secret: hint.secret,
+                deviceName: _defaultDesktopDeviceName(),
+                platform: _defaultDesktopWirePlatform(),
+              );
+              return;
+            } catch (_) {
+              // 免码切入失败则回落至实例不一致提示与一键重新配对入口
+            }
+          }
+        }
+        instanceMismatchNotifier.value = true;
+        turnErrorNotifier.value = '当前地址对应的实例 ID 与配对记录不一致，请检查后端地址或重新配对';
         connectionNotifier.value = ConnectionPhase.reconnecting;
         return;
+      }
+      instanceMismatchNotifier.value = false;
+      if (turnErrorNotifier.value != null &&
+          turnErrorNotifier.value!.contains('实例 ID 与配对记录不一致')) {
+        turnErrorNotifier.value = null;
       }
 
       final genesis = await _api.getGenesis(profile);
@@ -1515,6 +1669,7 @@ class AppController {
     activeTurnNotifier.dispose();
     expressionNotifier.dispose();
     turnErrorNotifier.dispose();
+    instanceMismatchNotifier.dispose();
     turnFailureNotifier.dispose();
     turnSilenceNotifier.dispose();
     contextUsageNotifier.dispose();

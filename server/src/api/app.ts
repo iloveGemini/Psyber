@@ -140,8 +140,12 @@ export interface AppDeps {
   onSettingsUpdated?: () => void;
   /** 仅在明确部署于可信反向代理后时才信任 x-forwarded-for */
   trustProxy?: boolean;
-  /** 自定义获取客户端连接 IP（用于 /auth/pair 防爆破限流） */
+  /** 自定义获取客户端连接 IP（用于 /auth/pair 与 /auth/local-pair 防爆破限流及回环守卫） */
   getClientIp?: (req: Request) => string;
+  /** 返回用于扫码配对二维码的候选后端地址列表 */
+  getPairUrls?: () => string[];
+  /** 显式放行的浏览器 Origin 白名单（用于跨域 Web 客户端，默认仅允许同源） */
+  allowedOrigins?: string[];
   /** 可注入 fetch 实现（用于 /llm/models 离线测试） */
   fetchImpl?: typeof fetch;
   /** 可注入 LLM 探测工厂（用于 /llm/test 离线测试） */
@@ -156,6 +160,7 @@ export interface AppDeps {
  */
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
+  const requestDeviceIds = new WeakMap<Request, string>();
   const activeAborts = new Map<string, AbortController>();
   const retryOrigins = new Map<
     string,
@@ -383,9 +388,46 @@ export function createApp(deps: AppDeps): Hono {
     });
   });
 
+  // 跨站 Origin 守卫：拦截恶意网页静默探测 /auth/pair、/auth/local-pair 或发起跨站写请求
+  app.use("/api/v1/*", async (c, next) => {
+    const origin = c.req.header("origin")?.trim();
+    if (origin) {
+      if (c.req.path === "/api/v1/auth/local-pair") {
+        return c.json(
+          { error: { code: "LOCAL_PAIR_FORBIDDEN", message: "禁止浏览器跨站调用本机免码配对" } },
+          403,
+        );
+      }
+      const isProtectedMethod =
+        c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "OPTIONS";
+      if (isProtectedMethod) {
+        const allowed = new Set(deps.allowedOrigins ?? []);
+        let originHost = "";
+        try {
+          originHost = new URL(origin).host.toLowerCase();
+        } catch {
+          originHost = "";
+        }
+        const reqHost = (c.req.header("host") ?? "").trim().toLowerCase();
+        const sameHost = Boolean(originHost && reqHost && originHost === reqHost);
+        if (!sameHost && !allowed.has(origin)) {
+          return c.json(
+            { error: { code: "ORIGIN_FORBIDDEN", message: "已拒绝来自非同源页面的跨站请求" } },
+            403,
+          );
+        }
+      }
+    }
+    return next();
+  });
+
   // 业务路由统一 Bearer Token 鉴权中间件
   app.use("/api/v1/*", async (c, next) => {
-    if (c.req.path === "/api/v1/health" || c.req.path === "/api/v1/auth/pair") {
+    if (
+      c.req.path === "/api/v1/health" ||
+      c.req.path === "/api/v1/auth/pair" ||
+      c.req.path === "/api/v1/auth/local-pair"
+    ) {
       return next();
     }
     const authHeader = c.req.header("authorization") ?? "";
@@ -404,6 +446,7 @@ export function createApp(deps: AppDeps): Hono {
       return c.json({ error: { code: "UNAUTHORIZED", message: "访问令牌无效或已吊销" } }, 401);
     }
     matched.lastSeenAt = deps.clock.now();
+    requestDeviceIds.set(c.req.raw, matched.deviceId);
     return next();
   });
 
@@ -1132,20 +1175,38 @@ export function createApp(deps: AppDeps): Hono {
         };
 
         const foreground = c.req.query("foreground") !== "false";
+        const deviceId = requestDeviceIds.get(c.req.raw);
         let replayedMaxId = parsedLastId ?? 0;
         const replay = deps.sse && parsedLastId !== null ? deps.sse.replaySince(parsedLastId) : null;
         if (replay) {
           replayedMaxId = replay.latestStreamSeq;
         }
+        let closed = false;
+        let timer: ReturnType<typeof setInterval> | null = null;
+        let unsubscribe: (() => void) | undefined;
+        const closeStream = () => {
+          if (closed) return;
+          closed = true;
+          if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+          }
+          unsubscribe?.();
+          try {
+            controller.close();
+          } catch {
+            // 已关闭
+          }
+        };
         // 先建立订阅再同步回放，避免订阅间隙漏帧（超过 replayedMaxId 的新帧才放行）
-        const unsubscribe = deps.sse?.subscribe(
+        unsubscribe = deps.sse?.subscribe(
           (frame) => {
             if (frame.id !== undefined && frame.id <= replayedMaxId) {
               return;
             }
             send(formatSseFrame(frame));
           },
-          { foreground },
+          { foreground, deviceId, onClose: closeStream },
         );
 
         send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
@@ -1165,19 +1226,11 @@ export function createApp(deps: AppDeps): Hono {
           }
         }
 
-        const timer = setInterval(() => {
+        timer = setInterval(() => {
           send(formatSseFrame({ event: "ping", data: { ts: deps.clock.now() } }));
         }, 25_000);
 
-        c.req.raw.signal.addEventListener("abort", () => {
-          clearInterval(timer);
-          unsubscribe?.();
-          try {
-            controller.close();
-          } catch {
-            // 已关闭
-          }
-        });
+        c.req.raw.signal.addEventListener("abort", closeStream);
       },
     });
 

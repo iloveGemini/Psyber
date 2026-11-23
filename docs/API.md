@@ -21,7 +21,9 @@
 | 方法与路径 | 分期 | 说明 |
 | :--- | :--- | :--- |
 | `GET /api/v1/health` | **Ring 1** | 非阻塞探活与服务端版本（要求 `< 20ms`） |
-| `POST /api/v1/auth/pair` | **Ring 1** | 新设备使用桌面端/CLI 生成的一次性配对码兑换长期 Bearer Token |
+| `POST /api/v1/auth/pair` | **Ring 1** | 新设备使用桌面端/CLI 生成的一次性配对码兑换长期 Bearer Token（按真实客户端 IP 限流 + Origin 防跨站） |
+| `POST /api/v1/auth/local-pair` | **Ring 1.5** | 仅限本机桌面端免码配对（严格校验回环 IP、无浏览器 Origin 头及 `0600` `local_pair.json` 启动密钥） |
+| `POST /api/v1/auth/pair-code` | **Ring 1.5** | 已配对设备签发 5 分钟一次性配对码与扫码二维码 JSON 载荷 `{ v: 1, urls, code }` |
 | `POST /api/v1/auth/oauth/:provider/start` | Ring 1.5 | 发起 `pi-ai` 订阅 OAuth 登录（PKCE 或 Device Code，Ring 1 先用 BYOK / 本机凭证） |
 | `POST /api/v1/auth/oauth/:provider/exchange` | Ring 1.5 | 提交回调授权码或轮询 Device Code 完成 OAuth Token 落盘 |
 | `GET /api/v1/door` | **Ring 1** | 获取当前门状态（Ring 1 为 `open`/`quiet`/`closed`，Ring 2 扩展后两态）、门牌便签与未读门缝纸条数 |

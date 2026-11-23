@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-23（落地 `models.dev` 模型元数据目录与自动匹配、重构设置页服务商池/模型槽位/时间范围用量/全量工具展示与关于数据页、精简侧栏左下角设置齿轮入口）。
+> 最后更新：2026-11-23（落地配对安全补强、局域网 UDP 自动发现、扫码配对与本机桌面端免码连入）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（模型目录规范化与设置页重构完成）
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（配对体验与安全补强完成）
 
 ### 已完成
+- **配对安全补强、局域网自动发现、扫码配对与本机桌面端免码（`docs/` + `server/` + `app/`，2026-11-23）**：
+  - **后端安全补强**：`index.ts` 通过 `Bun.serve` `server.requestIP` 注入真实客户端 IP 解决 `"direct"` 共享限流桶；`pairing.ts` 升级为常量时间比对与先判过期；`sse.ts`/`app.ts`/`admin_routes.ts` 绑定 `deviceId` 实现设备吊销即时断开存量 SSE；`app.ts` 增加跨站 `Origin` 守卫拦截恶意网页；`index.ts` 支持 `PSYBER_TLS_CERT`/`PSYBER_TLS_KEY` 原生 HTTPS 并在局域网明文 HTTP 监听时输出安全提示。
+  - **后端发现/二维码/本机免码**：新增 `discovery.ts`（UDP `37219` 局域网发现，仅广播非敏感元信息）、`qr.ts`（零依赖 ISO 18004 二维码与终端紧凑渲染）、`POST /api/v1/auth/pair-code`（已配对端签发扫码载荷 `{ v: 1, urls, code }`）与 `POST /api/v1/auth/local-pair`（仅限回环 IP + 无 `Origin` + `0600` `local_pair.json` 启动密钥，停机自动清理）。
+  - **前端客户端**：新增 `lan_discovery.dart`（UDP 发现、二维码解析、本机桌面端 `local_pair.json` 读取与 iOS `AVFoundation` 原生 `psyber/qr` 扫码通道）与 `qr_code_view.dart`（零依赖标准二维码组件）；`PairingPage` 支持桌面端本机免码连入、局域网自动发现点选、扫码/粘贴二维码配对与局域网明文 HTTP 提示；设置页「工具与设备」新增「配对新设备（扫码 / 配对码）」二维码弹窗。
 - **模型元数据目录（`models.dev`）与设置页重构（`server/` + `app/`，2026-11-23）**：
   - **后端**：新增 `server/src/llm/catalog.ts`（内置快照 + 每日后台同步 `https://models.dev/api.json` 缓存至 `<dataDir>/model_catalog_cache.json` + 归一化模糊匹配 + 单模型 `modelOverrides` 最高优先级覆盖），并接入 `router.ts` 自动补齐上下文窗口、最大输出与输入/输出模态；`registry.ts` 新增 `listAllTools()` 与 `disabledTools` 持久化开关（Tier 1 核心元工具强制锁定常驻不可关闭）；`events.ts` `getUsageStats` 支持 `?days=` 时间范围筛选；`admin_routes.ts` 扩展 `/settings` 返回 `tools`/`disabledTools`/`system`（版本、配置与记忆路径、目录状态），新增 `POST /api/v1/llm/catalog/sync`，扩展 `slots` 支持 `digest`/`image_gen`、`null` 清除与 `deleteProviderIds`。
   - **前端**：侧栏左下角设置入口精简为独立齿轮图标按钮（`settings_button`）；设置页拆分为 **模型服务商**（服务商池、连通状态灯、Base URL/密钥更新、模型能力标签与手动覆盖弹窗）、**模型配置**（按角色槽位分配 + 主对话内联可折叠参数摘要 + `models.dev` 目录同步）、**用量**（`今天/7天/30天/90天/全部` 分段）、**作息与通知**、**居所与外观**、**工具与设备**（展示 Psyber 全量工具，核心元工具标「核心常驻」锁定不可开关，Tier 2/3 工具可按需开关）与 **关于与数据**（版本、可复制的配置/记忆路径、目录同步）。
@@ -41,5 +45,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-23 模型目录、设置页重构与思考自动档后实测）**：`bun run typecheck` 零错误；`bun test`（15 文件 / 54 用例 / 693 断言）全部通过。
-- **`app/`（2026-11-23 设置页重构后实测）**：`flutter analyze` 零问题，`flutter test`（27 用例）全绿；思考 `auto` 档位 UI 改动待本机复跑 `flutter analyze && flutter test`。
+- **`server/`（2026-11-23 配对安全补强、局域网发现、二维码签发、本机免码与 Ctrl+C 优雅停机修复后实测）**：`bun run typecheck` 零错误；`bun test`（16 文件 / 57 用例）全部通过。
+- **`app/`（2026-11-23 宿主机终端实测）**：`cd app && flutter analyze && flutter test` 零警告、全量通过。

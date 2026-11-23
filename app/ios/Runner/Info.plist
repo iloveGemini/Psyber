@@ -47,7 +47,9 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Psyber 需要访问本地网络以连接您自部署的服务端。</string>
+	<string>Psyber 需要访问本地网络以自动发现并连接您自部署的服务端。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Psyber 需要使用相机扫描服务端配对二维码以快速绑定设备。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

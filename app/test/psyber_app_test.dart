@@ -8,11 +8,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:psyber_app/core/media/image_picker.dart';
 import 'package:psyber_app/core/models/models.dart';
 import 'package:psyber_app/core/network/api_client.dart';
+import 'package:psyber_app/core/network/lan_discovery.dart';
 import 'package:psyber_app/core/state/app_controller.dart';
 import 'package:psyber_app/core/storage/session_storage.dart';
 import 'package:psyber_app/features/chat/widgets/timeline_items.dart';
 import 'package:psyber_app/features/settings/settings_panel.dart';
 import 'package:psyber_app/main.dart';
+import 'package:psyber_app/shared/qr_code_view.dart';
 import 'package:psyber_app/shared/theme.dart';
 
 class FakePsyberApiClient implements PsyberApiClient {
@@ -154,6 +156,39 @@ class FakePsyberApiClient implements PsyberApiClient {
       deviceId: 'dev-test',
       instanceId: 'inst-test-001',
       deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<ConnectionProfile> localPair({
+    required String baseUrl,
+    required String secret,
+    required String deviceName,
+    required String platform,
+  }) async {
+    if (secret.trim() != 'local-secret-demo') {
+      throw const ApiException(
+        statusCode: 401,
+        code: 'LOCAL_SECRET_INVALID',
+        message: '本机配对密钥无效',
+      );
+    }
+    return ConnectionProfile(
+      baseUrl: baseUrl,
+      token: 'demo-local-session',
+      deviceId: 'dev-local-mac',
+      instanceId: 'inst-test-001',
+      deviceName: deviceName,
+    );
+  }
+
+  @override
+  Future<IssuedPairCodeView> issuePairCode(ConnectionProfile profile) async {
+    return IssuedPairCodeView(
+      code: 'ABCD-1234',
+      expiresAt: DateTime.now().millisecondsSinceEpoch + 300000,
+      urls: const ['http://lan-peer.local:3721'],
+      qrPayload: '{"v":1,"urls":["http://lan-peer.local:3721"],"code":"ABCD-1234"}',
     );
   }
 
@@ -2597,6 +2632,177 @@ void main() {
       expect(api.streamOpenCount, greaterThan(prevStreams + 1));
     },
   );
+  testWidgets(
+    '局域网自动发现、粘贴二维码配对、本机桌面端免码连入与设置页展示配对二维码',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      const demoLocalKey = 'local-secret-demo';
+      final api = FakePsyberApiClient();
+      final storage = MemorySessionStorage();
+      final controller = AppController(
+        api: api,
+        storage: storage,
+        lanDiscovery: const _FakeLanDiscoveryService([
+          DiscoveredServer(
+            instanceId: 'inst-lan-01',
+            urls: ['http://lan-peer.local:3721'],
+            hostname: 'mac-studio.local',
+            version: '0.1.0',
+            residentName: 'Psyber',
+          ),
+        ]),
+        localPairHintLoader: () async => const LocalPairHint(
+          secret: demoLocalKey,
+          baseUrl: 'http://localhost:3721',
+          instanceId: 'inst-test-001',
+        ),
+      );
+      addTearDown(() async {
+        await api.closeStream();
+        controller.dispose();
+      });
+
+      // 1. 本机桌面端启动自动免码连入
+      await controller.initialize();
+      await tester.pumpWidget(PsyberApp(controller: controller));
+      await tester.pumpAndSettle();
+      expect(controller.connectionNotifier.value, ConnectionPhase.connected);
+      expect(controller.profileNotifier.value?.deviceId, 'dev-local-mac');
+
+      // 2. 在设置页「工具与设备」打开「配对新设备（扫码 / 配对码）」弹窗展示二维码
+      await tester.tap(find.byKey(const Key('settings_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings_nav_toolsDevices')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('pair_new_device_qr_button')));
+      await tester.tap(find.byKey(const Key('pair_new_device_qr_button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.byKey(const Key('pair_new_device_qr_dialog')), findsOneWidget);
+      expect(find.byKey(const Key('pair_qr_code_view')), findsOneWidget);
+      expect(find.text('ABCD-1234'), findsOneWidget);
+
+      // 关掉二维码弹窗并断开连接回到配对页
+      Navigator.of(tester.element(find.byKey(const Key('pair_new_device_qr_dialog')))).pop();
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const Key('disconnect_device_button')));
+      await tester.tap(find.byKey(const Key('disconnect_device_button')));
+      await tester.pumpAndSettle();
+
+      // 3. 配对页展示本机免码按钮与局域网自动发现卡片，点击发现项填入地址，并通过粘贴二维码载荷配对
+      expect(find.byKey(const Key('local_pair_button')), findsOneWidget);
+      expect(find.byKey(const Key('discovered_server_inst-lan-01')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('discovered_server_inst-lan-01')));
+      await tester.pump();
+      expect(find.textContaining('局域网明文 HTTP 连接'), findsOneWidget);
+
+      await tester.ensureVisible(find.byKey(const Key('scan_qr_pair_button')));
+      await tester.tap(find.byKey(const Key('scan_qr_pair_button')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('qr_payload_input_field')),
+        '{"v":1,"urls":["http://lan-peer.local:3721"],"code":"ABCD-1234"}',
+      );
+      await tester.tap(find.byKey(const Key('qr_payload_confirm_button')));
+      await tester.pumpAndSettle();
+
+      expect(controller.connectionNotifier.value, ConnectionPhase.connected);
+      expect(controller.profileNotifier.value?.baseUrl, 'http://lan-peer.local:3721');
+
+      // 4. 验证纯 Dart QrMatrix 编码器生成有效矩阵
+      final matrix = QrMatrix.encode('{"v":1,"urls":["http://lan-peer.local:3721"],"code":"ABCD-1234"}');
+      expect(matrix.size, greaterThanOrEqualTo(21));
+      expect(matrix.isDark(0, 0), isTrue);
+    },
+  );
+
+  testWidgets(
+    '本机桌面端切换新实例时自动免码切入，非本机实例不一致提供一键重新配对',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      const demoLocalKey = 'local-secret-demo';
+
+      // 1. 本机回环地址切到新实例（旧保存 inst-old-001，当前后端 inst-test-001）-> 自动免码切入
+      final localApi = FakePsyberApiClient();
+      final localStorage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://localhost:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-old',
+          instanceId: 'inst-old-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final localCtrl = AppController(
+        api: localApi,
+        storage: localStorage,
+        localPairHintLoader: () async => const LocalPairHint(
+          secret: demoLocalKey,
+          baseUrl: 'http://localhost:3721',
+          instanceId: 'inst-test-001',
+        ),
+      );
+      addTearDown(() async {
+        await localApi.closeStream();
+        localCtrl.dispose();
+      });
+
+      await localCtrl.initialize();
+      await tester.pumpWidget(PsyberApp(controller: localCtrl));
+      await tester.pumpAndSettle();
+
+      expect(localCtrl.connectionNotifier.value, ConnectionPhase.connected);
+      expect(localCtrl.profileNotifier.value?.instanceId, 'inst-test-001');
+      expect(localCtrl.turnErrorNotifier.value, isNull);
+
+      // 2. 非本机地址出现实例不一致 -> 展示提示并提供「重新配对」一键回到配对页
+      final remoteApi = FakePsyberApiClient();
+      final remoteStorage = MemorySessionStorage(
+        const ConnectionProfile(
+          baseUrl: 'http://lan-peer.local:3721',
+          token: 'demo-session-value',
+          deviceId: 'dev-old',
+          instanceId: 'inst-old-001',
+          deviceName: 'Mac',
+        ),
+      );
+      final remoteCtrl = AppController(
+        api: remoteApi,
+        storage: remoteStorage,
+        lanDiscovery: const _FakeLanDiscoveryService([]),
+        localPairHintLoader: () async => null,
+      );
+      addTearDown(() async {
+        await remoteApi.closeStream();
+        remoteCtrl.dispose();
+      });
+
+      await remoteCtrl.initialize();
+      await tester.pumpWidget(PsyberApp(controller: remoteCtrl));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('mismatch_repair_button')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('mismatch_repair_button')));
+      await tester.pumpAndSettle();
+      expect(remoteCtrl.connectionNotifier.value, ConnectionPhase.unpaired);
+      expect(find.byKey(const Key('pair_submit_button')), findsOneWidget);
+    },
+  );
+}
+
+class _FakeLanDiscoveryService implements LanDiscoveryService {
+  const _FakeLanDiscoveryService(this.servers);
+  final List<DiscoveredServer> servers;
+
+  @override
+  Future<List<DiscoveredServer>> discover({
+    Duration timeout = const Duration(milliseconds: 1400),
+  }) async =>
+      servers;
 }
 
 class _PaginatedFakeApiClient extends FakePsyberApiClient {

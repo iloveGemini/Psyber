@@ -573,6 +573,41 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                           ),
                                         ),
                                       ),
+                                      ValueListenableBuilder<bool>(
+                                        valueListenable:
+                                            widget.controller.instanceMismatchNotifier,
+                                        builder: (context, mismatch, _) {
+                                          if (!mismatch) return const SizedBox.shrink();
+                                          return Padding(
+                                            padding: const EdgeInsets.only(right: 4),
+                                            child: TextButton(
+                                              key: const Key('mismatch_repair_button'),
+                                              style: TextButton.styleFrom(
+                                                foregroundColor: colors.dangerInk,
+                                                padding: const EdgeInsets.symmetric(
+                                                  horizontal: 10,
+                                                  vertical: 4,
+                                                ),
+                                                minimumSize: Size.zero,
+                                                tapTargetSize:
+                                                    MaterialTapTargetSize.shrinkWrap,
+                                              ),
+                                              onPressed: () => unawaited(
+                                                widget.controller.disconnect(
+                                                  notifyServer: false,
+                                                ),
+                                              ),
+                                              child: const Text(
+                                                '重新配对',
+                                                style: TextStyle(
+                                                  fontSize: 12.5,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
                                       IconButton(
                                         icon: Icon(
                                           PhosphorIconsLight.x,

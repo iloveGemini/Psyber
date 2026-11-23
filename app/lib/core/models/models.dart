@@ -1940,6 +1940,34 @@ class DrawerOpenedContent {
 }
 
 @immutable
+class IssuedPairCodeView {
+  const IssuedPairCodeView({
+    required this.code,
+    required this.expiresAt,
+    required this.urls,
+    required this.qrPayload,
+  });
+
+  final String code;
+  final int expiresAt;
+  final List<String> urls;
+  final String qrPayload;
+
+  factory IssuedPairCodeView.fromJson(Map<String, dynamic> json) {
+    final rawUrls = json['urls'];
+    final urls = rawUrls is List<dynamic>
+        ? rawUrls.whereType<String>().toList(growable: false)
+        : const <String>[];
+    return IssuedPairCodeView(
+      code: json['code'] as String? ?? '',
+      expiresAt: (json['expiresAt'] as num?)?.toInt() ?? 0,
+      urls: urls,
+      qrPayload: json['qrPayload'] as String? ?? '',
+    );
+  }
+}
+
+@immutable
 class SseEventFrame {
   const SseEventFrame({
     required this.event,

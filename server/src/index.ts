@@ -1,9 +1,17 @@
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { Hono } from "hono";
 import { createApp } from "./api/app.ts";
-import { PairingManager } from "./api/pairing.ts";
+import {
+  DEFAULT_DISCOVERY_PORT,
+  getLanUrls,
+  startLanDiscoveryResponder,
+  type LanDiscoveryResponder,
+} from "./api/discovery.ts";
+import { PairingManager, buildPairQrPayload, isLoopbackIp } from "./api/pairing.ts";
+import { renderTerminalQr } from "./api/qr.ts";
 import { performSqliteBackup } from "./core/backup.ts";
 import { SystemClock, addCalendarDays, localDay, type Clock } from "./core/clock.ts";
 import {
@@ -95,6 +103,20 @@ export interface BootOptions {
   startHeartbeatTimer?: boolean;
   /** 启动发现昨夜因关机错过 bedtime 时是否自动在后台补跑（默认 true） */
   catchUpMissedBedtime?: boolean;
+  /** 自定义客户端真实 IP 解析器（生产环境由 Bun.serve server.requestIP 注入） */
+  getClientIp?: (req: Request) => string;
+  /** 返回扫码二维码所需的候选局域网 URL 列表 */
+  getPairUrls?: () => string[];
+  /** 显式放行的浏览器 Origin 白名单 */
+  allowedOrigins?: string[];
+  /** HTTP 服务端口（用于写入 0600 local_pair.json） */
+  httpPort?: number;
+  /** 传输协议（http 或 https） */
+  protocol?: "http" | "https";
+  /** 是否写入 0600 local_pair.json 供本机桌面端免码配对（生产启动默认 true，单测默认 false） */
+  writeLocalPairFile?: boolean;
+  /** 可选：额外写入用户级活跃实例指针（如 ~/.psyber/active_local_pair.json），供自定义 PSYBER_DATA_DIR 切换实例时本机桌面端自动识别 */
+  activeLocalPairPath?: string;
 }
 
 export interface PsyberRuntime {
@@ -120,10 +142,10 @@ export interface PsyberRuntime {
   triggerReflect: (scope: ReflectScope, targetDay?: string) => Promise<ReflectTaskOutcome>;
   /** 手动触发一次 SQLite VACUUM INTO 本地日原子热备 */
   triggerBackup: () => Promise<string | null>;
-  /** 等待当前队列中的异步整理与备份任务收尾 */
-  waitForIdle: () => Promise<void>;
-  /** 优雅停机：停心跳、等后台收尾、关数据库连接 */
-  stop: () => Promise<void>;
+  /** 等待当前队列中的异步整理与备份任务收尾（可选超时毫秒，避免停机无限阻塞） */
+  waitForIdle: (timeoutMs?: number) => Promise<boolean>;
+  /** 优雅停机：停心跳、断 SSE、删本机凭证、等后台收尾、关数据库连接 */
+  stop: (opts?: { waitTimeoutMs?: number }) => Promise<void>;
 }
 
 /**
@@ -161,6 +183,36 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   const media = new MediaStore(db, dataDir);
   const drawer = new DrawerStore(dataDir, () => config.instanceId, clock);
   const pairing = new PairingManager(clock);
+  const localSecret = pairing.issueLocalSecret();
+  const localPairPath = path.join(dataDir, "local_pair.json");
+  const activeLocalPairPath = opts.activeLocalPairPath;
+  const writePrivateJson = async (targetPath: string, content: string) => {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`;
+    await fs.writeFile(tmpPath, content, { mode: 0o600 });
+    await fs.chmod(tmpPath, 0o600).catch(() => {});
+    await fs.rename(tmpPath, targetPath);
+    await fs.chmod(targetPath, 0o600).catch(() => {});
+  };
+  if (opts.writeLocalPairFile) {
+    const payload = JSON.stringify(
+      {
+        secret: localSecret,
+        port: opts.httpPort ?? 3721,
+        host: "127.0.0.1",
+        protocol: opts.protocol ?? "http",
+        instanceId: config.instanceId,
+        pid: process.pid,
+        updatedAt: clock.now(),
+      },
+      null,
+      2,
+    );
+    await writePrivateJson(localPairPath, payload);
+    if (activeLocalPairPath && path.resolve(activeLocalPairPath) !== path.resolve(localPairPath)) {
+      await writePrivateJson(activeLocalPairPath, payload).catch(() => {});
+    }
+  }
   const memoryTools = new MemoryTools(dataDir, memoryIndex, clock);
   const registry = new ToolRegistry();
   registerCoreTier1Tools(registry, {
@@ -572,25 +624,65 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     onSettingsUpdated: () => {
       rescheduleHeartbeatTimer();
     },
+    getClientIp: opts.getClientIp,
+    getPairUrls: opts.getPairUrls,
+    allowedOrigins: opts.allowedOrigins,
     fetchImpl: opts.fetchImpl,
     llmTestClientFactory: opts.llmTestClientFactory,
   });
 
-  const waitForIdle = async (): Promise<void> => {
-    while (pendingPromises.size > 0) {
-      await Promise.allSettled(Array.from(pendingPromises));
+  const waitForIdle = async (timeoutMs?: number): Promise<boolean> => {
+    if (pendingPromises.size === 0) return true;
+    const drain = (async () => {
+      while (pendingPromises.size > 0) {
+        await Promise.allSettled(Array.from(pendingPromises));
+      }
+      return true;
+    })();
+    if (timeoutMs === undefined || timeoutMs <= 0) {
+      return drain;
     }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    const finished = await Promise.race([drain, timedOut]);
+    if (timer !== null) clearTimeout(timer);
+    return finished;
   };
 
-  const stop = async (): Promise<void> => {
+  const stop = async (stopOpts?: { waitTimeoutMs?: number }): Promise<void> => {
     stopped = true;
     if (heartbeatTimer !== null) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
-    await mcp.stop();
-    await waitForIdle();
-    db.close();
+    sse.disconnectAll();
+    if (opts.writeLocalPairFile) {
+      await fs.rm(localPairPath, { force: true }).catch(() => {});
+      if (activeLocalPairPath) {
+        try {
+          const raw = await fs.readFile(activeLocalPairPath, "utf-8");
+          const parsed = JSON.parse(raw) as { pid?: unknown };
+          if (parsed?.pid === process.pid) {
+            await fs.rm(activeLocalPairPath, { force: true }).catch(() => {});
+          }
+        } catch {
+          // 文件不存在或已由其他实例覆盖，静默忽略
+        }
+      }
+    }
+    await mcp.stop().catch(() => {});
+    const idle = await waitForIdle(stopOpts?.waitTimeoutMs);
+    if (!idle) {
+      console.warn("[psyber] 后台整理任务收尾超时，已跳过等待并继续停机。");
+    }
+    try {
+      db.close();
+    } catch {
+      // 避免停机阶段因数据库句柄状态异常阻断进程退出
+    }
   };
 
   return {
@@ -637,17 +729,91 @@ async function main(): Promise<void> {
   const port = Number(process.env.PSYBER_PORT || 3721);
   // Spec 05 §5.3：默认监听 0.0.0.0 供局域网移动端扫码直连，仅本机使用可设 127.0.0.1
   const host = process.env.PSYBER_HOST || "0.0.0.0";
+  const tlsCertPath = process.env.PSYBER_TLS_CERT?.trim();
+  const tlsKeyPath = process.env.PSYBER_TLS_KEY?.trim();
+  const protocol: "http" | "https" = tlsCertPath && tlsKeyPath ? "https" : "http";
+  const allowedOrigins = (process.env.PSYBER_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  const runtime = await bootPsyberRuntime();
+  const requestIps = new WeakMap<Request, string>();
+  const resolvePairUrls = () => {
+    const lan = getLanUrls(port, protocol);
+    return lan.length > 0 ? lan : [`${protocol}://127.0.0.1:${port}`];
+  };
+
+  const runtime = await bootPsyberRuntime({
+    httpPort: port,
+    protocol,
+    writeLocalPairFile: true,
+    activeLocalPairPath: path.join(os.homedir(), ".psyber", "active_local_pair.json"),
+    allowedOrigins,
+    getClientIp: (req) => requestIps.get(req) ?? "unknown",
+    getPairUrls: resolvePairUrls,
+  });
+
   const server = Bun.serve({
     hostname: host,
     port,
     // SSE 长连接心跳间隔 25s，必须禁用 Bun 默认 10s idleTimeout，避免流式生成中途被服务端强行断流
     idleTimeout: 0,
-    fetch: runtime.app.fetch,
+    ...(tlsCertPath && tlsKeyPath
+      ? { tls: { cert: Bun.file(tlsCertPath), key: Bun.file(tlsKeyPath) } }
+      : {}),
+    fetch(req, srv) {
+      const ip = srv.requestIP(req)?.address;
+      if (ip) {
+        requestIps.set(req, ip);
+      }
+      return runtime.app.fetch(req);
+    },
   });
 
-  console.log(`Psyber server listening on http://${host}:${port} (dataDir=${runtime.dataDir})`);
+  console.log(`Psyber server listening on ${protocol}://${host}:${port} (dataDir=${runtime.dataDir})`);
+  if (protocol === "http" && !isLoopbackIp(host)) {
+    console.log(
+      "[psyber] 安全提示：当前局域网以明文 HTTP 监听，请仅在可信 Wi-Fi 或 Tailscale 下配对；如需加密可配置 PSYBER_TLS_CERT 与 PSYBER_TLS_KEY。",
+    );
+  }
+
+  let discovery: LanDiscoveryResponder | null = null;
+  if (!isLoopbackIp(host) && process.env.PSYBER_DISCOVERY !== "0") {
+    const discoveryPort = Number(process.env.PSYBER_DISCOVERY_PORT || DEFAULT_DISCOVERY_PORT);
+    let cachedResidentName: string | null = null;
+    void readIdentityProfile(runtime.dataDir, runtime.clock.now(), runtime.config.timezone)
+      .then((id) => {
+        cachedResidentName = id.residentName;
+      })
+      .catch(() => {});
+    try {
+      discovery = await startLanDiscoveryResponder({
+        port: discoveryPort,
+        httpPort: port,
+        protocol,
+        version: "0.1.0",
+        getInstanceId: () => runtime.config.instanceId,
+        getResidentName: () => cachedResidentName,
+        getUrls: resolvePairUrls,
+      });
+      console.log(`[psyber] 局域网自动发现已启用（UDP ${discovery.port}，仅广播发现信息，不含配对码）`);
+    } catch (err) {
+      console.warn("[psyber] 局域网自动发现启动失败（不影响主服务）：", err);
+    }
+  }
+
+  const printPairCodeWithQr = (prefix: string) => {
+    const pair = runtime.pairing.issueCode();
+    const urls = resolvePairUrls();
+    const qrPayload = buildPairQrPayload(urls, pair.code);
+    console.log(`${prefix}（5 分钟有效）：${pair.code}`);
+    console.log(`[psyber] 候选连接地址：${urls.join(" , ")}`);
+    try {
+      console.log(renderTerminalQr(qrPayload));
+    } catch {
+      // 载荷过长或终端不支持时回退文本提示
+    }
+  };
 
   const forcePair =
     process.argv.includes("--pair") ||
@@ -655,17 +821,16 @@ async function main(): Promise<void> {
     process.env.PSYBER_PAIR === "1" ||
     process.env.PSYBER_ISSUE_PAIR === "1";
 
-  // 首次无已配对设备，或启动时带 --pair 选项时，自动打印 8 位一次性配对码
+  // 首次无已配对设备，或启动时带 --pair 选项时，自动打印 8 位一次性配对码与终端二维码
   if (runtime.config.auth.devices.length === 0 || forcePair) {
-    const pair = runtime.pairing.issueCode();
-    if (runtime.config.auth.devices.length === 0) {
-      console.log(`[psyber] 尚未配对任何客户端，一次性配对码（5 分钟有效）：${pair.code}`);
-    } else {
-      console.log(`[psyber] 已手动请求签发新设备配对码（5 分钟有效）：${pair.code}`);
-    }
+    printPairCodeWithQr(
+      runtime.config.auth.devices.length === 0
+        ? "[psyber] 尚未配对任何客户端，一次性配对码"
+        : "[psyber] 已手动请求签发新设备配对码",
+    );
   } else {
     console.log(
-      `[psyber] 当前已有 ${runtime.config.auth.devices.length} 台已配对设备。如需配对新客户端，可在本终端按 p 回车，或带 --pair 选项重启（bun run pair）。`,
+      `[psyber] 当前已有 ${runtime.config.auth.devices.length} 台已配对设备。如需配对新客户端，可在本终端按 p 回车，或在桌面端设置「工具与设备」生成扫码二维码。`,
     );
   }
 
@@ -676,21 +841,46 @@ async function main(): Promise<void> {
     ttyListener = (chunk: string) => {
       const text = chunk.trim().toLowerCase();
       if (text === "p" || text === "pair") {
-        const pair = runtime.pairing.issueCode();
-        console.log(`[psyber] 控制台交互签发一次性配对码（5 分钟有效）：${pair.code}`);
+        printPairCodeWithQr("[psyber] 控制台交互签发一次性配对码");
       }
     };
     process.stdin.on("data", ttyListener);
   }
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
-    console.log(`[psyber] 收到 ${signal}，正在等待后台整理收尾并安全停机...`);
+    if (shuttingDown) {
+      console.log(`[psyber] 再次收到 ${signal}，立即强制退出。`);
+      process.exit(130);
+      return;
+    }
+    shuttingDown = true;
+    console.log(
+      `[psyber] 收到 ${signal}，正在等待后台整理收尾并安全停机（再次按 Ctrl+C 可立即退出）...`,
+    );
     if (ttyListener) {
       process.stdin.off("data", ttyListener);
+      process.stdin.pause();
+      (process.stdin as { unref?: () => void }).unref?.();
     }
-    server.stop();
-    await runtime.stop();
-    process.exit(0);
+
+    const hardExitTimer = setTimeout(() => {
+      console.warn("[psyber] 停机收尾超过 5 秒，已自动退出。");
+      process.exit(0);
+    }, 5_000);
+    hardExitTimer.unref?.();
+
+    try {
+      runtime.sse.disconnectAll();
+      void server.stop(true);
+      await discovery?.close();
+      await runtime.stop({ waitTimeoutMs: 4_000 });
+    } catch (err) {
+      console.error("[psyber] 停机过程中出现异常：", err);
+    } finally {
+      clearTimeout(hardExitTimer);
+      process.exit(0);
+    }
   };
 
   process.on("SIGINT", () => {
