@@ -326,11 +326,13 @@ class AppController {
     required String deviceName,
     required String platform,
   }) async {
+    final clientId = await _storage.loadOrCreateClientId();
     final profile = await _api.pair(
       baseUrl: baseUrl,
       code: code,
       deviceName: deviceName,
       platform: platform,
+      clientId: clientId,
     );
     _manuallyDisconnected = false;
     await _storage.save(profile);
@@ -346,11 +348,13 @@ class AppController {
     required String deviceName,
     required String platform,
   }) async {
+    final clientId = await _storage.loadOrCreateClientId();
     final profile = await _api.localPair(
       baseUrl: baseUrl,
       secret: secret,
       deviceName: deviceName,
       platform: platform,
+      clientId: clientId,
     );
     _manuallyDisconnected = false;
     await _storage.save(profile);
@@ -546,27 +550,48 @@ class AppController {
     _cancelSseAndTimers();
     connectionNotifier.value = ConnectionPhase.connecting;
 
+    void resetInMemorySessionState() {
+      _initialSnapshotLoaded = false;
+      _highestSeqSeen = 0;
+      _hasLoadedOlder = false;
+      _hasMoreHistory = false;
+      _nextBeforeId = null;
+      _lastStreamSeq = null;
+      timelineNotifier.value = const <TimelineItem>[];
+      activeTurnNotifier.value = null;
+      instanceMismatchNotifier.value = false;
+      turnErrorNotifier.value = null;
+    }
+
     try {
       final health = await _api.checkHealth(profile.baseUrl);
       if (_disposed || _isPaused) return;
       if (profile.instanceId.isNotEmpty &&
           health.instanceId.isNotEmpty &&
           health.instanceId != profile.instanceId) {
-        // 本机桌面端切换本地实例时，若 0600 local_pair.json 与当前健康检查实例一致，自动免码切入新实例
+        // 1. 优先复用本地多实例凭证缓存（切回曾经配对过的实例无需重新配对，也不增加重复设备）
+        final cached = await _storage.loadForInstance(health.instanceId);
+        if (!_disposed && cached != null) {
+          final switched = ConnectionProfile(
+            baseUrl: profile.baseUrl,
+            token: cached.token,
+            deviceId: cached.deviceId,
+            instanceId: cached.instanceId,
+            deviceName: cached.deviceName,
+          );
+          resetInMemorySessionState();
+          await _storage.save(switched);
+          if (_disposed) return;
+          profileNotifier.value = switched;
+          await connectAndSync();
+          return;
+        }
+        // 2. 本地未缓存该实例凭证时，若为本机桌面端回环地址且 0600 local_pair.json 匹配，自动免码切入
         if (_isDesktopPlatform && isLoopbackUrl(profile.baseUrl)) {
           final hint = await _localPairHintLoader();
           if (!_disposed && hint != null && hint.instanceId == health.instanceId) {
             try {
-              _initialSnapshotLoaded = false;
-              _highestSeqSeen = 0;
-              _hasLoadedOlder = false;
-              _hasMoreHistory = false;
-              _nextBeforeId = null;
-              _lastStreamSeq = null;
-              timelineNotifier.value = const <TimelineItem>[];
-              activeTurnNotifier.value = null;
-              instanceMismatchNotifier.value = false;
-              turnErrorNotifier.value = null;
+              resetInMemorySessionState();
               await localPairAndConnect(
                 baseUrl: profile.baseUrl,
                 secret: hint.secret,
@@ -608,6 +633,31 @@ class AppController {
       _startSse(profile, foreground: !_inBackgroundStream);
     } on CanceledException {
       // 预期内取消，静默忽略
+    } on ApiException catch (e) {
+      if (_disposed || _isPaused) return;
+      if (e.statusCode == 401) {
+        await _storage.removeInstance(profile.instanceId);
+        // 若本机桌面端旧令牌已被吊销，自动尝试用 0600 local_pair.json 重新免码恢复
+        if (_isDesktopPlatform && isLoopbackUrl(profile.baseUrl)) {
+          final hint = await _localPairHintLoader();
+          if (!_disposed && hint != null && hint.instanceId == profile.instanceId) {
+            try {
+              await localPairAndConnect(
+                baseUrl: profile.baseUrl,
+                secret: hint.secret,
+                deviceName: _defaultDesktopDeviceName(),
+                platform: _defaultDesktopWirePlatform(),
+              );
+              return;
+            } catch (_) {
+              // 回落至配对页
+            }
+          }
+        }
+        await disconnect(notifyServer: false);
+        return;
+      }
+      _scheduleReconnect();
     } catch (_) {
       if (_disposed || _isPaused) return;
       _scheduleReconnect();

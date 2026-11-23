@@ -45,5 +45,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-23 配对安全补强、局域网发现、二维码签发、本机免码与 Ctrl+C 优雅停机修复后实测）**：`bun run typecheck` 零错误；`bun test`（16 文件 / 57 用例）全部通过。
-- **`app/`（2026-11-23 宿主机终端实测）**：`cd app && flutter analyze && flutter test` 零警告、全量通过。
+- **`server/`（2026-11-23 配对安全补强、局域网发现、二维码签发、本机免码、同 `clientId` 设备去重与 Ctrl+C 优雅停机后实测）**：`bun run typecheck` 零错误；`bun test`（16 文件 / 58 用例）全部通过。
+- **`app/`（2026-11-23）**：iOS 扫码 `AppDelegate.swift` 已通过 `swiftc -parse`；多实例凭证缓存与 `clientId` 改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -49,11 +50,28 @@ class ThemePreferences {
   }
 }
 
-/// 本地会话凭证与输入草稿存储抽象（Ring 1 原子写 + POSIX 0600 权限）。
+String _generateStableClientId() {
+  final rng = Random.secure();
+  final buf = StringBuffer('cid_');
+  for (var i = 0; i < 16; i++) {
+    buf.write(rng.nextInt(256).toRadixString(16).padLeft(2, '0'));
+  }
+  return buf.toString();
+}
+
+/// 本地会话凭证与输入草稿存储抽象（支持按 instanceId 保存多实例凭证、稳定 clientId 与 POSIX 0600 权限）。
 abstract class SessionStorage {
   Future<ConnectionProfile?> load();
+  Future<ConnectionProfile?> loadForInstance(String instanceId) async {
+    final active = await load();
+    if (active != null && active.instanceId == instanceId) return active;
+    return null;
+  }
+
   Future<void> save(ConnectionProfile profile);
+  Future<void> removeInstance(String instanceId) async => clear();
   Future<void> clear();
+  Future<String> loadOrCreateClientId();
   Future<String> loadDraft();
   Future<void> saveDraft(String draft);
   Future<ThemePreferences> loadThemePreferences() async => const ThemePreferences();
@@ -61,25 +79,62 @@ abstract class SessionStorage {
 }
 
 class MemorySessionStorage implements SessionStorage {
-  ConnectionProfile? _profile;
+  String? _activeInstanceId;
+  final Map<String, ConnectionProfile> _profiles = <String, ConnectionProfile>{};
+  final String _clientId;
   String _draft = '';
   ThemePreferences _themePrefs = const ThemePreferences();
 
-  MemorySessionStorage([this._profile]);
+  MemorySessionStorage([ConnectionProfile? initial, String? clientId])
+      : _clientId = clientId ?? _generateStableClientId() {
+    if (initial != null) {
+      final key = _profileKey(initial);
+      _profiles[key] = initial;
+      _activeInstanceId = key;
+    }
+  }
+
+  static String _profileKey(ConnectionProfile p) =>
+      p.instanceId.isNotEmpty ? p.instanceId : p.baseUrl;
 
   @override
-  Future<ConnectionProfile?> load() async => _profile;
+  Future<ConnectionProfile?> load() async {
+    final active = _activeInstanceId;
+    if (active == null) return null;
+    return _profiles[active];
+  }
+
+  @override
+  Future<ConnectionProfile?> loadForInstance(String instanceId) async =>
+      _profiles[instanceId];
 
   @override
   Future<void> save(ConnectionProfile profile) async {
-    _profile = profile;
+    final key = _profileKey(profile);
+    _profiles[key] = profile;
+    _activeInstanceId = key;
+  }
+
+  @override
+  Future<void> removeInstance(String instanceId) async {
+    _profiles.remove(instanceId);
+    if (_activeInstanceId == instanceId) {
+      _activeInstanceId = null;
+    }
   }
 
   @override
   Future<void> clear() async {
-    _profile = null;
+    final active = _activeInstanceId;
+    if (active != null) {
+      _profiles.remove(active);
+    }
+    _activeInstanceId = null;
     _draft = '';
   }
+
+  @override
+  Future<String> loadOrCreateClientId() async => _clientId;
 
   @override
   Future<String> loadDraft() async => _draft;
@@ -98,6 +153,55 @@ class MemorySessionStorage implements SessionStorage {
   }
 }
 
+class _SessionStoreData {
+  _SessionStoreData({
+    required this.activeInstanceId,
+    required this.profiles,
+  });
+
+  String? activeInstanceId;
+  final Map<String, ConnectionProfile> profiles;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'v': 2,
+        'activeInstanceId': activeInstanceId,
+        'profiles': profiles.map((k, v) => MapEntry(k, v.toJson())),
+      };
+
+  static _SessionStoreData fromJson(Map<String, dynamic> json) {
+    final rawProfiles = json['profiles'];
+    if (json['v'] == 2 && rawProfiles is Map<String, dynamic>) {
+      final map = <String, ConnectionProfile>{};
+      for (final entry in rawProfiles.entries) {
+        if (entry.value is Map<String, dynamic>) {
+          final p = ConnectionProfile.fromJson(entry.value as Map<String, dynamic>);
+          if (p.baseUrl.isNotEmpty && p.token.isNotEmpty) {
+            map[entry.key] = p;
+          }
+        }
+      }
+      final active = json['activeInstanceId'] as String?;
+      return _SessionStoreData(
+        activeInstanceId: active != null && map.containsKey(active) ? active : null,
+        profiles: map,
+      );
+    }
+    // 兼容旧版单对象 client_session.json
+    final legacy = ConnectionProfile.fromJson(json);
+    if (legacy.baseUrl.isEmpty || legacy.token.isEmpty) {
+      return _SessionStoreData(
+        activeInstanceId: null,
+        profiles: <String, ConnectionProfile>{},
+      );
+    }
+    final key = legacy.instanceId.isNotEmpty ? legacy.instanceId : legacy.baseUrl;
+    return _SessionStoreData(
+      activeInstanceId: key,
+      profiles: <String, ConnectionProfile>{key: legacy},
+    );
+  }
+}
+
 class FileSessionStorage implements SessionStorage {
   FileSessionStorage({File? file}) : _explicitFile = file;
 
@@ -105,6 +209,7 @@ class FileSessionStorage implements SessionStorage {
 
   final File? _explicitFile;
   File? _resolvedFile;
+  String? _cachedClientId;
   Future<void> _themeSaveQueue = Future<void>.value();
   int _tmpSeq = 0;
 
@@ -136,29 +241,38 @@ class FileSessionStorage implements SessionStorage {
     return file;
   }
 
-  @override
-  Future<ConnectionProfile?> load() async {
+  Future<_SessionStoreData> _readStore() async {
     try {
       final file = await _getFile();
-      if (!await file.exists()) return null;
+      if (!await file.exists()) {
+        return _SessionStoreData(
+          activeInstanceId: null,
+          profiles: <String, ConnectionProfile>{},
+        );
+      }
       final raw = await file.readAsString();
       final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return null;
-      final profile = ConnectionProfile.fromJson(decoded);
-      if (profile.baseUrl.isEmpty || profile.token.isEmpty) return null;
-      return profile;
+      if (decoded is! Map<String, dynamic>) {
+        return _SessionStoreData(
+          activeInstanceId: null,
+          profiles: <String, ConnectionProfile>{},
+        );
+      }
+      return _SessionStoreData.fromJson(decoded);
     } catch (_) {
-      return null;
+      return _SessionStoreData(
+        activeInstanceId: null,
+        profiles: <String, ConnectionProfile>{},
+      );
     }
   }
 
-  @override
-  Future<void> save(ConnectionProfile profile) async {
-    final file = await _getFile();
+  Future<void> _writePrivateFile(File file, String content) async {
     await file.parent.create(recursive: true);
-    final tmp = File('${file.path}.tmp.${DateTime.now().microsecondsSinceEpoch}');
+    _tmpSeq += 1;
+    final tmp = File('${file.path}.tmp.${DateTime.now().microsecondsSinceEpoch}.$_tmpSeq');
     try {
-      await tmp.writeAsString(jsonEncode(profile.toJson()), flush: true);
+      await tmp.writeAsString(content, flush: true);
       if (!Platform.isWindows && !Platform.isIOS) {
         try {
           await Process.run('chmod', ['600', tmp.path]);
@@ -182,11 +296,64 @@ class FileSessionStorage implements SessionStorage {
   }
 
   @override
+  Future<ConnectionProfile?> load() async {
+    final store = await _readStore();
+    final active = store.activeInstanceId;
+    if (active == null) return null;
+    return store.profiles[active];
+  }
+
+  @override
+  Future<ConnectionProfile?> loadForInstance(String instanceId) async {
+    if (instanceId.isEmpty) return null;
+    final store = await _readStore();
+    return store.profiles[instanceId];
+  }
+
+  @override
+  Future<void> save(ConnectionProfile profile) async {
+    final file = await _getFile();
+    final store = await _readStore();
+    final key = profile.instanceId.isNotEmpty ? profile.instanceId : profile.baseUrl;
+    store.profiles[key] = profile;
+    store.activeInstanceId = key;
+    await _writePrivateFile(file, jsonEncode(store.toJson()));
+  }
+
+  @override
+  Future<void> removeInstance(String instanceId) async {
+    try {
+      final file = await _getFile();
+      final store = await _readStore();
+      store.profiles.remove(instanceId);
+      if (store.activeInstanceId == instanceId) {
+        store.activeInstanceId = null;
+      }
+      if (store.profiles.isEmpty) {
+        if (await file.exists()) await file.delete();
+      } else {
+        await _writePrivateFile(file, jsonEncode(store.toJson()));
+      }
+    } catch (_) {
+      // 忽略清理失败
+    }
+  }
+
+  @override
   Future<void> clear() async {
     try {
       final file = await _getFile();
-      if (await file.exists()) {
-        await file.delete();
+      final store = await _readStore();
+      if (store.activeInstanceId != null) {
+        store.profiles.remove(store.activeInstanceId);
+        store.activeInstanceId = null;
+      }
+      if (store.profiles.isEmpty) {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } else {
+        await _writePrivateFile(file, jsonEncode(store.toJson()));
       }
       final draftFile = _draftFile(file);
       if (await draftFile.exists()) {
@@ -194,6 +361,34 @@ class FileSessionStorage implements SessionStorage {
       }
     } catch (_) {
       // 忽略清理失败
+    }
+  }
+
+  File _clientIdFile(File sessionFile) =>
+      File('${sessionFile.parent.path}/client_id.txt');
+
+  @override
+  Future<String> loadOrCreateClientId() async {
+    if (_cachedClientId != null && _cachedClientId!.isNotEmpty) {
+      return _cachedClientId!;
+    }
+    try {
+      final f = _clientIdFile(await _getFile());
+      if (await f.exists()) {
+        final existing = (await f.readAsString()).trim();
+        if (existing.length >= 8 && existing.length <= 64) {
+          _cachedClientId = existing;
+          return existing;
+        }
+      }
+      final created = _generateStableClientId();
+      await _writePrivateFile(f, '$created\n');
+      _cachedClientId = created;
+      return created;
+    } catch (_) {
+      final fallback = _generateStableClientId();
+      _cachedClientId = fallback;
+      return fallback;
     }
   }
 

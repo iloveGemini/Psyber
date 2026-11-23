@@ -6,6 +6,8 @@ export type DoorState = "open" | "quiet" | "closed";
 export interface PairedDevice {
   /** 设备唯一 ID */
   deviceId: string;
+  /** 客户端安装级稳定标识（可选，同客户端重新配对时原地轮换 Token 避免设备列表重复） */
+  clientId?: string;
   /** Bearer Token 的 SHA-256 十六进制哈希（绝不明文存盘） */
   tokenHash: string;
   /** 设备展示名 */

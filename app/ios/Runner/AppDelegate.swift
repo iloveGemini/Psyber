@@ -69,8 +69,11 @@ import UIKit
 private final class PsyberQrScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
   private let onComplete: (String?) -> Void
   private let session = AVCaptureSession()
+  private let sessionQueue = DispatchQueue(label: "psyber.qr.session")
   private var previewLayer: AVCaptureVideoPreviewLayer?
+  private var cameraReady = false
   private var finished = false
+  private var callbackInvoked = false
 
   init(onComplete: @escaping (String?) -> Void) {
     self.onComplete = onComplete
@@ -88,6 +91,16 @@ private final class PsyberQrScannerViewController: UIViewController, AVCaptureMe
     setupOverlay()
   }
 
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    // 等转场动画完全结束后再启动取景扫描，避免 present 动画进行中识别到二维码导致 UIKit 丢弃 dismiss
+    guard cameraReady, !finished else { return }
+    sessionQueue.async { [weak self] in
+      guard let self = self, !self.finished, !self.session.isRunning else { return }
+      self.session.startRunning()
+    }
+  }
+
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     previewLayer?.frame = view.bounds
@@ -95,22 +108,24 @@ private final class PsyberQrScannerViewController: UIViewController, AVCaptureMe
 
   override func viewWillDisappear(_ animated: Bool) {
     super.viewWillDisappear(animated)
-    if session.isRunning {
-      session.stopRunning()
-    }
+    stopSessionAsync()
   }
 
   private func setupCamera() {
     guard let device = AVCaptureDevice.default(for: .video),
           let input = try? AVCaptureDeviceInput(device: device),
           session.canAddInput(input) else {
-      finish(with: nil)
+      DispatchQueue.main.async { [weak self] in
+        self?.finish(with: nil)
+      }
       return
     }
     session.addInput(input)
     let output = AVCaptureMetadataOutput()
     guard session.canAddOutput(output) else {
-      finish(with: nil)
+      DispatchQueue.main.async { [weak self] in
+        self?.finish(with: nil)
+      }
       return
     }
     session.addOutput(output)
@@ -122,10 +137,7 @@ private final class PsyberQrScannerViewController: UIViewController, AVCaptureMe
     preview.frame = view.bounds
     view.layer.addSublayer(preview)
     previewLayer = preview
-
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      self?.session.startRunning()
-    }
+    cameraReady = true
   }
 
   private func setupOverlay() {
@@ -177,14 +189,49 @@ private final class PsyberQrScannerViewController: UIViewController, AVCaptureMe
     finish(with: value)
   }
 
-  private func finish(with value: String?) {
-    guard !finished else { return }
-    finished = true
-    if session.isRunning {
-      session.stopRunning()
+  private func stopSessionAsync() {
+    sessionQueue.async { [weak self] in
+      guard let self = self, self.session.isRunning else { return }
+      self.session.stopRunning()
     }
-    dismiss(animated: true) {
-      self.onComplete(value)
+  }
+
+  private func invokeCallbackOnce(_ value: String?) {
+    guard !callbackInvoked else { return }
+    callbackInvoked = true
+    onComplete(value)
+  }
+
+  private func finish(with value: String?) {
+    let wasFinished = finished
+    finished = true
+    if !wasFinished && value != nil {
+      UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+    stopSessionAsync()
+
+    let performDismiss = { [weak self] in
+      guard let self = self else { return }
+      if self.presentingViewController != nil {
+        self.dismiss(animated: true) {
+          self.invokeCallbackOnce(value)
+        }
+      } else {
+        self.invokeCallbackOnce(value)
+      }
+    }
+
+    // 若仍处于弹出转场动画中，等转场收尾后再执行 dismiss，确保相机页不会残留
+    if let coordinator = transitionCoordinator {
+      coordinator.animate(alongsideTransition: nil) { _ in
+        performDismiss()
+      }
+    } else if isBeingPresented {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        performDismiss()
+      }
+    } else {
+      performDismiss()
     }
   }
 }

@@ -247,4 +247,66 @@ describe("配对安全补强、本机免码、二维码签发与局域网自动�
     expect(closedCount).toBe(2);
     expect(rt.sse.subscriberCount).toBe(0);
   });
+
+  test("同一 clientId 重复配对/本机免码原地轮换令牌且不新增重复设备", async () => {
+    ctx = await createTestContext();
+    const pairing = new PairingManager(ctx.clock);
+    const localKey = pairing.issueLocalSecret();
+    const sse = new SseHub();
+    const app = createApp({
+      version: "0.1.0",
+      clock: ctx.clock,
+      getConfig: () => ctx!.config,
+      events: ctx.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: ctx.dataDir,
+      db: ctx.db,
+      memoryIndex: ctx.index,
+      pairing,
+      sse,
+      getClientIp: () => "127.0.0.1",
+    });
+
+    const initialCount = ctx.config.auth.devices.length;
+    const first = await app.request("/api/v1/auth/local-pair", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secret: localKey,
+        deviceName: "Mac",
+        platform: "macos",
+        clientId: "cid_mac_stable_001",
+      }),
+    });
+    expect(first.status).toBe(200);
+    const firstJson = (await first.json()) as { deviceId: string; token: string };
+    expect(ctx.config.auth.devices.length).toBe(initialCount + 1);
+
+    // 同一 clientId 再次免码配对：沿用原 deviceId、轮换 token、设备数不增加
+    const second = await app.request("/api/v1/auth/local-pair", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secret: localKey,
+        deviceName: "Mac",
+        platform: "macos",
+        clientId: "cid_mac_stable_001",
+      }),
+    });
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as { deviceId: string; token: string };
+    expect(secondJson.deviceId).toBe(firstJson.deviceId);
+    expect(secondJson.token).not.toBe(firstJson.token);
+    expect(ctx.config.auth.devices.length).toBe(initialCount + 1);
+
+    // 旧令牌立即失效，新令牌可用
+    const oldRes = await app.request("/api/v1/door", {
+      headers: { authorization: `Bearer ${firstJson.token}` },
+    });
+    expect(oldRes.status).toBe(401);
+    const newRes = await app.request("/api/v1/door", {
+      headers: { authorization: `Bearer ${secondJson.token}` },
+    });
+    expect(newRes.status).toBe(200);
+  });
 });

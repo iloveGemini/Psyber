@@ -219,27 +219,56 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         "direct",
     );
 
+  const normalizeClientId = (raw: unknown): string | undefined => {
+    if (typeof raw !== "string") return undefined;
+    const trimmed = raw.trim();
+    if (!/^[A-Za-z0-9._-]{8,64}$/.test(trimmed)) return undefined;
+    return trimmed;
+  };
+
   const persistPairedDevice = async (info: {
     deviceId: string;
     token: string;
     deviceName: string;
     platform: string;
+    clientId?: string;
   }) => {
     const cfg = deps.getConfig();
     const now = deps.clock.now();
-    cfg.auth.devices.push({
-      deviceId: info.deviceId,
-      tokenHash: hashBearerToken(info.token),
-      deviceName: info.deviceName.trim(),
-      platform: info.platform.trim(),
-      createdAt: now,
-      lastSeenAt: now,
-    });
+    const cleanName = info.deviceName.trim();
+    const cleanPlatform = info.platform.trim();
+    const cleanClientId = normalizeClientId(info.clientId);
+    const tokenHash = hashBearerToken(info.token);
+
+    const existing = cleanClientId
+      ? cfg.auth.devices.find((d) => d.clientId === cleanClientId)
+      : undefined;
+
+    let finalDeviceId = info.deviceId;
+    if (existing) {
+      finalDeviceId = existing.deviceId;
+      existing.tokenHash = tokenHash;
+      existing.deviceName = cleanName;
+      existing.platform = cleanPlatform;
+      existing.lastSeenAt = now;
+      // 轮换旧 Token 时顺手断开旧 SSE 连接，确保旧会话不会残留
+      deps.sse?.disconnectDevices([existing.deviceId]);
+    } else {
+      cfg.auth.devices.push({
+        deviceId: info.deviceId,
+        ...(cleanClientId ? { clientId: cleanClientId } : {}),
+        tokenHash,
+        deviceName: cleanName,
+        platform: cleanPlatform,
+        createdAt: now,
+        lastSeenAt: now,
+      });
+    }
     if (deps.dataDir) {
       await saveConfig(deps.dataDir, cfg);
     }
     return {
-      deviceId: info.deviceId,
+      deviceId: finalDeviceId,
       token: info.token,
       instanceId: cfg.instanceId,
       serverVersion: deps.version,
@@ -251,7 +280,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (!deps.pairing) {
       return c.json({ error: { code: "PAIRING_UNAVAILABLE", message: "当前未启用配对服务" } }, 503);
     }
-    let body: { code?: string; deviceName?: string; platform?: string };
+    let body: { code?: string; deviceName?: string; platform?: string; clientId?: string };
     try {
       body = await c.req.json();
     } catch {
@@ -273,6 +302,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         token: res.token,
         deviceName: body.deviceName,
         platform: body.platform,
+        clientId: body.clientId,
       }),
     );
   });
@@ -282,7 +312,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (!deps.pairing) {
       return c.json({ error: { code: "PAIRING_UNAVAILABLE", message: "当前未启用配对服务" } }, 503);
     }
-    let body: { secret?: string; deviceName?: string; platform?: string };
+    let body: { secret?: string; deviceName?: string; platform?: string; clientId?: string };
     try {
       body = await c.req.json();
     } catch {
@@ -302,6 +332,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         token: res.token,
         deviceName: body.deviceName,
         platform: body.platform,
+        clientId: body.clientId,
       }),
     );
   });

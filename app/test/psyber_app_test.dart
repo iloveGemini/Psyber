@@ -142,6 +142,7 @@ class FakePsyberApiClient implements PsyberApiClient {
     required String code,
     required String deviceName,
     required String platform,
+    String? clientId,
   }) async {
     if (code.trim() != 'ABCD-1234') {
       throw const ApiException(
@@ -165,6 +166,7 @@ class FakePsyberApiClient implements PsyberApiClient {
     required String secret,
     required String deviceName,
     required String platform,
+    String? clientId,
   }) async {
     if (secret.trim() != 'local-secret-demo') {
       throw const ApiException(
@@ -2792,6 +2794,45 @@ void main() {
       expect(find.byKey(const Key('pair_submit_button')), findsOneWidget);
     },
   );
+
+  test('FileSessionStorage 按 instanceId 缓存多实例凭证且持久化稳定 clientId', () async {
+    final tmpDir = await Directory.systemTemp.createTemp('psyber_multi_inst_');
+    addTearDown(() async {
+      if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+    });
+    final storage = FileSessionStorage(file: File('${tmpDir.path}/client_session.json'));
+
+    final cid1 = await storage.loadOrCreateClientId();
+    final cid2 = await storage.loadOrCreateClientId();
+    expect(cid1, isNotEmpty);
+    expect(cid2, cid1);
+
+    const profA = ConnectionProfile(
+      baseUrl: 'http://localhost:3721',
+      token: 'demo-session-a',
+      deviceId: 'dev-a',
+      instanceId: 'inst-a',
+      deviceName: 'Mac',
+    );
+    const profB = ConnectionProfile(
+      baseUrl: 'http://localhost:3721',
+      token: 'demo-session-b',
+      deviceId: 'dev-b',
+      instanceId: 'inst-b',
+      deviceName: 'Mac',
+    );
+    await storage.save(profA);
+    await storage.save(profB);
+
+    expect((await storage.load())?.instanceId, 'inst-b');
+    expect((await storage.loadForInstance('inst-a'))?.deviceId, 'dev-a');
+    expect((await storage.loadForInstance('inst-b'))?.deviceId, 'dev-b');
+
+    // 重新构造实例验证磁盘持久化与稳定 clientId
+    final storage2 = FileSessionStorage(file: File('${tmpDir.path}/client_session.json'));
+    expect(await storage2.loadOrCreateClientId(), cid1);
+    expect((await storage2.loadForInstance('inst-a'))?.token, 'demo-session-a');
+  });
 }
 
 class _FakeLanDiscoveryService implements LanDiscoveryService {

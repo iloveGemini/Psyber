@@ -70,6 +70,7 @@ abstract class PsyberApiClient {
     required String code,
     required String deviceName,
     required String platform,
+    String? clientId,
   });
 
   /// 仅限本机桌面端免码配对（读取 0600 local_pair.json 密钥）。
@@ -78,6 +79,7 @@ abstract class PsyberApiClient {
     required String secret,
     required String deviceName,
     required String platform,
+    String? clientId,
   });
 
   /// 已配对设备为新设备签发 5 分钟一次性配对码与扫码二维码载荷。
@@ -364,6 +366,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     required String code,
     required String deviceName,
     required String platform,
+    String? clientId,
   }) async {
     final cleanBase = normalizeBaseUrl(baseUrl);
     final uri = Uri.parse('$cleanBase/api/v1/auth/pair');
@@ -374,6 +377,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
         'code': code.trim(),
         'deviceName': deviceName.trim(),
         'platform': platform,
+        if (clientId != null && clientId.trim().isNotEmpty) 'clientId': clientId.trim(),
       },
     );
     return ConnectionProfile(
@@ -391,6 +395,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     required String secret,
     required String deviceName,
     required String platform,
+    String? clientId,
   }) async {
     final cleanBase = normalizeBaseUrl(baseUrl);
     final uri = Uri.parse('$cleanBase/api/v1/auth/local-pair');
@@ -401,6 +406,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
         'secret': secret.trim(),
         'deviceName': deviceName.trim(),
         'platform': platform,
+        if (clientId != null && clientId.trim().isNotEmpty) 'clientId': clientId.trim(),
       },
     );
     return ConnectionProfile(
