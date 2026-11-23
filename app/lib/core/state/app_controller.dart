@@ -840,10 +840,26 @@ class AppController {
     return _api.openDrawerEntry(profile, id);
   }
 
-  Future<UsageStatsSnapshot?> loadUsageStats() async {
+  Future<UsageStatsSnapshot?> loadUsageStats({int? days}) async {
     final profile = profileNotifier.value;
     if (profile == null) return null;
-    return _api.getUsageStats(profile);
+    return _api.getUsageStats(profile, days: days);
+  }
+
+  Future<List<DiscoveredModelView>> loadLlmModels({String? provider}) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return const <DiscoveredModelView>[];
+    return _api.listLlmModels(profile, provider: provider);
+  }
+
+  Future<ModelCatalogSyncResult?> syncModelCatalog() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    final res = await _api.syncModelCatalog(profile);
+    if (!_disposed) {
+      unawaited(loadSettings());
+    }
+    return res;
   }
 
   Future<LlmTestResult?> testLlmModel({

@@ -220,8 +220,17 @@ abstract class PsyberApiClient {
     String id,
   );
 
-  /// Ring 1.5：读取设置页消耗统计（今日/累计/按日/按模型费用与 Prompt Cache 命中率）。
-  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile);
+  /// Ring 1.5：读取设置页消耗统计（支持按 days 范围筛选）。
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile, {int? days});
+
+  /// 拉取服务商下可发现模型清单（含 models.dev 元数据与手工覆写）。
+  Future<List<DiscoveredModelView>> listLlmModels(
+    ConnectionProfile profile, {
+    String? provider,
+  });
+
+  /// 手动触发 models.dev 模型元数据目录同步。
+  Future<ModelCatalogSyncResult> syncModelCatalog(ConnectionProfile profile);
 
   /// Ring 1.5：一键模型连通测试。
   Future<LlmTestResult> testLlmModel(
@@ -1001,14 +1010,52 @@ class HttpPsyberApiClient implements PsyberApiClient {
   }
 
   @override
-  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile) async {
-    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/usage/stats');
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile, {int? days}) async {
+    final baseUri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/usage/stats');
+    final uri = days != null
+        ? baseUri.replace(queryParameters: {'days': '$days'})
+        : baseUri;
     final json = await _requestJson(
       method: 'GET',
       uri: uri,
       bearerToken: profile.token,
     );
     return UsageStatsSnapshot.fromJson(json);
+  }
+
+  @override
+  Future<List<DiscoveredModelView>> listLlmModels(
+    ConnectionProfile profile, {
+    String? provider,
+  }) async {
+    final baseUri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/llm/models');
+    final uri = (provider != null && provider.trim().isNotEmpty)
+        ? baseUri.replace(queryParameters: {'provider': provider.trim()})
+        : baseUri;
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    final raw = json['models'];
+    if (raw is! List<dynamic>) return const <DiscoveredModelView>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(DiscoveredModelView.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<ModelCatalogSyncResult> syncModelCatalog(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/llm/catalog/sync');
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
+      timeout: const Duration(seconds: 15),
+    );
+    return ModelCatalogSyncResult.fromJson(json);
   }
 
   @override

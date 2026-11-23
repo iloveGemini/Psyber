@@ -661,7 +661,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
+                                  const Icon(
                                     PhosphorIconsLight.bell,
                                     size: 13.5,
                                     color: urgentCardInk,
@@ -743,7 +743,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
+                      const Icon(
                         PhosphorIconsLight.bell,
                         size: 13.5,
                         color: urgentCardInk,
@@ -912,7 +912,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          Icon(
+                          const Icon(
                             PhosphorIconsLight.envelopeSimple,
                             size: 15,
                             color: paperCardAccent,

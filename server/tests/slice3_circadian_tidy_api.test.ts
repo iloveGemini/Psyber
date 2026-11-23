@@ -415,6 +415,78 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("当前日期：2026-11-22（周日 · ISO周 2026-W47）");
     expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("周梗概目标：gist/weeks/2026.md（节标题 ### 2026-W47");
     expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("本月日梗概（gist/days/2026-11.md");
+
+    // 4. 输出截断（stopReason=length）或仅有思考链而无正文/工具调用时，必须回滚磁盘且绝不推进游标
+    ctx.clock.jumpToWallClock(2026, 11, 23, 22, 0, 0);
+    const cursorBeforeTrunc = ctx.events.getCursor("daily_wrapup");
+    ctx.events.append({
+      sessionId: "s3",
+      turnId: "t3",
+      role: "user",
+      kind: "chat",
+      content: "今天聊了很多重要约定",
+    });
+
+    // 4a: 第一步写了卡片，第二步在思考中撞到 length 截断 -> 必须回滚第一步卡片且不推进游标
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "先建一张日常卡", signature: "sig-tidy-1" },
+      {
+        type: "tool_call",
+        id: "tc-trunc-1",
+        name: "write",
+        args: {
+          path: "daily/2026-11-23-aborted-card.md",
+          content: "---\ntitle: 截断前草稿\nkind: episode\nstatus: active\ncreated: 2026-11-23\nupdated: 2026-11-23\n---\n草稿",
+        },
+      },
+      { type: "usage", inputTokens: 100, outputTokens: 50, totalTokens: 150, stopReason: "toolUse" },
+    ]);
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "继续想怎么写第二张卡，结果思考太长把额度用完了……" },
+      { type: "usage", inputTokens: 200, outputTokens: 4096, totalTokens: 4296, stopReason: "length" },
+    ]);
+
+    const truncRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: mockChat,
+      },
+      { taskType: "daily_wrapup", nightDate: "2026-11-23" },
+    );
+    expect(truncRes.ok).toBe(false);
+    expect(truncRes.error).toContain("OUTPUT_TRUNCATED");
+    expect(ctx.events.getCursor("daily_wrapup")).toBe(cursorBeforeTrunc);
+    await expect(
+      fs.access(path.join(ctx.dataDir, "memory/daily/2026-11-23-aborted-card.md")),
+    ).rejects.toThrow();
+
+    // 4b: 即使上游未报 length，仅输出思考链而无正文/工具调用，也必须判失败且不推进游标
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "只输出了一段思考过程，没调用工具也没给汇总 JSON" },
+      { type: "usage", inputTokens: 200, outputTokens: 300, totalTokens: 500, stopReason: "stop" },
+    ]);
+    const emptyRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: mockChat,
+      },
+      { taskType: "daily_wrapup", nightDate: "2026-11-23" },
+    );
+    expect(emptyRes.ok).toBe(false);
+    expect(emptyRes.error).toContain("EMPTY_OUTPUT");
+    expect(ctx.events.getCursor("daily_wrapup")).toBe(cursorBeforeTrunc);
   });
 
   test("API 端点闭环：/auth/pair 防伪造头爆破、/genesis BYOK 0600 落盘与防覆写、/media、/settings 校验脱敏与未回重置", async () => {

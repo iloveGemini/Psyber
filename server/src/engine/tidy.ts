@@ -3,9 +3,16 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { Clock } from "../core/clock.ts";
 import { localDateStartMs, localDateTime, localDay, weekdayOfDay } from "../core/clock.ts";
+import type { PsyberConfig } from "../core/config.ts";
 import { commitMemoryPaths } from "../core/git.ts";
 import { readPrompt, stripFrontmatter } from "../core/prompts.ts";
-import type { ChatMessage, ChatModelClient, ChatToolCall } from "../llm/client.ts";
+import type {
+  ChatMessage,
+  ChatModelClient,
+  ChatStopReason,
+  ChatToolCall,
+} from "../llm/client.ts";
+import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
 import { readIdentityProfile } from "../memory/genesis.ts";
 import { weekOf } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
@@ -28,6 +35,7 @@ export interface TidyTaskDeps {
   memoryIndex: MemoryIndex;
   memoryTools: MemoryTools;
   chatModel: ChatModelClient;
+  getConfig?: () => PsyberConfig;
 }
 
 export interface TidyTaskOutcome {
@@ -253,38 +261,71 @@ async function executeSingleTidyPass(
     }
   };
 
+  const cfgForTidy = deps.getConfig?.();
+  const effectiveThinkingLevel = cfgForTidy ? resolveEffectiveThinkingLevel(cfgForTidy) : undefined;
+  const effectiveThinkingBudget = cfgForTidy?.llm?.thinking?.budgetTokens;
+
   let finalText = "";
   let failedReason: string | null = null;
 
   try {
     for (let step = 0; step < MAX_TIDY_STEPS; step++) {
       let stepText = "";
+      let stepThinking = "";
+      let stepThinkingSig: string | undefined;
+      let stepStopReason: ChatStopReason | undefined;
       const stepToolCalls: ChatToolCall[] = [];
 
       for await (const chunk of chatModel.stream({
         systemPrompt,
         messages,
         tools: MEMORY_5_TOOL_DEFINITIONS,
+        ...(effectiveThinkingLevel ? { thinkingLevel: effectiveThinkingLevel } : {}),
+        ...(effectiveThinkingBudget !== undefined
+          ? { thinkingBudgetTokens: effectiveThinkingBudget }
+          : {}),
         signal: opts.signal,
       })) {
         if (chunk.type === "error") {
           failedReason = `${chunk.code}: ${chunk.message}`;
           break;
         }
-        if (chunk.type === "text_delta") {
+        if (chunk.type === "thinking_delta") {
+          if (chunk.delta.length > 0) stepThinking += chunk.delta;
+          if (chunk.signature) stepThinkingSig = chunk.signature;
+        } else if (chunk.type === "text_delta") {
           stepText += chunk.delta;
           finalText += chunk.delta;
         } else if (chunk.type === "tool_call") {
           stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
+        } else if (chunk.type === "usage") {
+          if (chunk.stopReason) stepStopReason = chunk.stopReason;
         }
       }
 
       if (failedReason) break;
+      // 严防输出达上限截断（finish_reason=length）或仅有思考链而无正文/工具调用时被误判为「无新增记忆」并推进游标
+      if (stepStopReason === "length") {
+        failedReason =
+          "OUTPUT_TRUNCATED: 模型输出达到上限（length）被截断，已回滚本次整理且未推进游标（可调大该模型的 maxTokens）";
+        break;
+      }
+      if (
+        stepToolCalls.length === 0 &&
+        stepText.trim().length === 0 &&
+        stepThinking.trim().length > 0
+      ) {
+        failedReason =
+          "EMPTY_OUTPUT: 模型仅输出思考过程、未产出正文或工具调用，已回滚本次整理且未推进游标";
+        break;
+      }
       if (stepToolCalls.length === 0) break;
 
       messages.push({
         role: "assistant",
         content: stepText,
+        thinking: stepThinking || undefined,
+        thinkingSignature: stepThinkingSig,
         toolCalls: stepToolCalls,
         timestamp: clock.now(),
       });

@@ -235,6 +235,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
   }
 
   String _thinkingLabel(String level) => switch (level) {
+        'auto' => '自动',
         'off' => '关闭',
         'low' => '轻度',
         'high' => '深度',
@@ -268,7 +269,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
             Positioned(
               left: left,
               bottom: bottom,
-              width: 272,
+              width: 300,
               child: Material(
                 key: const Key('composer_thinking_popover'),
                 color: colors.letterSurface,
@@ -333,6 +334,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                       Row(
                         children: [
                           for (final entry in const [
+                            ('auto', '自动'),
                             ('off', '关闭'),
                             ('low', '轻度'),
                             ('medium', '标准'),

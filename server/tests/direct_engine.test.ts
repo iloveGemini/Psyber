@@ -471,4 +471,41 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     expect(doorIdx).toBeGreaterThan(asstIdx);
     expect(hist[doorIdx]!.content).toBe("把门虚掩上了（门牌：整理一下思绪）");
   });
+
+  test("输出达到上限截断（stopReason=length）：无正文时报错不落空白消息，有部分正文时落盘并标 truncated", async () => {
+    ctx = await createTestContext();
+    const mockChat = new MockChatModel();
+    const { engine } = buildEngine(ctx, mockChat);
+
+    // 1. 仅输出思考链就撞到 length -> 触发 onTurnError，不落盘空白助手消息
+    mockChat.queueStream(() => [
+      { type: "thinking_delta", delta: "想了很久但思考链把输出上限吃光了" },
+      { type: "usage", inputTokens: 100, outputTokens: 4096, totalTokens: 4196, stopReason: "length" },
+    ]);
+    const errors: Array<{ code: string; message: string; retryable: boolean }> = [];
+    const emptyTrunc = await engine.runTurn({
+      mode: "chat",
+      userText: "讲个长故事吧",
+      callbacks: {
+        onTurnError: (err) => errors.push({ code: err.code, message: err.message, retryable: err.retryable }),
+      },
+    });
+    expect(emptyTrunc.message).toBeNull();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.code).toBe("PROVIDER_ERROR");
+    expect(errors[0]!.retryable).toBe(true);
+
+    // 2. 已流式输出部分正文后撞到 length -> 保留已输出正文并标 metadata.truncated = true
+    mockChat.queueStream(() => [
+      { type: "text_delta", delta: "从前有一座海边灯塔，守火人每晚" },
+      { type: "usage", inputTokens: 120, outputTokens: 4096, totalTokens: 4216, stopReason: "length" },
+    ]);
+    const partialTrunc = await engine.runTurn({
+      mode: "chat",
+      userText: "继续讲吧",
+    });
+    expect(partialTrunc.message).not.toBeNull();
+    expect(partialTrunc.text).toBe("从前有一座海边灯塔，守火人每晚");
+    expect(partialTrunc.message?.metadata?.truncated).toBe(true);
+  });
 });

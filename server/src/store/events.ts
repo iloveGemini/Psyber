@@ -1272,9 +1272,14 @@ export class EventStore {
   }
 
   /** 汇总 Token 消耗、Prompt Cache 命中率与预估费用（GET /api/v1/usage/stats，绝不常驻主聊天面） */
-  getUsageStats(timeZone: string): {
+  getUsageStats(
+    timeZone: string,
+    opts?: { days?: number },
+  ): {
     today: UsageBucket;
     total: UsageBucket;
+    range: UsageBucket;
+    rangeDays: number | null;
     daily: Array<{ date: string } & UsageBucket>;
     byModel: Array<{ model: string } & UsageBucket>;
   } {
@@ -1288,7 +1293,25 @@ export class EventStore {
       )
       .all() as Array<{ metadata: string | null; created_at: number }>;
 
-    const todayKey = localDay(this.clock.now(), timeZone);
+    const nowMs = this.clock.now();
+    const todayKey = localDay(nowMs, timeZone);
+    const rangeDays =
+      opts?.days !== undefined && Number.isFinite(opts.days) && opts.days >= 1
+        ? Math.min(365, Math.floor(opts.days))
+        : null;
+    const cutoffMs =
+      rangeDays !== null
+        ? rangeDays === 1
+          ? null
+          : nowMs - (rangeDays - 1) * 24 * 60 * 60 * 1000
+        : null;
+    const cutoffDayKey =
+      rangeDays === 1
+        ? todayKey
+        : cutoffMs !== null
+          ? localDay(cutoffMs, timeZone)
+          : null;
+
     const makeAcc = () => ({
       turnCount: 0,
       inputTokens: 0,
@@ -1299,6 +1322,7 @@ export class EventStore {
     });
     const totalAcc = makeAcc();
     const todayAcc = makeAcc();
+    const rangeAcc = makeAcc();
     const dailyMap = new Map<string, ReturnType<typeof makeAcc>>();
     const modelMap = new Map<string, ReturnType<typeof makeAcc>>();
 
@@ -1367,6 +1391,11 @@ export class EventStore {
         addTo(totalAcc, parsed);
         if (dayKey === todayKey) addTo(todayAcc, parsed);
 
+        const inRange = cutoffDayKey === null || dayKey >= cutoffDayKey;
+        if (!inRange) continue;
+
+        addTo(rangeAcc, parsed);
+
         let dAcc = dailyMap.get(dayKey);
         if (!dAcc) {
           dAcc = makeAcc();
@@ -1399,9 +1428,10 @@ export class EventStore {
       };
     };
 
+    const dailyLimit = rangeDays !== null ? Math.min(90, rangeDays) : 30;
     const daily = Array.from(dailyMap.entries())
       .sort((a, b) => b[0].localeCompare(a[0]))
-      .slice(0, 14)
+      .slice(0, dailyLimit)
       .map(([date, acc]) => ({ date, ...finalize(acc) }));
 
     const byModel = Array.from(modelMap.entries())
@@ -1411,6 +1441,8 @@ export class EventStore {
     return {
       today: finalize(todayAcc),
       total: finalize(totalAcc),
+      range: finalize(rangeAcc),
+      rangeDays,
       daily,
       byModel,
     };

@@ -32,6 +32,7 @@ import {
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
 import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
+import { ModelCatalogService } from "./llm/catalog.ts";
 import type { ChatModelClient } from "./llm/client.ts";
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
@@ -158,6 +159,14 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     saveConfig: (cfg) => saveConfig(dataDir, cfg),
     drawer,
   });
+  registry.setDisabledTools(config.disabledTools ?? []);
+
+  const modelCatalog = new ModelCatalogService(dataDir);
+  await modelCatalog.loadFromDisk();
+  // 仅在常规运行模式且缓存过期时异步静默刷新 models.dev 目录（单测关闭心跳时零外网请求）
+  if (opts.startHeartbeatTimer !== false && modelCatalog.isStale(clock.now())) {
+    void modelCatalog.syncFromRemote({ fetchImpl: opts.fetchImpl, nowMs: clock.now() });
+  }
 
   // Stage 7b: 异步非阻塞挂载外部 MCP 桥接（强制 Tier 3，单服宕机绝不阻塞启动）
   const mcp = new McpManager({
@@ -187,10 +196,16 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   });
 
   const chatModel =
-    opts.chatModel ?? new DynamicChatModel({ dataDir, getConfig: () => config, slot: "chat" });
+    opts.chatModel ??
+    new DynamicChatModel({ dataDir, getConfig: () => config, slot: "chat", catalog: modelCatalog });
   const tidyModel =
     opts.chatModel ??
-    new DynamicChatModel({ dataDir, getConfig: () => config, slot: "memory_task" });
+    new DynamicChatModel({
+      dataDir,
+      getConfig: () => config,
+      slot: "memory_task",
+      catalog: modelCatalog,
+    });
 
   // 运行时作息与异步队列状态
   let lastBedtimeNightDate = events.getBedtimeNightDate();
@@ -238,6 +253,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           memoryIndex,
           memoryTools,
           chatModel: tidyModel,
+          getConfig: () => config,
         },
         { taskType: "daily_wrapup", maxSeq: cutoffSeq },
       );
@@ -281,6 +297,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
               memoryIndex,
               memoryTools,
               chatModel: tidyModel,
+              getConfig: () => config,
             },
             { taskType, nightDate: targetNight },
           );
@@ -496,6 +513,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     pairing,
     media,
     mcp,
+    toolRegistry: registry,
+    modelCatalog,
     notifications,
     approvalTimeoutMs: opts.approvalTimeoutMs,
     onUserMessagePersisted: () => {

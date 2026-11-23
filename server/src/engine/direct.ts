@@ -13,6 +13,7 @@ import type {
   ChatImageContent,
   ChatMessage,
   ChatModelClient,
+  ChatStopReason,
   ChatToolCall,
   ChatUserContent,
   LlmErrorCode,
@@ -1127,6 +1128,7 @@ export class DirectEngine {
     let committedThinking = fullThinking;
     let completedToolSteps = cp?.completedToolSteps ?? 0;
     let aborted = false;
+    let truncated = false;
     let thresholdReached = cp?.rolledOver ?? false;
     let rolledOver = false;
     let overflowRecovered = false;
@@ -1184,6 +1186,7 @@ export class DirectEngine {
         let stepText = "";
         let stepThinking = "";
         let stepThinkingSig: string | undefined;
+        let stepStopReason: ChatStopReason | undefined;
         const stepToolCalls: ChatToolCall[] = [];
         let retryStepAfterOverflow = false;
 
@@ -1192,6 +1195,7 @@ export class DirectEngine {
           let retryableFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
           let overflowFailure: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
           let producedOutputInAttempt = false;
+          stepStopReason = undefined;
 
           for await (const chunk of this.deps.chatModel.stream({
             systemPrompt,
@@ -1252,6 +1256,7 @@ export class DirectEngine {
                 stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
               }
             } else if (chunk.type === "usage") {
+              if (chunk.stopReason) stepStopReason = chunk.stopReason;
               this.lastUsedTokens = chunk.totalTokens;
               lastUsage = {
                 ...(activeModelId ? { model: activeModelId } : {}),
@@ -1364,6 +1369,24 @@ export class DirectEngine {
         }
 
         if (lastError || aborted) break;
+
+        if (stepStopReason === "length" && stepToolCalls.length === 0) {
+          if (
+            fullText.trim().length === 0 &&
+            toolCtx.expressions.length === 0 &&
+            (toolCtx.shares?.length ?? 0) === 0
+          ) {
+            lastError = {
+              code: "PROVIDER_ERROR",
+              message:
+                "模型输出达到上限被截断，未能生成回复正文（可在设置中调大该模型的 maxTokens 或降低思考深度）",
+              retryable: true,
+            };
+            opts.callbacks?.onTurnError?.({ turnId, ...lastError });
+            break;
+          }
+          truncated = true;
+        }
 
         // 单轮多步工具循环：完整保留本步 thinking + signature 发回模型
         if (!isWrapUpStep && stepToolCalls.length > 0) {
@@ -1577,6 +1600,7 @@ export class DirectEngine {
         if (lastUsage) metadata.usage = lastUsage;
         if (recallCount > 0) metadata.recallCount = recallCount;
         if (aborted) metadata.aborted = true;
+        if (truncated) metadata.truncated = true;
         const { event } = this.deps.events.append({
           sessionId: turnSessionId,
           turnId,

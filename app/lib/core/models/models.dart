@@ -1008,6 +1008,48 @@ class RecallTraceItem {
 }
 
 @immutable
+class ModelMetadataOverrideView {
+  const ModelMetadataOverrideView({
+    this.contextWindow,
+    this.maxTokens,
+    this.inputModalities,
+    this.outputModalities,
+    this.reasoning,
+    this.toolCall,
+  });
+
+  final int? contextWindow;
+  final int? maxTokens;
+  final List<String>? inputModalities;
+  final List<String>? outputModalities;
+  final bool? reasoning;
+  final bool? toolCall;
+
+  factory ModelMetadataOverrideView.fromJson(Map<String, dynamic> json) {
+    List<String>? parseList(Object? raw) => raw is List<dynamic>
+        ? raw.whereType<String>().toList(growable: false)
+        : null;
+    return ModelMetadataOverrideView(
+      contextWindow: (json['contextWindow'] as num?)?.toInt(),
+      maxTokens: (json['maxTokens'] as num?)?.toInt(),
+      inputModalities: parseList(json['inputModalities']),
+      outputModalities: parseList(json['outputModalities']),
+      reasoning: json['reasoning'] is bool ? json['reasoning'] as bool : null,
+      toolCall: json['toolCall'] is bool ? json['toolCall'] as bool : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        if (contextWindow != null) 'contextWindow': contextWindow,
+        if (maxTokens != null) 'maxTokens': maxTokens,
+        if (inputModalities != null) 'inputModalities': inputModalities,
+        if (outputModalities != null) 'outputModalities': outputModalities,
+        if (reasoning != null) 'reasoning': reasoning,
+        if (toolCall != null) 'toolCall': toolCall,
+      };
+}
+
+@immutable
 class ProviderSettingsView {
   const ProviderSettingsView({
     required this.id,
@@ -1015,6 +1057,8 @@ class ProviderSettingsView {
     required this.authMode,
     required this.authStatus,
     this.baseUrl,
+    this.models = const <String>[],
+    this.modelOverrides = const <String, ModelMetadataOverrideView>{},
   });
 
   final String id;
@@ -1022,14 +1066,166 @@ class ProviderSettingsView {
   final String authMode;
   final String authStatus;
   final String? baseUrl;
+  final List<String> models;
+  final Map<String, ModelMetadataOverrideView> modelOverrides;
 
   factory ProviderSettingsView.fromJson(String id, Map<String, dynamic> json) {
+    final rawModels = json['models'];
+    final rawOverrides = json['modelOverrides'];
+    final overrides = <String, ModelMetadataOverrideView>{};
+    if (rawOverrides is Map<String, dynamic>) {
+      for (final e in rawOverrides.entries) {
+        if (e.value is Map<String, dynamic>) {
+          overrides[e.key] = ModelMetadataOverrideView.fromJson(
+            e.value as Map<String, dynamic>,
+          );
+        }
+      }
+    }
     return ProviderSettingsView(
       id: id,
       kind: json['kind'] as String? ?? 'openai',
       authMode: json['authMode'] as String? ?? 'api_key',
       authStatus: json['authStatus'] as String? ?? 'unset',
       baseUrl: json['baseUrl'] as String?,
+      models: rawModels is List<dynamic>
+          ? rawModels.whereType<String>().toList(growable: false)
+          : const <String>[],
+      modelOverrides: overrides,
+    );
+  }
+}
+
+@immutable
+class DiscoveredModelView {
+  const DiscoveredModelView({
+    required this.id,
+    required this.name,
+    required this.provider,
+    this.contextWindow,
+    this.maxTokens,
+    this.inputModalities = const <String>['text'],
+    this.outputModalities = const <String>['text'],
+    this.reasoning = false,
+    this.toolCall = true,
+    this.source,
+  });
+
+  final String id;
+  final String name;
+  final String provider;
+  final int? contextWindow;
+  final int? maxTokens;
+  final List<String> inputModalities;
+  final List<String> outputModalities;
+  final bool reasoning;
+  final bool toolCall;
+  final String? source;
+
+  factory DiscoveredModelView.fromJson(Map<String, dynamic> json) {
+    List<String> parseList(Object? raw, List<String> fallback) {
+      if (raw is! List<dynamic>) return fallback;
+      final out = raw.whereType<String>().toList(growable: false);
+      return out.isNotEmpty ? out : fallback;
+    }
+    return DiscoveredModelView(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? (json['id'] as String? ?? ''),
+      provider: json['provider'] as String? ?? '',
+      contextWindow: (json['contextWindow'] as num?)?.toInt(),
+      maxTokens: (json['maxTokens'] as num?)?.toInt(),
+      inputModalities: parseList(json['inputModalities'], const <String>['text']),
+      outputModalities: parseList(json['outputModalities'], const <String>['text']),
+      reasoning: json['reasoning'] == true,
+      toolCall: json['toolCall'] != false,
+      source: json['source'] as String?,
+    );
+  }
+}
+
+@immutable
+class ToolCatalogItemView {
+  const ToolCatalogItemView({
+    required this.name,
+    required this.tier,
+    required this.category,
+    required this.security,
+    required this.description,
+    required this.locked,
+    required this.enabled,
+  });
+
+  final String name;
+  final int tier;
+  final String category;
+  final String security;
+  final String description;
+  final bool locked;
+  final bool enabled;
+
+  factory ToolCatalogItemView.fromJson(Map<String, dynamic> json) {
+    return ToolCatalogItemView(
+      name: json['name'] as String? ?? '',
+      tier: (json['tier'] as num?)?.toInt() ?? 3,
+      category: json['category'] as String? ?? '其他工具',
+      security: json['security'] as String? ?? 'auto',
+      description: json['description'] as String? ?? '',
+      locked: json['locked'] == true,
+      enabled: json['enabled'] != false,
+    );
+  }
+}
+
+@immutable
+class SystemInfoView {
+  const SystemInfoView({
+    required this.version,
+    this.dataDir,
+    this.configPath,
+    this.memoryDir,
+    this.catalogUpdatedAt,
+    this.catalogModelCount,
+  });
+
+  final String version;
+  final String? dataDir;
+  final String? configPath;
+  final String? memoryDir;
+  final int? catalogUpdatedAt;
+  final int? catalogModelCount;
+
+  factory SystemInfoView.fromJson(Map<String, dynamic> json) {
+    return SystemInfoView(
+      version: json['version'] as String? ?? '0.1.0',
+      dataDir: json['dataDir'] as String?,
+      configPath: json['configPath'] as String?,
+      memoryDir: json['memoryDir'] as String?,
+      catalogUpdatedAt: (json['catalogUpdatedAt'] as num?)?.toInt(),
+      catalogModelCount: (json['catalogModelCount'] as num?)?.toInt(),
+    );
+  }
+}
+
+@immutable
+class ModelCatalogSyncResult {
+  const ModelCatalogSyncResult({
+    required this.ok,
+    required this.count,
+    required this.updatedAt,
+    this.error,
+  });
+
+  final bool ok;
+  final int count;
+  final int updatedAt;
+  final String? error;
+
+  factory ModelCatalogSyncResult.fromJson(Map<String, dynamic> json) {
+    return ModelCatalogSyncResult(
+      ok: json['ok'] == true,
+      count: (json['count'] as num?)?.toInt() ?? 0,
+      updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
+      error: json['error'] as String?,
     );
   }
 }
@@ -1047,6 +1243,8 @@ class ModelSlotView {
       model: json['model'] as String? ?? '',
     );
   }
+
+  Map<String, dynamic> toJson() => {'provider': provider, 'model': model};
 }
 
 @immutable
@@ -1116,6 +1314,12 @@ class SettingsSnapshot {
     this.providers = const <String, ProviderSettingsView>{},
     this.chatSlot,
     this.fallbackSlots = const <ModelSlotView>[],
+    this.memoryTaskSlot,
+    this.digestSlot,
+    this.embeddingSlot,
+    this.rerankerSlot,
+    this.visionSlot,
+    this.imageGenSlot,
     this.thinkingEnabled = true,
     this.thinkingLevel = 'medium',
     this.chatContextLimit,
@@ -1136,6 +1340,9 @@ class SettingsSnapshot {
     this.hasNtfyToken = false,
     this.devices = const <PairedDeviceView>[],
     this.mcpServers = const <McpServerView>[],
+    this.tools = const <ToolCatalogItemView>[],
+    this.disabledTools = const <String>[],
+    this.systemInfo,
     this.recallEvalNoticeResident = false,
   });
 
@@ -1143,6 +1350,12 @@ class SettingsSnapshot {
   final Map<String, ProviderSettingsView> providers;
   final ModelSlotView? chatSlot;
   final List<ModelSlotView> fallbackSlots;
+  final ModelSlotView? memoryTaskSlot;
+  final ModelSlotView? digestSlot;
+  final ModelSlotView? embeddingSlot;
+  final ModelSlotView? rerankerSlot;
+  final ModelSlotView? visionSlot;
+  final ModelSlotView? imageGenSlot;
   final bool thinkingEnabled;
   final String thinkingLevel;
   final int? chatContextLimit;
@@ -1163,6 +1376,9 @@ class SettingsSnapshot {
   final bool hasNtfyToken;
   final List<PairedDeviceView> devices;
   final List<McpServerView> mcpServers;
+  final List<ToolCatalogItemView> tools;
+  final List<String> disabledTools;
+  final SystemInfoView? systemInfo;
   final bool recallEvalNoticeResident;
 
   factory SettingsSnapshot.fromJson(Map<String, dynamic> json) {
@@ -1184,10 +1400,10 @@ class SettingsSnapshot {
     final slots = llm['slots'] is Map<String, dynamic>
         ? llm['slots'] as Map<String, dynamic>
         : const <String, dynamic>{};
-    final rawChat = slots['chat'];
-    final chatSlot = rawChat is Map<String, dynamic>
-        ? ModelSlotView.fromJson(rawChat)
-        : null;
+    ModelSlotView? parseSlot(String key) {
+      final raw = slots[key];
+      return raw is Map<String, dynamic> ? ModelSlotView.fromJson(raw) : null;
+    }
     final rawFallbacks = slots['fallbacks'];
     final fallbackSlots = <ModelSlotView>[];
     if (rawFallbacks is List<dynamic>) {
@@ -1202,12 +1418,13 @@ class SettingsSnapshot {
         : const <String, dynamic>{};
     final thinkingEnabled = thinking['enabled'] != false;
     final rawLevel = thinking['level'] as String?;
-    final thinkingLevel = (rawLevel == 'off' ||
+    final thinkingLevel = (rawLevel == 'auto' ||
+            rawLevel == 'off' ||
             rawLevel == 'low' ||
             rawLevel == 'medium' ||
             rawLevel == 'high')
         ? rawLevel!
-        : (thinkingEnabled ? 'medium' : 'off');
+        : (thinkingEnabled ? 'auto' : 'off');
     final rawLimits = llm['contextLimits'] is Map<String, dynamic>
         ? llm['contextLimits'] as Map<String, dynamic>
         : const <String, dynamic>{};
@@ -1248,12 +1465,19 @@ class SettingsSnapshot {
         }
       }
     }
+    final rawSystem = json['system'];
 
     return SettingsSnapshot(
       timezone: json['timezone'] as String? ?? 'Asia/Shanghai',
       providers: providers,
-      chatSlot: chatSlot,
+      chatSlot: parseSlot('chat'),
       fallbackSlots: fallbackSlots,
+      memoryTaskSlot: parseSlot('memory_task'),
+      digestSlot: parseSlot('digest'),
+      embeddingSlot: parseSlot('embedding'),
+      rerankerSlot: parseSlot('reranker'),
+      visionSlot: parseSlot('vision'),
+      imageGenSlot: parseSlot('image_gen'),
       thinkingEnabled: thinkingEnabled,
       thinkingLevel: thinkingLevel,
       chatContextLimit: (rawLimits['chat'] as num?)?.toInt(),
@@ -1281,6 +1505,18 @@ class SettingsSnapshot {
               .map(McpServerView.fromJson)
               .toList(growable: false)
           : const <McpServerView>[],
+      tools: (json['tools'] is List<dynamic>)
+          ? (json['tools'] as List<dynamic>)
+              .whereType<Map<String, dynamic>>()
+              .map(ToolCatalogItemView.fromJson)
+              .toList(growable: false)
+          : const <ToolCatalogItemView>[],
+      disabledTools: (json['disabledTools'] is List<dynamic>)
+          ? (json['disabledTools'] as List<dynamic>).whereType<String>().toList(growable: false)
+          : const <String>[],
+      systemInfo: rawSystem is Map<String, dynamic>
+          ? SystemInfoView.fromJson(rawSystem)
+          : null,
       recallEvalNoticeResident: json['recallEvalNoticeResident'] == true,
     );
   }
@@ -1507,18 +1743,25 @@ class UsageStatsSnapshot {
   const UsageStatsSnapshot({
     this.today = const UsageBucket(),
     this.total = const UsageBucket(),
+    this.range,
+    this.rangeDays,
     this.daily = const <DailyUsageEntry>[],
     this.byModel = const <ModelUsageEntry>[],
   });
 
   final UsageBucket today;
   final UsageBucket total;
+  final UsageBucket? range;
+  final int? rangeDays;
   final List<DailyUsageEntry> daily;
   final List<ModelUsageEntry> byModel;
+
+  UsageBucket get activeBucket => range ?? total;
 
   factory UsageStatsSnapshot.fromJson(Map<String, dynamic> json) {
     final rawToday = json['today'];
     final rawTotal = json['total'];
+    final rawRange = json['range'];
     final rawDaily = json['daily'];
     final rawByModel = json['byModel'];
     return UsageStatsSnapshot(
@@ -1528,6 +1771,10 @@ class UsageStatsSnapshot {
       total: rawTotal is Map<String, dynamic>
           ? UsageBucket.fromJson(rawTotal)
           : const UsageBucket(),
+      range: rawRange is Map<String, dynamic>
+          ? UsageBucket.fromJson(rawRange)
+          : null,
+      rangeDays: (json['rangeDays'] as num?)?.toInt(),
       daily: rawDaily is List<dynamic>
           ? rawDaily
               .whereType<Map<String, dynamic>>()

@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../core/media/image_picker.dart';
@@ -13,27 +14,36 @@ import '../../core/notifications/local_notifier.dart';
 import '../../core/state/app_controller.dart';
 import '../../shared/theme.dart';
 
-/// 设置分组：将原本平铺的 7 个长分区收拢为 4 个低频配置中心。
+/// 设置分组：服务商池与模型槽位拆分，辅以用量、作息、外观、全量工具/设备与关于数据。
 enum SettingsSection {
+  modelProviders,
   modelUsage,
+  usage,
   rhythmNotify,
   appearance,
   toolsDevices,
+  about,
 }
 
 extension SettingsSectionMeta on SettingsSection {
   String get title => switch (this) {
-        SettingsSection.modelUsage => '模型与用量',
+        SettingsSection.modelProviders => '模型服务商',
+        SettingsSection.modelUsage => '模型配置',
+        SettingsSection.usage => '用量',
         SettingsSection.rhythmNotify => '作息与通知',
         SettingsSection.appearance => '居所与外观',
         SettingsSection.toolsDevices => '工具与设备',
+        SettingsSection.about => '关于与数据',
       };
 
   IconData get icon => switch (this) {
-        SettingsSection.modelUsage => PhosphorIconsLight.cpu,
+        SettingsSection.modelProviders => PhosphorIconsLight.cube,
+        SettingsSection.modelUsage => PhosphorIconsLight.slidersHorizontal,
+        SettingsSection.usage => PhosphorIconsLight.chartBar,
         SettingsSection.rhythmNotify => PhosphorIconsLight.moonStars,
         SettingsSection.appearance => PhosphorIconsLight.palette,
-        SettingsSection.toolsDevices => PhosphorIconsLight.plugsConnected,
+        SettingsSection.toolsDevices => PhosphorIconsLight.wrench,
+        SettingsSection.about => PhosphorIconsLight.info,
       };
 }
 
@@ -543,12 +553,17 @@ class _SettingsPageState extends State<SettingsPage> {
     PsyberPalette? palette,
   ) {
     switch (section) {
+      case SettingsSection.modelProviders:
+        final count = snap?.providers.values.where((p) => p.authStatus == 'configured').length ?? 0;
+        return count > 0 ? '已配置 $count 个模型服务商' : '配置 API 地址与密钥';
       case SettingsSection.modelUsage:
         final slot = snap?.chatSlot;
         if (slot != null && slot.model.isNotEmpty) {
           return '${slot.provider} · ${slot.model}';
         }
-        return '尚未配置主对话模型';
+        return '分配主对话、整理与可选槽位';
+      case SettingsSection.usage:
+        return '按时间范围查看 Token 与费用';
       case SettingsSection.rhythmNotify:
         final c = snap?.circadian;
         if (c != null) {
@@ -563,9 +578,15 @@ class _SettingsPageState extends State<SettingsPage> {
         };
         return palette != null ? '$modeLabel · ${palette.label}' : modeLabel;
       case SettingsSection.toolsDevices:
+        final toolCount = snap?.tools.length ?? 0;
         final devCount = snap?.devices.length ?? 0;
         final mcpCount = snap?.mcpServers.length ?? 0;
-        return '$devCount 台已配对设备 · $mcpCount 个 MCP 扩展';
+        return toolCount > 0
+            ? '$toolCount 个能力工具 · $mcpCount 个 MCP · $devCount 台设备'
+            : '$devCount 台已配对设备 · $mcpCount 个 MCP 扩展';
+      case SettingsSection.about:
+        final ver = snap?.systemInfo?.version ?? '0.1.0';
+        return '版本 $ver · 配置文件与记忆目录';
     }
   }
 
@@ -811,9 +832,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   final _ntfyServerUrlCtrl = TextEditingController();
   final _ntfyTopicCtrl = TextEditingController();
   final _ntfyTokenCtrl = TextEditingController();
-  final _baseUrlCtrl = TextEditingController();
-  final _modelCtrl = TextEditingController();
-  final _apiKeyCtrl = TextEditingController();
 
   String _sleepStart = '23:30';
   String _sleepEnd = '07:30';
@@ -830,18 +848,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
   String? _rhythmError;
   bool _hydrated = false;
 
-  bool _editingModelInline = false;
-  String _providerKind = 'openai-compat';
-  bool _hasExistingKey = false;
-  bool _savingModel = false;
-  String? _modelErrText;
-
-  bool _testingLlm = false;
-  String? _llmTestHint;
-  bool _llmTestOk = true;
-  bool _loadingUsage = false;
-  UsageStatsSnapshot? _usageStats;
-  String? _usageError;
   bool _uploadingAvatar = false;
   String? _avatarHint;
 
@@ -873,23 +879,12 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
       _hasBarkKey = snap.hasBarkKey;
       _ntfyEnabled = snap.ntfyEnabled;
       _hasNtfyToken = snap.hasNtfyToken;
-      _hydrateModelFields(snap);
       _hydrated = true;
-    } else if (!_editingModelInline) {
+    } else {
       _hasBarkKey = snap.hasBarkKey;
       _hasNtfyToken = snap.hasNtfyToken;
-      _hydrateModelFields(snap);
     }
     if (mounted) setState(() {});
-  }
-
-  void _hydrateModelFields(SettingsSnapshot snap) {
-    final slot = snap.chatSlot;
-    final currentProvider = slot != null ? snap.providers[slot.provider] : null;
-    _providerKind = currentProvider?.kind ?? 'openai-compat';
-    _hasExistingKey = currentProvider?.authStatus == 'configured';
-    _baseUrlCtrl.text = currentProvider?.baseUrl ?? '';
-    _modelCtrl.text = slot?.model ?? '';
   }
 
   @override
@@ -901,9 +896,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     _ntfyServerUrlCtrl.dispose();
     _ntfyTopicCtrl.dispose();
     _ntfyTokenCtrl.dispose();
-    _baseUrlCtrl.dispose();
-    _modelCtrl.dispose();
-    _apiKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -1062,110 +1054,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     }
   }
 
-  Future<void> _saveModelInline() async {
-    final model = _modelCtrl.text.trim();
-    final baseUrl = _baseUrlCtrl.text.trim();
-    if (model.isEmpty) {
-      setState(() => _modelErrText = '请填写模型 ID');
-      return;
-    }
-    if (_providerKind == 'openai-compat' && baseUrl.isEmpty) {
-      setState(() => _modelErrText = '兼容接口请填写自定义 Base URL');
-      return;
-    }
-    setState(() {
-      _savingModel = true;
-      _modelErrText = null;
-    });
-    try {
-      await widget.controller.updateLlmSettings(
-        providerKind: _providerKind,
-        modelName: model,
-        baseUrl: baseUrl.isEmpty ? null : baseUrl,
-        apiKey: _apiKeyCtrl.text.trim(),
-      );
-      if (!mounted) return;
-      _apiKeyCtrl.clear();
-      setState(() {
-        _savingModel = false;
-        _editingModelInline = false;
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _modelErrText = e.message;
-        _savingModel = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _modelErrText = '保存失败，请检查网络连接';
-        _savingModel = false;
-      });
-    }
-  }
-
-  Future<void> _handleTestLlm(ModelSlotView? slot) async {
-    if (slot == null || slot.provider.isEmpty || slot.model.isEmpty || _testingLlm) return;
-    setState(() {
-      _testingLlm = true;
-      _llmTestHint = null;
-    });
-    try {
-      final res = await widget.controller.testLlmModel(
-        provider: slot.provider,
-        model: slot.model,
-      );
-      if (!mounted || res == null) return;
-      setState(() {
-        _testingLlm = false;
-        _llmTestOk = res.ok;
-        _llmTestHint = res.ok ? '连通正常 · ${res.latencyMs} ms' : (res.error ?? '连通测试失败');
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _testingLlm = false;
-        _llmTestOk = false;
-        _llmTestHint = e.message;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _testingLlm = false;
-        _llmTestOk = false;
-        _llmTestHint = '连通测试失败，请检查网络';
-      });
-    }
-  }
-
-  Future<void> _handleLoadUsageStats() async {
-    if (_loadingUsage) return;
-    setState(() {
-      _loadingUsage = true;
-      _usageError = null;
-    });
-    try {
-      final stats = await widget.controller.loadUsageStats();
-      if (!mounted) return;
-      setState(() {
-        _usageStats = stats;
-        _loadingUsage = false;
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loadingUsage = false;
-        _usageError = e.message;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _loadingUsage = false;
-        _usageError = '暂时无法拉取消耗统计';
-      });
-    }
-  }
 
   Future<void> _handleUploadAvatar(String who) async {
     if (_uploadingAvatar) return;
@@ -1276,271 +1164,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     }
   }
 
-  Widget _buildModelUsageSection(BuildContext context, SettingsSnapshot? snap) {
-    final colors = context.colors;
-    final slot = snap?.chatSlot;
-    final providerInfo = slot != null ? snap?.providers[slot.provider] : null;
-    final configured = providerInfo?.authStatus == 'configured';
-
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const _SectionLabel('主对话模型与凭证'),
-        _SurfaceBox(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              InkWell(
-                key: const Key('open_model_config_tile'),
-                onTap: () {
-                  if (snap != null) _hydrateModelFields(snap);
-                  setState(() {
-                    _editingModelInline = !_editingModelInline;
-                    _modelErrText = null;
-                  });
-                },
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              slot != null && slot.model.isNotEmpty
-                                  ? '${slot.provider} · ${slot.model}'
-                                  : '尚未设置主对话模型',
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              configured
-                                  ? (_editingModelInline
-                                      ? '正在编辑配置（保存后立即热生效）'
-                                      : '凭证已配置（点击展开修改模型或 Key）')
-                                  : '点击展开填写 API Key 与模型 ID',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: configured
-                                    ? colors.inkQuiet
-                                    : colors.thresholdAmber,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (slot != null && slot.model.isNotEmpty)
-                        TextButton(
-                          key: const Key('test_llm_button'),
-                          onPressed: _testingLlm
-                              ? null
-                              : () => unawaited(_handleTestLlm(slot)),
-                          child: Text(
-                            _testingLlm ? '测试中…' : '测连通',
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ),
-                      Icon(
-                        _editingModelInline
-                            ? PhosphorIconsLight.caretUp
-                            : PhosphorIconsLight.caretDown,
-                        size: 16,
-                        color: colors.inkQuiet,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              if (_llmTestHint != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                  child: Text(
-                    _llmTestHint!,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: _llmTestOk ? colors.statusSuccess : colors.dangerInk,
-                    ),
-                  ),
-                ),
-              if (_editingModelInline) ...[
-                Divider(height: 1, color: colors.hairline),
-                Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      DropdownButtonFormField<String>(
-                        initialValue: _providerKind,
-                        decoration: const InputDecoration(
-                          labelText: '模型服务商',
-                          isDense: true,
-                        ),
-                        items: const [
-                          DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                          DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
-                          DropdownMenuItem(value: 'google', child: Text('Google')),
-                          DropdownMenuItem(
-                            value: 'openai-compat',
-                            child: Text('OpenAI 兼容接口（自定义地址）'),
-                          ),
-                        ],
-                        onChanged: (v) {
-                          if (v != null) setState(() => _providerKind = v);
-                        },
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _baseUrlCtrl,
-                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
-                        decoration: const InputDecoration(
-                          labelText: '接口地址 Base URL（兼容接口必填）',
-                          hintText: 'https://api.example.com/v1',
-                          isDense: true,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _modelCtrl,
-                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
-                        decoration: const InputDecoration(
-                          labelText: '主对话模型 ID',
-                          hintText: 'gpt-4o / deepseek-chat',
-                          isDense: true,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _apiKeyCtrl,
-                        obscureText: true,
-                        style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
-                        decoration: InputDecoration(
-                          labelText: _hasExistingKey
-                              ? 'API Key（留空保持现有密钥不变）'
-                              : 'API Key（必填）',
-                          isDense: true,
-                        ),
-                      ),
-                      if (_modelErrText != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          _modelErrText!,
-                          style: TextStyle(color: colors.dangerInk, fontSize: 12),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton(
-                            onPressed: _savingModel
-                                ? null
-                                : () => setState(() => _editingModelInline = false),
-                            child: const Text('取消'),
-                          ),
-                          const SizedBox(width: 8),
-                          FilledButton(
-                            onPressed: _savingModel
-                                ? null
-                                : () => unawaited(_saveModelInline()),
-                            child: Text(_savingModel ? '保存中…' : '保存模型配置'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              Divider(height: 1, color: colors.hairline),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          '默认思考深度档位',
-                          style: TextStyle(fontSize: 12, color: colors.inkQuiet),
-                        ),
-                        const Spacer(),
-                        Text(
-                          '也可在聊天输入栏随时切换',
-                          style: TextStyle(fontSize: 11, color: colors.inkFaint),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        for (final entry in const [
-                          ('off', '关闭'),
-                          ('low', '轻度'),
-                          ('medium', '标准'),
-                          ('high', '深度'),
-                        ])
-                          Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 2),
-                              child: InkWell(
-                                key: Key('thinking_level_${entry.$1}'),
-                                borderRadius: BorderRadius.circular(8),
-                                onTap: () => unawaited(
-                                  widget.controller.patchSettings({
-                                    'llm': {
-                                      'thinking': {
-                                        'enabled': entry.$1 != 'off',
-                                        'level': entry.$1,
-                                      },
-                                    },
-                                  }),
-                                ),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(vertical: 6),
-                                  alignment: Alignment.center,
-                                  decoration: BoxDecoration(
-                                    color: (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                        ? colors.accentSoft
-                                        : colors.mineralCanvas,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                          ? colors.accentBorder
-                                          : colors.hairline,
-                                    ),
-                                  ),
-                                  child: Text(
-                                    entry.$2,
-                                    style: TextStyle(
-                                      fontSize: 11.5,
-                                      fontWeight:
-                                          (snap?.thinkingLevel ?? 'medium') == entry.$1
-                                              ? FontWeight.w600
-                                              : FontWeight.w400,
-                                      color: colors.inkDeep,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 18),
-        const _SectionLabel('消耗统计'),
-        _buildUsageStatsCard(context),
-      ],
-    );
-  }
 
   Widget _buildRhythmNotifySection(BuildContext context) {
     final colors = context.colors;
@@ -1874,6 +1497,9 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        const _SectionLabel('Psyber 能力与工具'),
+        _AllToolsCatalogCard(controller: widget.controller, snap: snap),
+        const SizedBox(height: 10),
         const _SectionLabel('外部工具扩展（MCP）'),
         _buildMcpServersSection(context, snap),
         const SizedBox(height: 18),
@@ -2144,109 +1770,6 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
     );
   }
 
-  Widget _buildUsageStatsCard(BuildContext context) {
-    final colors = context.colors;
-    final stats = _usageStats;
-    String fmtUsd(double v) => '\$${v.toStringAsFixed(4)}';
-    String fmtPct(double r) => '${(r * 100).toStringAsFixed(1)}%';
-
-    return _SurfaceBox(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          key: const Key('usage_stats_section'),
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Text(
-                  'Token 与费用统计',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w500,
-                    color: colors.inkDeep,
-                  ),
-                ),
-                const Spacer(),
-                TextButton(
-                  key: const Key('load_usage_stats_button'),
-                  onPressed:
-                      _loadingUsage ? null : () => unawaited(_handleLoadUsageStats()),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: Text(
-                    _loadingUsage ? '拉取中…' : (stats == null ? '查看统计' : '刷新'),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-            if (_usageError != null) ...[
-              const SizedBox(height: 6),
-              Text(_usageError!, style: TextStyle(fontSize: 12, color: colors.dangerInk)),
-            ] else if (stats == null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '按需拉取今日/累计消耗与 Prompt Cache 命中率，不常驻主聊天面。',
-                style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-              ),
-            ] else ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: _UsageMetricTile(
-                      label: '今日费用',
-                      value: fmtUsd(stats.today.estimatedCostUsd),
-                      sub: '${stats.today.turnCount} 轮 · 命中 ${fmtPct(stats.today.cacheHitRate)}',
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _UsageMetricTile(
-                      label: '累计费用',
-                      value: fmtUsd(stats.total.estimatedCostUsd),
-                      sub: '${stats.total.turnCount} 轮 · 命中 ${fmtPct(stats.total.cacheHitRate)}',
-                    ),
-                  ),
-                ],
-              ),
-              if (stats.byModel.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text('按模型', style: TextStyle(fontSize: 11, color: colors.inkQuiet)),
-                const SizedBox(height: 4),
-                for (final m in stats.byModel.take(4))
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            m.model,
-                            style: PsyberTheme.monoStyle.copyWith(
-                              fontSize: 11.5,
-                              color: colors.inkDeep,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        Text(
-                          '${m.bucket.turnCount} 轮 · ${fmtUsd(m.bucket.estimatedCostUsd)}',
-                          style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            ],
-          ],
-        ),
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2254,14 +1777,20 @@ class _SettingsSectionBodyState extends State<_SettingsSectionBody> {
       valueListenable: widget.controller.settingsNotifier,
       builder: (context, snap, _) {
         switch (widget.section) {
+          case SettingsSection.modelProviders:
+            return _ModelProvidersSection(controller: widget.controller, snap: snap);
           case SettingsSection.modelUsage:
-            return _buildModelUsageSection(context, snap);
+            return _ModelAllocationSection(controller: widget.controller, snap: snap);
+          case SettingsSection.usage:
+            return _UsageSection(controller: widget.controller);
           case SettingsSection.rhythmNotify:
             return _buildRhythmNotifySection(context);
           case SettingsSection.appearance:
             return _buildAppearanceSection(context);
           case SettingsSection.toolsDevices:
             return _buildToolsDevicesSection(context, snap);
+          case SettingsSection.about:
+            return _AboutDataSection(controller: widget.controller, snap: snap);
         }
       },
     );
@@ -2999,6 +2528,2024 @@ class _StickerUploadDialogState extends State<_StickerUploadDialog> {
           ),
         ),
       ),
+    );
+  }
+}
+
+String _formatTokenCount(int? tokens) {
+  if (tokens == null || tokens <= 0) return '-';
+  if (tokens >= 1000000) {
+    final v = tokens / 1000000;
+    return v == v.truncateToDouble() ? '${v.toInt()}M' : '${v.toStringAsFixed(1)}M';
+  }
+  if (tokens >= 1000) {
+    final v = tokens / 1000;
+    return v == v.truncateToDouble() ? '${v.toInt()}K' : '${v.toStringAsFixed(1)}K';
+  }
+  return '$tokens';
+}
+
+String _modalityLabel(String mod) => switch (mod) {
+      'text' => '文本',
+      'image' => '识图',
+      'audio' => '音频',
+      'video' => '视频',
+      'pdf' => 'PDF',
+      _ => mod,
+    };
+
+String _formatEpochTime(int? ms) {
+  if (ms == null || ms <= 0) return '尚未同步';
+  final dt = DateTime.fromMillisecondsSinceEpoch(ms).toLocal();
+  String p2(int n) => n.toString().padLeft(2, '0');
+  return '${dt.year}-${p2(dt.month)}-${p2(dt.day)} ${p2(dt.hour)}:${p2(dt.minute)}';
+}
+
+/// 模型服务商池：左侧服务商列表 + 右侧地址/密钥/连通测试/模型标签与元数据覆盖。
+class _ModelProvidersSection extends StatefulWidget {
+  const _ModelProvidersSection({required this.controller, required this.snap});
+
+  final AppController controller;
+  final SettingsSnapshot? snap;
+
+  @override
+  State<_ModelProvidersSection> createState() => _ModelProvidersSectionState();
+}
+
+class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
+  final _baseUrlCtrl = TextEditingController();
+  final _apiKeyCtrl = TextEditingController();
+  String? _selectedId;
+  bool _obscureKey = true;
+  bool _saving = false;
+  bool _testing = false;
+  bool _discovering = false;
+  String? _feedback;
+  bool _feedbackOk = true;
+  Map<String, DiscoveredModelView> _discoveredById = const <String, DiscoveredModelView>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _ensureSelection();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ModelProvidersSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.snap != widget.snap) {
+      _ensureSelection(keepInput: true);
+    }
+  }
+
+  void _ensureSelection({bool keepInput = false}) {
+    final providers = widget.snap?.providers ?? const <String, ProviderSettingsView>{};
+    if (providers.isEmpty) {
+      _selectedId = null;
+      return;
+    }
+    final prev = _selectedId;
+    if (prev == null || !providers.containsKey(prev)) {
+      final chatP = widget.snap?.chatSlot?.provider;
+      _selectedId = (chatP != null && providers.containsKey(chatP)) ? chatP : providers.keys.first;
+      _syncInputsFor(_selectedId!);
+    } else if (!keepInput) {
+      _syncInputsFor(prev);
+    }
+  }
+
+  void _syncInputsFor(String id) {
+    final p = widget.snap?.providers[id];
+    _baseUrlCtrl.text = p?.baseUrl ?? '';
+    _apiKeyCtrl.clear();
+    _feedback = null;
+    _discoveredById = const <String, DiscoveredModelView>{};
+  }
+
+  @override
+  void dispose() {
+    _baseUrlCtrl.dispose();
+    _apiKeyCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveBaseUrl(ProviderSettingsView p) async {
+    setState(() {
+      _saving = true;
+      _feedback = null;
+    });
+    try {
+      final baseUrl = _baseUrlCtrl.text.trim();
+      await widget.controller.patchSettings({
+        'llm': {
+          'providers': {
+            p.id: {
+              'kind': p.kind,
+              'baseUrl': baseUrl,
+              'auth': {'mode': p.authMode},
+              'models': p.models,
+              if (p.modelOverrides.isNotEmpty)
+                'modelOverrides': {for (final e in p.modelOverrides.entries) e.key: e.value.toJson()},
+            },
+          },
+        },
+      });
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _feedbackOk = true;
+        _feedback = '服务地址已更新';
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _feedbackOk = false;
+        _feedback = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _feedbackOk = false;
+        _feedback = '保存失败，请检查网络连接';
+      });
+    }
+  }
+
+  Future<void> _saveApiKey(ProviderSettingsView p) async {
+    final key = _apiKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      setState(() {
+        _feedbackOk = false;
+        _feedback = '请先输入新的 API 密钥';
+      });
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _feedback = null;
+    });
+    try {
+      await widget.controller.patchSettings({
+        'llm': {
+          'apiKeys': {p.id: key},
+        },
+      });
+      if (!mounted) return;
+      _apiKeyCtrl.clear();
+      setState(() {
+        _saving = false;
+        _feedbackOk = true;
+        _feedback = 'API 密钥已更新并安全存储';
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _feedbackOk = false;
+        _feedback = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _feedbackOk = false;
+        _feedback = '密钥更新失败';
+      });
+    }
+  }
+
+  Future<void> _testConnection(ProviderSettingsView p) async {
+    final testModel = p.models.isNotEmpty
+        ? p.models.first
+        : (widget.snap?.chatSlot?.provider == p.id ? widget.snap!.chatSlot!.model : '');
+    if (testModel.isEmpty) {
+      setState(() {
+        _feedbackOk = false;
+        _feedback = '请先为该服务商添加至少一个模型再测连通';
+      });
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _feedback = null;
+    });
+    try {
+      final res = await widget.controller.testLlmModel(provider: p.id, model: testModel);
+      if (!mounted || res == null) return;
+      setState(() {
+        _testing = false;
+        _feedbackOk = res.ok;
+        _feedback = res.ok ? '连通正常 · ${res.latencyMs} ms ($testModel)' : (res.error ?? '连通测试失败');
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _feedbackOk = false;
+        _feedback = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _feedbackOk = false;
+        _feedback = '连通测试失败';
+      });
+    }
+  }
+
+  Future<void> _discoverModels(ProviderSettingsView p) async {
+    setState(() {
+      _discovering = true;
+      _feedback = null;
+    });
+    try {
+      final list = await widget.controller.loadLlmModels(provider: p.id);
+      if (!mounted) return;
+      setState(() {
+        _discovering = false;
+        _discoveredById = {for (final m in list) m.id: m};
+        _feedbackOk = true;
+        _feedback = '已获取 ${list.length} 个模型及其上下文/模态信息';
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _discovering = false;
+        _feedbackOk = false;
+        _feedback = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _discovering = false;
+        _feedbackOk = false;
+        _feedback = '拉取模型列表失败';
+      });
+    }
+  }
+
+  Future<void> _updateProviderModels(ProviderSettingsView p, List<String> nextModels) async {
+    await widget.controller.patchSettings({
+      'llm': {
+        'providers': {
+          p.id: {
+            'kind': p.kind,
+            if (p.baseUrl != null && p.baseUrl!.isNotEmpty) 'baseUrl': p.baseUrl,
+            'auth': {'mode': p.authMode},
+            'models': nextModels,
+            if (p.modelOverrides.isNotEmpty)
+              'modelOverrides': {for (final e in p.modelOverrides.entries) e.key: e.value.toJson()},
+          },
+        },
+      },
+    });
+  }
+
+  Future<void> _openAddModelDialog(ProviderSettingsView p) async {
+    final ctrl = TextEditingController();
+    final added = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        final colors = ctx.colors;
+        return Dialog(
+          backgroundColor: colors.letterSurface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(color: colors.hairline),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('添加模型到 ${p.id}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep)),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                    decoration: const InputDecoration(
+                      labelText: '模型 ID',
+                      hintText: '例如 claude-sonnet-4-5 / gpt-4.1',
+                      isDense: true,
+                    ),
+                    onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+                  ),
+                  if (_discoveredById.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text('或从已拉取列表快速点选：', style: TextStyle(fontSize: 11.5, color: colors.inkQuiet)),
+                    const SizedBox(height: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 150),
+                      child: SingleChildScrollView(
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            for (final m in _discoveredById.values.take(24))
+                              if (!p.models.contains(m.id))
+                                ActionChip(
+                                  label: Text(m.id, style: PsyberTheme.monoStyle.copyWith(fontSize: 11)),
+                                  onPressed: () => Navigator.of(ctx).pop(m.id),
+                                ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                      const SizedBox(width: 8),
+                      FilledButton(onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()), child: const Text('添加')),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    ctrl.dispose();
+    if (added != null && added.isNotEmpty && !p.models.contains(added)) {
+      await _updateProviderModels(p, [...p.models, added]);
+    }
+  }
+
+  Future<void> _openModelOverrideDialog(ProviderSettingsView p, String modelId) async {
+    final discovered = _discoveredById[modelId];
+    final existing = p.modelOverrides[modelId];
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ModelMetadataOverrideDialog(
+        provider: p,
+        modelId: modelId,
+        discovered: discovered,
+        existing: existing,
+        controller: widget.controller,
+      ),
+    );
+  }
+
+  Future<void> _openAddProviderDialog() async {
+    final createdId = await showDialog<String>(
+      context: context,
+      builder: (_) => _AddProviderDialog(controller: widget.controller),
+    );
+    if (createdId != null && mounted) {
+      setState(() {
+        _selectedId = createdId;
+        _syncInputsFor(createdId);
+      });
+    }
+  }
+
+  Future<void> _deleteProvider(ProviderSettingsView p) async {
+    await widget.controller.patchSettings({
+      'llm': {
+        'deleteProviderIds': [p.id],
+      },
+    });
+    if (mounted) {
+      setState(() => _ensureSelection());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final snap = widget.snap;
+    final providers = snap?.providers ?? const <String, ProviderSettingsView>{};
+    final selected = _selectedId != null ? providers[_selectedId] : null;
+    final isChatProvider = selected != null && snap?.chatSlot?.provider == selected.id;
+
+    Widget buildProviderList() {
+      return _SurfaceBox(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < providers.length; i++) ...[
+              if (i > 0) Divider(height: 1, color: colors.hairline),
+              Builder(
+                builder: (context) {
+                  final p = providers.values.elementAt(i);
+                  final active = p.id == _selectedId;
+                  final configured = p.authStatus == 'configured';
+                  final isDefault = snap?.chatSlot?.provider == p.id;
+                  return InkWell(
+                    key: Key('provider_item_${p.id}'),
+                    onTap: () => setState(() {
+                      _selectedId = p.id;
+                      _syncInputsFor(p.id);
+                    }),
+                    child: Container(
+                      color: active ? colors.accentSoft : Colors.transparent,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              p.id,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                                color: colors.inkDeep,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (isDefault) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: colors.mineralCanvas,
+                                borderRadius: BorderRadius.circular(5),
+                                border: Border.all(color: colors.hairline),
+                              ),
+                              child: Text('主', style: TextStyle(fontSize: 10, color: colors.inkQuiet)),
+                            ),
+                            const SizedBox(width: 6),
+                          ],
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: configured ? colors.statusSuccess : colors.hairlineWarm,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+            if (providers.isNotEmpty) Divider(height: 1, color: colors.hairline),
+            InkWell(
+              key: const Key('add_provider_button'),
+              onTap: () => unawaited(_openAddProviderDialog()),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    Icon(PhosphorIconsLight.plus, size: 14, color: colors.accent),
+                    const SizedBox(width: 6),
+                    Text('添加服务商', style: TextStyle(fontSize: 12.5, color: colors.accent)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget buildDetail(ProviderSettingsView p) {
+      final configured = p.authStatus == 'configured';
+      final modelSet = <String>[
+        ...p.models,
+        if (snap?.chatSlot?.provider == p.id &&
+            snap!.chatSlot!.model.isNotEmpty &&
+            !p.models.contains(snap.chatSlot!.model))
+          snap.chatSlot!.model,
+      ];
+      return _SurfaceBox(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(p.id, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep)),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: colors.mineralCanvas,
+                                borderRadius: BorderRadius.circular(5),
+                                border: Border.all(color: colors.hairline),
+                              ),
+                              child: Text(p.kind, style: PsyberTheme.monoStyle.copyWith(fontSize: 10.5, color: colors.inkQuiet)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Container(
+                              width: 6.5,
+                              height: 6.5,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: configured ? colors.statusSuccess : colors.thresholdAmber,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              configured ? '密钥已配置' : '尚未配置密钥',
+                              style: TextStyle(fontSize: 11.5, color: configured ? colors.statusSuccess : colors.thresholdAmber),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!isChatProvider && providers.length > 1)
+                    IconButton(
+                      icon: Icon(PhosphorIconsLight.trash, size: 16, color: colors.dangerInk),
+                      tooltip: '移除服务商',
+                      onPressed: () => unawaited(_deleteProvider(p)),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text('服务地址', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _baseUrlCtrl,
+                      style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                      decoration: const InputDecoration(
+                        hintText: 'https://api.example.com/v1（官方服务可留空）',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: _saving ? null : () => unawaited(_saveBaseUrl(p)),
+                    child: const Text('更新', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text('API 密钥', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _apiKeyCtrl,
+                      obscureText: _obscureKey,
+                      style: PsyberTheme.monoStyle.copyWith(fontSize: 12.5),
+                      decoration: InputDecoration(
+                        hintText: configured ? '填入新的密钥才会覆盖' : '请输入 API Key',
+                        isDense: true,
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscureKey ? PhosphorIconsLight.eyeSlash : PhosphorIconsLight.eye, size: 16),
+                          onPressed: () => setState(() => _obscureKey = !_obscureKey),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: _saving ? null : () => unawaited(_saveApiKey(p)),
+                    child: const Text('更新', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  key: const Key('test_llm_button'),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: _testing ? null : () => unawaited(_testConnection(p)),
+                  child: Text(_testing ? '检测中…' : '检测连接', style: const TextStyle(fontSize: 12)),
+                ),
+              ),
+              if (_feedback != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _feedback!,
+                  style: TextStyle(fontSize: 11.5, color: _feedbackOk ? colors.statusSuccess : colors.dangerInk),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text('模型', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: _discovering ? null : () => unawaited(_discoverModels(p)),
+                    style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6), minimumSize: Size.zero),
+                    child: Text(_discovering ? '拉取中…' : '拉取能力信息', style: const TextStyle(fontSize: 11.5)),
+                  ),
+                  const SizedBox(width: 4),
+                  OutlinedButton(
+                    onPressed: () => unawaited(_openAddModelDialog(p)),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: const Text('添加模型', style: TextStyle(fontSize: 11.5)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (modelSet.isEmpty)
+                Text('暂未登记模型，点击「添加模型」或「拉取能力信息」后即可在模型配置页分配。', style: TextStyle(fontSize: 12, color: colors.inkQuiet))
+              else
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final modelId in modelSet)
+                      Builder(
+                        builder: (context) {
+                          final ov = p.modelOverrides[modelId];
+                          final disc = _discoveredById[modelId];
+                          final ctx = ov?.contextWindow ?? disc?.contextWindow;
+                          final mods = ov?.inputModalities ?? disc?.inputModalities ?? const <String>[];
+                          final hasVision = mods.contains('image');
+                          final hasAudio = mods.contains('audio');
+                          final hasVideo = mods.contains('video');
+                          final badges = <String>[
+                            if (ctx != null) _formatTokenCount(ctx),
+                            if (hasVision) '识图',
+                            if (hasAudio) '音频',
+                            if (hasVideo) '视频',
+                            if (ov != null) '已覆写',
+                          ];
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () => unawaited(_openModelOverrideDialog(p, modelId)),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: colors.mineralCanvas,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: ov != null ? colors.accentBorder : colors.hairline),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(modelId, style: PsyberTheme.monoStyle.copyWith(fontSize: 11.5, color: colors.inkDeep)),
+                                  if (badges.isNotEmpty) ...[
+                                    const SizedBox(width: 5),
+                                    Text(badges.join('·'), style: TextStyle(fontSize: 10, color: colors.inkQuiet)),
+                                  ],
+                                  if (p.models.contains(modelId)) ...[
+                                    const SizedBox(width: 4),
+                                    GestureDetector(
+                                      onTap: () => unawaited(
+                                        _updateProviderModels(p, p.models.where((m) => m != modelId).toList()),
+                                      ),
+                                      child: Icon(PhosphorIconsLight.x, size: 12, color: colors.inkFaint),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
+                ),
+              const SizedBox(height: 8),
+              Text(
+                '点击任意模型标签可手动覆盖上下文长度、最大输出或识图/音频/视频能力（优先级高于 models.dev 自动匹配）。',
+                style: TextStyle(fontSize: 11, color: colors.inkFaint),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 500;
+        if (providers.isEmpty) {
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              _SurfaceBox(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    children: [
+                      Text('尚未添加模型服务商', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+                      const SizedBox(height: 10),
+                      FilledButton.icon(
+                        key: const Key('add_provider_button'),
+                        onPressed: () => unawaited(_openAddProviderDialog()),
+                        icon: const Icon(PhosphorIconsLight.plus, size: 15),
+                        label: const Text('添加模型服务商'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        }
+        if (wide) {
+          return ListView(
+            padding: const EdgeInsets.all(18),
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(width: 168, child: buildProviderList()),
+                  const SizedBox(width: 12),
+                  Expanded(child: selected != null ? buildDetail(selected) : const SizedBox.shrink()),
+                ],
+              ),
+            ],
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            buildProviderList(),
+            const SizedBox(height: 12),
+            if (selected != null) buildDetail(selected),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _AddProviderDialog extends StatefulWidget {
+  const _AddProviderDialog({required this.controller});
+  final AppController controller;
+
+  @override
+  State<_AddProviderDialog> createState() => _AddProviderDialogState();
+}
+
+class _AddProviderDialogState extends State<_AddProviderDialog> {
+  final _idCtrl = TextEditingController();
+  final _baseUrlCtrl = TextEditingController();
+  final _apiKeyCtrl = TextEditingController();
+  final _modelCtrl = TextEditingController();
+  String _kind = 'openai-compat';
+  bool _saving = false;
+  String? _err;
+
+  @override
+  void dispose() {
+    _idCtrl.dispose();
+    _baseUrlCtrl.dispose();
+    _apiKeyCtrl.dispose();
+    _modelCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final id = _idCtrl.text.trim();
+    if (id.isEmpty) {
+      setState(() => _err = '请填写服务商标识（如 openrouter / deepseek / custom）');
+      return;
+    }
+    if (_kind == 'openai-compat' && _baseUrlCtrl.text.trim().isEmpty) {
+      setState(() => _err = '兼容接口请填写 Base URL');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _err = null;
+    });
+    try {
+      final initModel = _modelCtrl.text.trim();
+      final key = _apiKeyCtrl.text.trim();
+      await widget.controller.patchSettings({
+        'llm': {
+          'providers': {
+            id: {
+              'kind': _kind,
+              if (_baseUrlCtrl.text.trim().isNotEmpty) 'baseUrl': _baseUrlCtrl.text.trim(),
+              'auth': {'mode': 'api_key'},
+              if (initModel.isNotEmpty) 'models': [initModel],
+            },
+          },
+          if (key.isNotEmpty) 'apiKeys': {id: key},
+        },
+      });
+      if (mounted) Navigator.of(context).pop(id);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _err = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _err = '添加失败，请检查网络连接';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Dialog(
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('添加模型服务商', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: colors.inkDeep)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _idCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(labelText: '服务商标识 ID', hintText: '例如 openrouter / deepseek / custom', isDense: true),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: _kind,
+                decoration: const InputDecoration(labelText: '接口协议', isDense: true),
+                items: const [
+                  DropdownMenuItem(value: 'openai-compat', child: Text('OpenAI 兼容接口')),
+                  DropdownMenuItem(value: 'openai', child: Text('OpenAI 官方')),
+                  DropdownMenuItem(value: 'anthropic', child: Text('Anthropic')),
+                  DropdownMenuItem(value: 'google', child: Text('Google Gemini')),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _kind = v);
+                },
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _baseUrlCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(labelText: '服务地址 Base URL', hintText: 'https://api.example.com/v1', isDense: true),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _apiKeyCtrl,
+                obscureText: true,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(labelText: 'API 密钥（可选，稍后也可补充）', isDense: true),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _modelCtrl,
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                decoration: const InputDecoration(labelText: '初始模型 ID（可选）', hintText: '例如 deepseek-chat', isDense: true),
+              ),
+              if (_err != null) ...[
+                const SizedBox(height: 8),
+                Text(_err!, style: TextStyle(fontSize: 12, color: colors.dangerInk)),
+              ],
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('取消')),
+                  const SizedBox(width: 8),
+                  FilledButton(onPressed: _saving ? null : () => unawaited(_save()), child: Text(_saving ? '保存中…' : '添加')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ModelMetadataOverrideDialog extends StatefulWidget {
+  const _ModelMetadataOverrideDialog({
+    required this.provider,
+    required this.modelId,
+    required this.controller,
+    this.discovered,
+    this.existing,
+  });
+
+  final ProviderSettingsView provider;
+  final String modelId;
+  final DiscoveredModelView? discovered;
+  final ModelMetadataOverrideView? existing;
+  final AppController controller;
+
+  @override
+  State<_ModelMetadataOverrideDialog> createState() => _ModelMetadataOverrideDialogState();
+}
+
+class _ModelMetadataOverrideDialogState extends State<_ModelMetadataOverrideDialog> {
+  late final TextEditingController _ctxCtrl;
+  late final TextEditingController _outCtrl;
+  late Set<String> _inputMods;
+  late bool _reasoning;
+  late bool _toolCall;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final ov = widget.existing;
+    final disc = widget.discovered;
+    _ctxCtrl = TextEditingController(text: (ov?.contextWindow ?? disc?.contextWindow)?.toString() ?? '');
+    _outCtrl = TextEditingController(text: (ov?.maxTokens ?? disc?.maxTokens)?.toString() ?? '');
+    _inputMods = Set<String>.from(ov?.inputModalities ?? disc?.inputModalities ?? const ['text']);
+    _reasoning = ov?.reasoning ?? disc?.reasoning ?? false;
+    _toolCall = ov?.toolCall ?? disc?.toolCall ?? true;
+  }
+
+  @override
+  void dispose() {
+    _ctxCtrl.dispose();
+    _outCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save({bool clear = false}) async {
+    setState(() => _saving = true);
+    final nextOverrides = Map<String, Map<String, dynamic>>.fromEntries(
+      widget.provider.modelOverrides.entries.map((e) => MapEntry(e.key, e.value.toJson())),
+    );
+    if (clear) {
+      nextOverrides.remove(widget.modelId);
+    } else {
+      final ctx = int.tryParse(_ctxCtrl.text.trim());
+      final out = int.tryParse(_outCtrl.text.trim());
+      nextOverrides[widget.modelId] = {
+        if (ctx != null && ctx > 0) 'contextWindow': ctx,
+        if (out != null && out > 0) 'maxTokens': out,
+        'inputModalities': _inputMods.isEmpty ? ['text'] : _inputMods.toList(),
+        'reasoning': _reasoning,
+        'toolCall': _toolCall,
+      };
+    }
+    try {
+      await widget.controller.patchSettings({
+        'llm': {
+          'providers': {
+            widget.provider.id: {
+              'kind': widget.provider.kind,
+              if (widget.provider.baseUrl != null && widget.provider.baseUrl!.isNotEmpty)
+                'baseUrl': widget.provider.baseUrl,
+              'auth': {'mode': widget.provider.authMode},
+              'models': widget.provider.models,
+              'modelOverrides': nextOverrides,
+            },
+          },
+        },
+      });
+      if (mounted) Navigator.of(context).pop();
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Dialog(
+      backgroundColor: colors.letterSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: colors.hairline),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('模型能力配置', style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600, color: colors.inkDeep)),
+              const SizedBox(height: 3),
+              Text(
+                '${widget.provider.id} / ${widget.modelId}',
+                style: PsyberTheme.monoStyle.copyWith(fontSize: 12, color: colors.inkQuiet),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _ctxCtrl,
+                      keyboardType: TextInputType.number,
+                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                      decoration: const InputDecoration(labelText: '上下文窗口 (tokens)', hintText: '128000', isDense: true),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: _outCtrl,
+                      keyboardType: TextInputType.number,
+                      style: PsyberTheme.monoStyle.copyWith(fontSize: 13),
+                      decoration: const InputDecoration(labelText: '最大输出 (tokens)', hintText: '16384', isDense: true),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text('输入模态能力', style: TextStyle(fontSize: 12, color: colors.inkQuiet)),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final mod in const ['text', 'image', 'audio', 'video', 'pdf'])
+                    FilterChip(
+                      label: Text(_modalityLabel(mod), style: const TextStyle(fontSize: 11.5)),
+                      selected: _inputMods.contains(mod),
+                      onSelected: (v) => setState(() {
+                        if (v) {
+                          _inputMods.add(mod);
+                        } else if (mod != 'text') {
+                          _inputMods.remove(mod);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _QuietSwitchTile(
+                contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                title: '支持深度思考 / Reasoning',
+                value: _reasoning,
+                onChanged: (v) => setState(() => _reasoning = v),
+              ),
+              _QuietSwitchTile(
+                contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                title: '支持工具调用 / Tool Call',
+                value: _toolCall,
+                onChanged: (v) => setState(() => _toolCall = v),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  if (widget.existing != null)
+                    TextButton(
+                      onPressed: _saving ? null : () => unawaited(_save(clear: true)),
+                      child: Text('恢复自动匹配', style: TextStyle(fontSize: 12, color: colors.dangerInk)),
+                    ),
+                  const Spacer(),
+                  TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('取消')),
+                  const SizedBox(width: 8),
+                  FilledButton(onPressed: _saving ? null : () => unawaited(_save()), child: const Text('保存覆盖')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 模型配置页：按角色槽位分配模型 + 主对话内联可折叠参数摘要 + models.dev 目录同步。
+class _ModelAllocationSection extends StatefulWidget {
+  const _ModelAllocationSection({required this.controller, required this.snap});
+
+  final AppController controller;
+  final SettingsSnapshot? snap;
+
+  @override
+  State<_ModelAllocationSection> createState() => _ModelAllocationSectionState();
+}
+
+class _ModelAllocationSectionState extends State<_ModelAllocationSection> {
+  bool _chatParamsExpanded = false;
+  bool _syncingCatalog = false;
+  String? _syncHint;
+
+  List<ModelSlotView> _availableCandidates(SettingsSnapshot? snap) {
+    final out = <ModelSlotView>[];
+    final seen = <String>{};
+    void addSlot(ModelSlotView? s) {
+      if (s == null || s.provider.isEmpty || s.model.isEmpty) return;
+      final key = '${s.provider}/${s.model}';
+      if (seen.add(key)) out.add(s);
+    }
+
+    if (snap != null) {
+      for (final p in snap.providers.values) {
+        for (final m in p.models) {
+          addSlot(ModelSlotView(provider: p.id, model: m));
+        }
+      }
+      addSlot(snap.chatSlot);
+      addSlot(snap.memoryTaskSlot);
+      addSlot(snap.digestSlot);
+      addSlot(snap.embeddingSlot);
+      addSlot(snap.rerankerSlot);
+      addSlot(snap.visionSlot);
+      addSlot(snap.imageGenSlot);
+      for (final f in snap.fallbackSlots) {
+        addSlot(f);
+      }
+    }
+    return out;
+  }
+
+  Future<void> _setSlot(String slotKey, ModelSlotView? value) async {
+    await widget.controller.patchSettings({
+      'llm': {
+        'slots': {slotKey: value?.toJson()},
+      },
+    });
+  }
+
+  Future<void> _syncCatalog() async {
+    if (_syncingCatalog) return;
+    setState(() {
+      _syncingCatalog = true;
+      _syncHint = null;
+    });
+    try {
+      final res = await widget.controller.syncModelCatalog();
+      if (!mounted || res == null) return;
+      setState(() {
+        _syncingCatalog = false;
+        _syncHint = res.ok ? '已同步 ${res.count} 个模型元数据' : (res.error ?? '同步失败，继续使用本地快照');
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _syncingCatalog = false;
+        _syncHint = '同步失败，继续使用本地快照';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final snap = widget.snap;
+    final candidates = _availableCandidates(snap);
+
+    String thinkingText(String level) => switch (level) {
+          'auto' => '自动',
+          'off' => '关闭',
+          'low' => '轻度',
+          'medium' => '标准',
+          'high' => '深度',
+          _ => '自动',
+        };
+
+    Widget buildSlotRow({
+      required String slotKey,
+      required String title,
+      required String subtitle,
+      required ModelSlotView? current,
+      required String emptyLabel,
+      bool allowClear = true,
+      Widget? belowTitle,
+    }) {
+      final currentVal = (current != null && current.provider.isNotEmpty && current.model.isNotEmpty)
+          ? '${current.provider}/${current.model}'
+          : '';
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(title, style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+                          if (allowClear) ...[
+                            const SizedBox(width: 6),
+                            Text('可选', style: TextStyle(fontSize: 11, color: colors.inkFaint)),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(subtitle, style: TextStyle(fontSize: 11.5, color: colors.inkQuiet)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 218,
+                  child: DropdownButtonFormField<String>(
+                    key: Key('slot_picker_$slotKey'),
+                    initialValue: currentVal.isEmpty ? '' : currentVal,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    ),
+                    items: [
+                      if (allowClear || currentVal.isEmpty)
+                        DropdownMenuItem<String>(
+                          value: '',
+                          child: Text(emptyLabel, style: TextStyle(fontSize: 12, color: colors.inkQuiet), overflow: TextOverflow.ellipsis),
+                        ),
+                      for (final c in candidates)
+                        DropdownMenuItem<String>(
+                          value: '${c.provider}/${c.model}',
+                          child: Text(
+                            '${c.provider}/${c.model}',
+                            style: PsyberTheme.monoStyle.copyWith(fontSize: 12, color: colors.inkDeep),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (val) {
+                      if (val == null || val.isEmpty) {
+                        if (allowClear) unawaited(_setSlot(slotKey, null));
+                        return;
+                      }
+                      final idx = val.indexOf('/');
+                      if (idx > 0) {
+                        unawaited(_setSlot(slotKey, ModelSlotView(provider: val.substring(0, idx), model: val.substring(idx + 1))));
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            if (belowTitle != null) belowTitle,
+          ],
+        ),
+      );
+    }
+
+    final ctxText = snap?.chatContextLimit != null ? _formatTokenCount(snap!.chatContextLimit) : '跟随模型';
+    final fbCount = snap?.fallbackSlots.length ?? 0;
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const _SectionLabel('模型分配'),
+        _SurfaceBox(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              buildSlotRow(
+                slotKey: 'chat',
+                title: '主对话',
+                subtitle: '日常聊天与工具调用的默认模型',
+                current: snap?.chatSlot,
+                emptyLabel: '请先在「模型服务商」添加模型',
+                allowClear: false,
+                belowTitle: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      InkWell(
+                        key: const Key('chat_params_toggle'),
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => setState(() => _chatParamsExpanded = !_chatParamsExpanded),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          child: Row(
+                            children: [
+                              Icon(
+                                _chatParamsExpanded ? PhosphorIconsLight.caretDown : PhosphorIconsLight.caretRight,
+                                size: 13,
+                                color: colors.inkQuiet,
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  '参数 · 思考 ${thinkingText(snap?.thinkingLevel ?? 'auto')} · 上下文 $ctxText${fbCount > 0 ? ' · 备用 $fbCount 个' : ''}',
+                                  style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (_chatParamsExpanded) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            for (final entry in const [
+                              ('auto', '自动'),
+                              ('off', '关闭'),
+                              ('low', '轻度'),
+                              ('medium', '标准'),
+                              ('high', '深度'),
+                            ])
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                                  child: InkWell(
+                                    key: Key('thinking_level_${entry.$1}'),
+                                    borderRadius: BorderRadius.circular(8),
+                                    onTap: () => unawaited(
+                                      widget.controller.patchSettings({
+                                        'llm': {
+                                          'thinking': {
+                                            'enabled': entry.$1 != 'off',
+                                            'level': entry.$1,
+                                          },
+                                        },
+                                      }),
+                                    ),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(vertical: 6),
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        color: (snap?.thinkingLevel ?? 'auto') == entry.$1
+                                            ? colors.accentSoft
+                                            : colors.mineralCanvas,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: (snap?.thinkingLevel ?? 'auto') == entry.$1
+                                              ? colors.accentBorder
+                                              : colors.hairline,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        entry.$2,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: (snap?.thinkingLevel ?? 'auto') == entry.$1
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                          color: colors.inkDeep,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'memory_task',
+                title: '静默整理与梗概',
+                subtitle: '睡前整理记忆卡片与日/周梗概，可选性价比更高的小模型',
+                current: snap?.memoryTaskSlot,
+                emptyLabel: '默认跟随主对话模型',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'digest',
+                title: '附件摘要',
+                subtitle: '长文档与附件压缩摘要',
+                current: snap?.digestSlot,
+                emptyLabel: '默认跟随主对话模型',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'embedding',
+                title: 'Embedding',
+                subtitle: '记忆向量检索；不配则退回关键词检索',
+                current: snap?.embeddingSlot,
+                emptyLabel: '未配置（关键词检索）',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'reranker',
+                title: 'Rerank',
+                subtitle: '记忆检索结果重排；不配则跳过重排',
+                current: snap?.rerankerSlot,
+                emptyLabel: '未配置',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'vision',
+                title: '多模态识图',
+                subtitle: '主对话本身不支持识图时用于理解图片',
+                current: snap?.visionSlot,
+                emptyLabel: '默认跟随主对话模型',
+              ),
+              Divider(height: 1, color: colors.hairline),
+              buildSlotRow(
+                slotKey: 'image_gen',
+                title: '生图',
+                subtitle: '供生图能力使用；不配则不启用',
+                current: snap?.imageGenSlot,
+                emptyLabel: '未配置',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _SurfaceBox(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('models.dev 模型元数据目录', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+                      const SizedBox(height: 2),
+                      Text(
+                        _syncHint ??
+                            '已收录 ${snap?.systemInfo?.catalogModelCount ?? 0} 个模型能力定义 · 自动补齐上下文与识图/音频模态',
+                        style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  key: const Key('sync_model_catalog_button'),
+                  onPressed: _syncingCatalog ? null : () => unawaited(_syncCatalog()),
+                  child: Text(_syncingCatalog ? '同步中…' : '同步目录', style: const TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 独立用量页：时间范围分段切换 + 概览指标 + 按模型与每日明细。
+class _UsageSection extends StatefulWidget {
+  const _UsageSection({required this.controller});
+  final AppController controller;
+
+  @override
+  State<_UsageSection> createState() => _UsageSectionState();
+}
+
+class _UsageSectionState extends State<_UsageSection> {
+  int? _selectedDays = 7;
+  bool _loading = false;
+  UsageStatsSnapshot? _stats;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load(7));
+  }
+
+  Future<void> _load(int? days) async {
+    setState(() {
+      _selectedDays = days;
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final res = await widget.controller.loadUsageStats(days: days);
+      if (!mounted) return;
+      setState(() {
+        _stats = res;
+        _loading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '暂时无法拉取用量统计';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final stats = _stats;
+    final bucket = stats?.activeBucket;
+    String fmtUsd(double v) => '\$${v.toStringAsFixed(4)}';
+    String fmtPct(double r) => '${(r * 100).toStringAsFixed(1)}%';
+
+    return ListView(
+      key: const Key('usage_stats_section'),
+      padding: const EdgeInsets.all(20),
+      children: [
+        _SurfaceBox(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              children: [
+                Text('时间范围', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: colors.inkDeep)),
+                const Spacer(),
+                Wrap(
+                  spacing: 4,
+                  children: [
+                    for (final entry in const <(int?, String)>[
+                      (1, '今天'),
+                      (7, '7 天'),
+                      (30, '30 天'),
+                      (90, '90 天'),
+                      (null, '全部'),
+                    ])
+                      InkWell(
+                        key: Key('usage_range_${entry.$1 ?? 'all'}'),
+                        borderRadius: BorderRadius.circular(7),
+                        onTap: _loading ? null : () => unawaited(_load(entry.$1)),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: _selectedDays == entry.$1 ? colors.accentSoft : colors.mineralCanvas,
+                            borderRadius: BorderRadius.circular(7),
+                            border: Border.all(
+                              color: _selectedDays == entry.$1 ? colors.accentBorder : colors.hairline,
+                            ),
+                          ),
+                          child: Text(
+                            entry.$2,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: _selectedDays == entry.$1 ? FontWeight.w600 : FontWeight.w400,
+                              color: colors.inkDeep,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        if (_loading && stats == null)
+          const Padding(
+            padding: EdgeInsets.all(28),
+            child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+          )
+        else if (_error != null)
+          _SurfaceBox(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(_error!, style: TextStyle(fontSize: 12.5, color: colors.dangerInk)),
+            ),
+          )
+        else if (bucket == null || bucket.turnCount == 0)
+          _SurfaceBox(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 38, horizontal: 20),
+              child: Column(
+                children: [
+                  Icon(PhosphorIconsLight.chartBar, size: 28, color: colors.inkFaint),
+                  const SizedBox(height: 8),
+                  Text('暂无用量数据', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: colors.inkDeep)),
+                  const SizedBox(height: 4),
+                  Text('这段时间还没有用量，换个时间范围看看。', style: TextStyle(fontSize: 12, color: colors.inkQuiet)),
+                ],
+              ),
+            ),
+          )
+        else ...[
+          Row(
+            children: [
+              Expanded(
+                child: _UsageMetricTile(
+                  label: '估算费用',
+                  value: fmtUsd(bucket.estimatedCostUsd),
+                  sub: '${bucket.turnCount} 轮对话',
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _UsageMetricTile(
+                  label: 'Prompt Cache 命中率',
+                  value: fmtPct(bucket.cacheHitRate),
+                  sub: '读 ${_formatTokenCount(bucket.cacheReadTokens)} · 写 ${_formatTokenCount(bucket.cacheWriteTokens)}',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _UsageMetricTile(
+                  label: '输入 Token',
+                  value: _formatTokenCount(bucket.inputTokens),
+                  sub: '今日 ${fmtUsd(stats!.today.estimatedCostUsd)}',
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _UsageMetricTile(
+                  label: '输出 Token',
+                  value: _formatTokenCount(bucket.outputTokens),
+                  sub: '累计 ${fmtUsd(stats.total.estimatedCostUsd)}',
+                ),
+              ),
+            ],
+          ),
+          if (stats.byModel.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const _SectionLabel('按模型分布'),
+            _SurfaceBox(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    for (var i = 0; i < stats.byModel.length; i++) ...[
+                      if (i > 0) Divider(height: 12, color: colors.hairline),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              stats.byModel[i].model,
+                              style: PsyberTheme.monoStyle.copyWith(fontSize: 12, color: colors.inkDeep),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            '${stats.byModel[i].bucket.turnCount} 轮 · ${fmtUsd(stats.byModel[i].bucket.estimatedCostUsd)}',
+                            style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (stats.daily.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const _SectionLabel('每日明细'),
+            _SurfaceBox(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    for (var i = 0; i < stats.daily.length && i < 14; i++) ...[
+                      if (i > 0) Divider(height: 10, color: colors.hairline),
+                      Row(
+                        children: [
+                          Text(stats.daily[i].date, style: PsyberTheme.monoStyle.copyWith(fontSize: 12, color: colors.inkDeep)),
+                          const Spacer(),
+                          Text(
+                            '${stats.daily[i].bucket.turnCount} 轮 · 命中 ${fmtPct(stats.daily[i].bucket.cacheHitRate)} · ${fmtUsd(stats.daily[i].bucket.estimatedCostUsd)}',
+                            style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ],
+    );
+  }
+}
+
+/// 全量工具清单卡片：展示 Psyber 所有能力，核心元工具锁定常驻不可关闭，扩展工具可按需开关。
+class _AllToolsCatalogCard extends StatelessWidget {
+  const _AllToolsCatalogCard({required this.controller, required this.snap});
+
+  final AppController controller;
+  final SettingsSnapshot? snap;
+
+  Future<void> _toggleTool(ToolCatalogItemView tool, bool nextEnabled) async {
+    if (tool.locked) return;
+    final disabled = Set<String>.from(snap?.disabledTools ?? const <String>[]);
+    if (nextEnabled) {
+      disabled.remove(tool.name);
+    } else {
+      disabled.add(tool.name);
+    }
+    await controller.patchSettings({'disabledTools': disabled.toList()});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final tools = snap?.tools ?? const <ToolCatalogItemView>[];
+    if (tools.isEmpty) {
+      return _SurfaceBox(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Text('正在加载工具清单…', style: TextStyle(fontSize: 12, color: colors.inkQuiet)),
+        ),
+      );
+    }
+
+    final enabledCount = tools.where((t) => t.enabled).length;
+    final grouped = <String, List<ToolCatalogItemView>>{};
+    for (final t in tools) {
+      grouped.putIfAbsent(t.category, () => <ToolCatalogItemView>[]).add(t);
+    }
+
+    return Column(
+      key: const Key('all_tools_catalog'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            '已启用 $enabledCount / 共 ${tools.length} 项 · 核心元工具默认常驻不可关闭',
+            style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+          ),
+        ),
+        for (final entry in grouped.entries) ...[
+          _SurfaceBox(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  color: colors.mineralCanvas,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Text(
+                    entry.key,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.inkQuiet),
+                  ),
+                ),
+                for (var i = 0; i < entry.value.length; i++) ...[
+                  Divider(height: 1, color: colors.hairline),
+                  Builder(
+                    builder: (context) {
+                      final tool = entry.value[i];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          tool.name,
+                                          style: PsyberTheme.monoStyle.copyWith(
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w500,
+                                            color: colors.inkDeep,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      if (tool.security == 'confirm') ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: colors.mineralCanvas,
+                                            borderRadius: BorderRadius.circular(5),
+                                            border: Border.all(color: colors.hairline),
+                                          ),
+                                          child: Text('需审批', style: TextStyle(fontSize: 10, color: colors.inkQuiet)),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  if (tool.description.isNotEmpty) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      tool.description,
+                                      style: TextStyle(fontSize: 11.5, color: colors.inkQuiet),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            if (tool.locked)
+                              Container(
+                                key: Key('tool_locked_${tool.name}'),
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: colors.mineralCanvas,
+                                  borderRadius: BorderRadius.circular(7),
+                                  border: Border.all(color: colors.hairline),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(PhosphorIconsLight.lockSimple, size: 12, color: colors.inkQuiet),
+                                    const SizedBox(width: 4),
+                                    Text('核心常驻', style: TextStyle(fontSize: 11, color: colors.inkQuiet)),
+                                  ],
+                                ),
+                              )
+                            else
+                              Transform.scale(
+                                scale: 0.76,
+                                alignment: Alignment.centerRight,
+                                child: CupertinoSwitch(
+                                  key: Key('tool_switch_${tool.name}'),
+                                  value: tool.enabled,
+                                  activeTrackColor: colors.accent,
+                                  inactiveTrackColor: colors.hairline,
+                                  thumbColor: tool.enabled ? colors.onAccent : colors.letterSurface,
+                                  onChanged: (v) => unawaited(_toggleTool(tool, v)),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+}
+
+/// 关于与数据页：版本号、配置文件与记忆目录路径（一键复制）、模型元数据目录同步状态。
+class _AboutDataSection extends StatefulWidget {
+  const _AboutDataSection({required this.controller, required this.snap});
+
+  final AppController controller;
+  final SettingsSnapshot? snap;
+
+  @override
+  State<_AboutDataSection> createState() => _AboutDataSectionState();
+}
+
+class _AboutDataSectionState extends State<_AboutDataSection> {
+  String? _copiedHint;
+  bool _syncing = false;
+  String? _syncMsg;
+
+  Future<void> _copyPath(String label, String? path) async {
+    if (path == null || path.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: path));
+    if (!mounted) return;
+    setState(() => _copiedHint = '已复制$label路径');
+  }
+
+  Future<void> _syncNow() async {
+    if (_syncing) return;
+    setState(() {
+      _syncing = true;
+      _syncMsg = null;
+    });
+    try {
+      final res = await widget.controller.syncModelCatalog();
+      if (!mounted || res == null) return;
+      setState(() {
+        _syncing = false;
+        _syncMsg = res.ok ? '同步成功：共 ${res.count} 个模型' : (res.error ?? '同步失败');
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _syncing = false;
+        _syncMsg = '同步失败，请稍后重试';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final info = widget.snap?.systemInfo;
+
+    Widget rowItem({
+      required String label,
+      required String value,
+      bool mono = false,
+      Widget? trailing,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Text(label, style: TextStyle(fontSize: 13.5, color: colors.inkDeep)),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                value,
+                textAlign: TextAlign.right,
+                style: (mono ? PsyberTheme.monoStyle : const TextStyle()).copyWith(
+                  fontSize: mono ? 12 : 13,
+                  color: colors.inkQuiet,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 8),
+              trailing,
+            ],
+          ],
+        ),
+      );
+    }
+
+    return ListView(
+      key: const Key('about_data_section'),
+      padding: const EdgeInsets.all(20),
+      children: [
+        _SurfaceBox(
+          child: Column(
+            children: [
+              rowItem(label: '版本', value: info?.version ?? '0.1.0', mono: true),
+              Divider(height: 1, color: colors.hairline),
+              rowItem(
+                label: '配置文件',
+                value: info?.configPath ?? '未返回',
+                mono: true,
+                trailing: info?.configPath != null
+                    ? IconButton(
+                        icon: Icon(PhosphorIconsLight.copy, size: 15, color: colors.inkQuiet),
+                        tooltip: '复制路径',
+                        constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => unawaited(_copyPath('配置文件', info!.configPath)),
+                      )
+                    : null,
+              ),
+              Divider(height: 1, color: colors.hairline),
+              rowItem(
+                label: '记忆与存储位置',
+                value: info?.memoryDir ?? info?.dataDir ?? '未返回',
+                mono: true,
+                trailing: (info?.memoryDir ?? info?.dataDir) != null
+                    ? IconButton(
+                        icon: Icon(PhosphorIconsLight.copy, size: 15, color: colors.inkQuiet),
+                        tooltip: '复制路径',
+                        constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => unawaited(_copyPath('存储位置', info?.memoryDir ?? info?.dataDir)),
+                      )
+                    : null,
+              ),
+              Divider(height: 1, color: colors.hairline),
+              rowItem(
+                label: '模型能力目录',
+                value: '${info?.catalogModelCount ?? 0} 个模型 · ${_formatEpochTime(info?.catalogUpdatedAt)}',
+                trailing: OutlinedButton(
+                  onPressed: _syncing ? null : () => unawaited(_syncNow()),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(_syncing ? '同步中…' : '同步', style: const TextStyle(fontSize: 11.5)),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_copiedHint != null) ...[
+          const SizedBox(height: 10),
+          Text(_copiedHint!, style: TextStyle(fontSize: 12, color: colors.statusSuccess)),
+        ],
+        if (_syncMsg != null) ...[
+          const SizedBox(height: 8),
+          Text(_syncMsg!, style: TextStyle(fontSize: 12, color: colors.inkQuiet)),
+        ],
+      ],
     );
   }
 }

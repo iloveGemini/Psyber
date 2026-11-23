@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Hono } from "hono";
 import {
   DEFAULT_CIRCADIAN_CONFIG,
@@ -7,14 +8,16 @@ import {
   type CircadianConfig,
   type LlmConfig,
   type McpServerConfig,
+  type ModelMetadataOverride,
   type NotificationsConfig,
   type PsyberConfig,
   type RecallConfig,
 } from "../core/config.ts";
 import { loadCredentials, saveCredentials, type StoredCredentials } from "../core/credentials.ts";
 import { MAX_MEDIA_UPLOAD_BYTES, MediaStore } from "../core/media.ts";
-import { MCP_PRESETS, validateMcpServers, type McpManager } from "../extensions/mcp.ts";
+import { MCP_PRESETS, validateMcpServers } from "../extensions/mcp.ts";
 import {
+  buildPiAiChatClient,
   discoverProviderModels,
   resolveEffectiveThinkingLevel,
   testModelConnection,
@@ -41,12 +44,19 @@ function isValidHttpUrl(raw: string): boolean {
 function sanitizeSettings(
   cfg: PsyberConfig,
   creds: StoredCredentials,
-  mcp?: McpManager,
+  deps: AppDeps,
   identity?: IdentityProfile,
 ) {
   const providers: Record<
     string,
-    { kind: string; authMode: string; baseUrl?: string; authStatus: "configured" | "unset" }
+    {
+      kind: string;
+      authMode: string;
+      baseUrl?: string;
+      models?: string[];
+      modelOverrides?: Record<string, ModelMetadataOverride>;
+      authStatus: "configured" | "unset";
+    }
   > = {};
   if (cfg.llm?.providers) {
     for (const [id, p] of Object.entries(cfg.llm.providers)) {
@@ -54,13 +64,17 @@ function sanitizeSettings(
         kind: p.kind,
         authMode: p.authMode,
         ...(p.baseUrl ? { baseUrl: p.baseUrl } : {}),
+        ...(Array.isArray(p.models) && p.models.length > 0 ? { models: p.models } : {}),
+        ...(p.modelOverrides && Object.keys(p.modelOverrides).length > 0
+          ? { modelOverrides: p.modelOverrides }
+          : {}),
         authStatus: creds.apiKeys[id] ? "configured" : "unset",
       };
     }
   }
 
-  const mcpServers = mcp
-    ? mcp.getStatusList()
+  const mcpServers = deps.mcp
+    ? deps.mcp.getStatusList()
     : (cfg.mcpServers ?? []).map((s) => ({
         id: s.id,
         enabled: s.enabled,
@@ -77,6 +91,7 @@ function sanitizeSettings(
         tools: [],
       }));
 
+  const catalogStatus = deps.modelCatalog?.getStatus();
   const effectiveLevel = resolveEffectiveThinkingLevel(cfg);
   return {
     timezone: cfg.timezone,
@@ -118,6 +133,24 @@ function sanitizeSettings(
     },
     recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
     mcpServers,
+    tools: deps.toolRegistry?.listAllTools() ?? [],
+    disabledTools: cfg.disabledTools ?? [],
+    system: {
+      version: deps.version,
+      ...(deps.dataDir
+        ? {
+            dataDir: deps.dataDir,
+            configPath: path.join(deps.dataDir, "config.json"),
+            memoryDir: path.join(deps.dataDir, "memory"),
+          }
+        : {}),
+      ...(catalogStatus
+        ? {
+            catalogUpdatedAt: catalogStatus.updatedAt,
+            catalogModelCount: catalogStatus.modelCount,
+          }
+        : {}),
+    },
     devices: (cfg.auth?.devices ?? []).map((d) => ({
       deviceId: d.deviceId,
       deviceName: d.deviceName,
@@ -417,7 +450,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     const identity = deps.dataDir
       ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
       : undefined;
-    return c.json(sanitizeSettings(cfg, creds, deps.mcp, identity));
+    return c.json(sanitizeSettings(cfg, creds, deps, identity));
   });
 
   app.patch("/api/v1/settings", async (c) => {
@@ -427,10 +460,11 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       notifications?: Partial<NotificationsConfig>;
       notificationSecrets?: { barkDeviceKey?: string; ntfyToken?: string };
       recall?: Partial<RecallConfig>;
-      llm?: Partial<LlmConfig>;
+      llm?: Partial<LlmConfig> & { deleteProviderIds?: string[] };
       credentials?: Record<string, { apiKey?: string }>;
       mcpServers?: McpServerConfig[];
       mcpSecrets?: Record<string, string>;
+      disabledTools?: string[];
       revokeDeviceIds?: string[];
       recallEvalNoticeResident?: boolean;
     };
@@ -518,13 +552,14 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       const rawLevel = body.llm.thinking?.level;
       if (
         rawLevel !== undefined &&
+        rawLevel !== "auto" &&
         rawLevel !== "off" &&
         rawLevel !== "low" &&
         rawLevel !== "medium" &&
         rawLevel !== "high"
       ) {
         return c.json(
-          { error: { code: "INVALID_SETTINGS", message: "llm.thinking.level 须为 off/low/medium/high" } },
+          { error: { code: "INVALID_SETTINGS", message: "llm.thinking.level 须为 auto/off/low/medium/high" } },
           400,
         );
       }
@@ -538,15 +573,43 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       const mergedLimits = body.llm.contextLimits
         ? { ...(cfg.llm?.contextLimits ?? {}), ...body.llm.contextLimits }
         : cfg.llm?.contextLimits;
+      const nextProviders = { ...(cfg.llm?.providers ?? {}), ...(body.llm.providers ?? {}) };
+      if (Array.isArray(body.llm.deleteProviderIds)) {
+        for (const pid of body.llm.deleteProviderIds) {
+          if (typeof pid === "string" && pid.trim()) {
+            delete nextProviders[pid.trim()];
+          }
+        }
+      }
+      const nextSlots: Record<string, unknown> = {
+        ...(cfg.llm?.slots ?? {}),
+        ...(body.llm.slots ?? {}),
+      };
+      for (const [k, v] of Object.entries(nextSlots)) {
+        if (v === null) {
+          delete nextSlots[k];
+        }
+      }
       cfg.llm = {
-        providers: { ...(cfg.llm?.providers ?? {}), ...(body.llm.providers ?? {}) },
-        slots: { ...(cfg.llm?.slots ?? {}), ...(body.llm.slots ?? {}) },
+        providers: nextProviders,
+        slots: nextSlots as LlmConfig["slots"],
         thinking: mergedThinking,
         ...(mergedLimits ? { contextLimits: mergedLimits } : {}),
       };
     }
     if (validatedMcpServers !== null) {
       cfg.mcpServers = validatedMcpServers;
+    }
+    if (Array.isArray(body.disabledTools)) {
+      const sanitizedDisabled = body.disabledTools
+        .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+        .map((t) => t.trim())
+        .filter((t) => {
+          const reg = deps.toolRegistry?.get(t);
+          return !reg || reg.tier !== 1;
+        });
+      cfg.disabledTools = Array.from(new Set(sanitizedDisabled));
+      deps.toolRegistry?.setDisabledTools(cfg.disabledTools);
     }
     if (Array.isArray(body.revokeDeviceIds) && body.revokeDeviceIds.length > 0) {
       const toRevoke = new Set(
@@ -559,6 +622,14 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (deps.dataDir) {
       creds = await loadCredentials(deps.dataDir);
       let credsChanged = false;
+      if (Array.isArray(body.llm?.deleteProviderIds)) {
+        for (const pid of body.llm.deleteProviderIds) {
+          if (typeof pid === "string" && pid.trim() && creds.apiKeys[pid.trim()]) {
+            delete creds.apiKeys[pid.trim()];
+            credsChanged = true;
+          }
+        }
+      }
       if (body.credentials && typeof body.credentials === "object") {
         for (const [provider, entry] of Object.entries(body.credentials)) {
           if (entry && typeof entry.apiKey === "string" && entry.apiKey.trim()) {
@@ -614,7 +685,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     const identity = deps.dataDir
       ? await readIdentityProfile(deps.dataDir, deps.clock.now(), cfg.timezone)
       : undefined;
-    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps.mcp, identity) });
+    return c.json({ ok: true, settings: sanitizeSettings(cfg, creds, deps, identity) });
   });
 
   // Ring 1.5 离线通知测试（绕过前台/睡眠窗抑制，直接检测所有已启用通道）
@@ -708,8 +779,26 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     const creds: StoredCredentials = deps.dataDir
       ? await loadCredentials(deps.dataDir)
       : { apiKeys: {}, channelTokens: {}, mcpSecrets: {} };
-    const models = await discoverProviderModels(deps.getConfig(), creds, provider, deps.fetchImpl);
+    const models = await discoverProviderModels(
+      deps.getConfig(),
+      creds,
+      provider,
+      deps.fetchImpl,
+      deps.modelCatalog,
+    );
     return c.json({ models });
+  });
+
+  // 手动同步 models.dev 模型元数据目录到本地缓存
+  app.post("/api/v1/llm/catalog/sync", async (c) => {
+    if (!deps.modelCatalog) {
+      return c.json({ error: { code: "CATALOG_UNAVAILABLE", message: "模型目录服务未就绪" } }, 503);
+    }
+    const res = await deps.modelCatalog.syncFromRemote({
+      fetchImpl: deps.fetchImpl,
+      nowMs: deps.clock.now(),
+    });
+    return c.json(res, res.ok ? 200 : 502);
   });
 
   app.post("/api/v1/llm/test", async (c) => {
@@ -732,15 +821,19 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       creds,
       providerId,
       modelId,
-      clientFactory: deps.llmTestClientFactory,
+      clientFactory:
+        deps.llmTestClientFactory ??
+        ((resolved) => buildPiAiChatClient(resolved, deps.modelCatalog)),
     });
     return c.json(result);
   });
 
-  // Ring 1.5 设置页独立消耗统计（今日/累计/按日/按模型费用与 Prompt Cache 命中率）
+  // Ring 1.5 设置页独立消耗统计（支持 ?days=1|7|30|90 范围筛选）
   app.get("/api/v1/usage/stats", (c) => {
     const cfg = deps.getConfig();
-    return c.json(deps.events.getUsageStats(cfg.timezone));
+    const rawDays = c.req.query("days")?.trim();
+    const parsedDays = rawDays && /^\d+$/.test(rawDays) ? Number(rawDays) : undefined;
+    return c.json(deps.events.getUsageStats(cfg.timezone, { days: parsedDays }));
   });
 
   // Ring 1.5 双人头像上传（POST /api/v1/avatars/:who，上限 5 MB，落盘 media/ 且 pinned = 1）

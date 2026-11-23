@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-22（静默整理轮 `<tidy_context>` 日期/ISO周注入、消息时间戳与附件提示、`prompts/tidy.md` v7 目录分工与最小 Frontmatter 规范落地）。
+> 最后更新：2026-11-23（落地 `models.dev` 模型元数据目录与自动匹配、重构设置页服务商池/模型槽位/时间范围用量/全量工具展示与关于数据页、精简侧栏左下角设置齿轮入口）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（整理轮提示词与上下文加固完成）
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接与主体体验板块已落地（模型目录规范化与设置页重构完成）
 
 ### 已完成
+- **模型元数据目录（`models.dev`）与设置页重构（`server/` + `app/`，2026-11-23）**：
+  - **后端**：新增 `server/src/llm/catalog.ts`（内置快照 + 每日后台同步 `https://models.dev/api.json` 缓存至 `<dataDir>/model_catalog_cache.json` + 归一化模糊匹配 + 单模型 `modelOverrides` 最高优先级覆盖），并接入 `router.ts` 自动补齐上下文窗口、最大输出与输入/输出模态；`registry.ts` 新增 `listAllTools()` 与 `disabledTools` 持久化开关（Tier 1 核心元工具强制锁定常驻不可关闭）；`events.ts` `getUsageStats` 支持 `?days=` 时间范围筛选；`admin_routes.ts` 扩展 `/settings` 返回 `tools`/`disabledTools`/`system`（版本、配置与记忆路径、目录状态），新增 `POST /api/v1/llm/catalog/sync`，扩展 `slots` 支持 `digest`/`image_gen`、`null` 清除与 `deleteProviderIds`。
+  - **前端**：侧栏左下角设置入口精简为独立齿轮图标按钮（`settings_button`）；设置页拆分为 **模型服务商**（服务商池、连通状态灯、Base URL/密钥更新、模型能力标签与手动覆盖弹窗）、**模型配置**（按角色槽位分配 + 主对话内联可折叠参数摘要 + `models.dev` 目录同步）、**用量**（`今天/7天/30天/90天/全部` 分段）、**作息与通知**、**居所与外观**、**工具与设备**（展示 Psyber 全量工具，核心元工具标「核心常驻」锁定不可开关，Tier 2/3 工具可按需开关）与 **关于与数据**（版本、可复制的配置/记忆路径、目录同步）。
+- **默认 `maxTokens` 提升与 `stopReason=length` 截断防护（`docs/spec/` + `server/`，2026-11-23）**：`router.ts` 兜底模型（含 `openai-compat`）默认 `maxTokens` 从 `4096`/`8192` 提升至 `16384`（`DEFAULT_FALLBACK_MAX_TOKENS`）并支持目录模型覆盖；`PiAiChatClient` 在 `usage` 块透传 `stopReason`；`tidy.ts` 拦截 `stopReason === "length"` 或仅输出思考链而无正文/工具调用的异常步，严格回滚磁盘且绝不推进游标，并补齐多步工具循环的 `thinking` + `thinkingSignature` 回传与 `thinkingLevel` 透传；`direct.ts` 遇到 `length` 且零正文时推 `turn.error` 不落空白回复，已有部分正文时落盘并标 `metadata.truncated = true`。
 - **静默整理轮日期上下文与 `prompts/tidy.md` v7 加固（`prompts/` + `docs/spec/` + `server/`，2026-11-22）**：借鉴 Psyche 热/冷写与梗概设计，在 `tidy.ts` 顶部注入 `<tidy_context>`（目标日、星期、ISO 周号与 `bedtime` 精确 `gist/days/YYYY-MM.md` / 周日 `gist/weeks/YYYY.md` 目标路径与节标题），消息转录附本地 `[YYYY-MM-DD HH:mm]` 与图片附件提示，`bedtime` 补充当日卡片节选、现行 `gist/days/` 尾部与 `shelf/` 摘要防重复写；`prompts/tidy.md` 升至 v7 明确 `daily/` vs `gist/days/` 分工、意外/后果优先、同事实只落一处及最小 Frontmatter 规范。
 - **身份简化、可选代词与全仓去「住户」统一（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：移除 `self.md` 冗余 `named` 布尔字段（以 `name` 非空为唯一真相并兼容无 `name` 键旧档案），`self.md` 增加初始为空的可选 `pronoun`（不于创世页预设）；透传 `residentPronoun`；全仓 `docs/`、`prompts/`、`server/` 与 UI 默认兜底统一称 `Psyber`（不再用「住户」或「TA」），保留「我的头像」，`SettingsPanel` 与 `DrawerModal` 实时监听 `identityNotifier`。
 - **身份档案、多步日志、消息/门牌时序与顶栏重构（`prompts/` + `docs/` + `server/` + `app/`，2026-11-22）**：`self.md`/`user.md` 引入结构化 Frontmatter（`name`/`pronoun`）与 `identity` 接口、`identity.updated` SSE 及创世页代词选择；对话流按 `step` 拆分多步思考与工具日志（`journalSteps`）；用户贴图/图片独立无气泡渲染；`door` 状态事件延后至助手持久化后落库；移除后台/提示词/UI 中机械服务口吻与多余「对方」；桌面移除顶栏并流式区去重复徽标/停止按钮，手机端改为头像+状态色点+状态词居中胶囊与顶部透明渐隐。
@@ -37,5 +41,5 @@
 - 按需继续推进 Ring 1.5 剩余项：多端点竞速、Bark/ntfy/GFS 推送通道、观影伴看（`cinema`）插件，或 `digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-22 整理轮加固后实测）**：`bun run typecheck` 零错误；`bun test`（14 文件 / 51 用例 / 636 断言）全部通过。
-- **`app/`（2026-11-22 终改后实测）**：`flutter analyze` 零问题；`flutter test`（25 用例）全部通过。
+- **`server/`（2026-11-23 模型目录、设置页重构与思考自动档后实测）**：`bun run typecheck` 零错误；`bun test`（15 文件 / 54 用例 / 693 断言）全部通过。
+- **`app/`（2026-11-23 设置页重构后实测）**：`flutter analyze` 零问题，`flutter test`（27 用例）全绿；思考 `auto` 档位 UI 改动待本机复跑 `flutter analyze && flutter test`。

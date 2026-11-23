@@ -598,7 +598,19 @@ class FakePsyberApiClient implements PsyberApiClient {
   }
 
   @override
-  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile) async => usageStats;
+  Future<UsageStatsSnapshot> getUsageStats(ConnectionProfile profile, {int? days}) async =>
+      usageStats;
+
+  @override
+  Future<List<DiscoveredModelView>> listLlmModels(
+    ConnectionProfile profile, {
+    String? provider,
+  }) async =>
+      const <DiscoveredModelView>[];
+
+  @override
+  Future<ModelCatalogSyncResult> syncModelCatalog(ConnectionProfile profile) async =>
+      const ModelCatalogSyncResult(ok: true, count: 16, updatedAt: 1700000000000);
 
   @override
   Future<LlmTestResult> testLlmModel(
@@ -1133,7 +1145,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('settings_modal_dialog')), findsOneWidget);
     expect(find.byKey(const Key('close_settings_button')), findsOneWidget);
-    expect(find.text('openai · gpt-4o'), findsOneWidget);
+    expect(find.text('openai/gpt-4o'), findsWidgets);
 
     // 切到「作息与通知」分组，切换开关应立即自动保存
     await tester.tap(find.byKey(const Key('settings_nav_rhythmNotify')));
@@ -1897,23 +1909,27 @@ void main() {
       await tester.tapAt(const Offset(600, 300));
       await tester.pumpAndSettle();
 
-      // 2. 验证居中双栏设置弹层：模型与用量 / 居所与外观 / 工具与设备
+      // 2. 验证居中双栏设置弹层：模型配置 / 模型服务商 / 用量 / 居所与外观 / 工具与设备
       await tester.tap(find.byKey(const Key('settings_button')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('settings_modal_dialog')), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('test_llm_button')));
+      await tester.tap(find.byKey(const Key('chat_params_toggle')));
       await tester.pumpAndSettle();
-      expect(api.llmTestCount, 1);
-      expect(find.text('连通正常 · 128 ms'), findsOneWidget);
-
       await tester.tap(find.byKey(const Key('thinking_level_high')));
       await tester.pumpAndSettle();
       expect(api.settingsPatches.length, greaterThanOrEqualTo(2));
 
-      await tester.tap(find.byKey(const Key('load_usage_stats_button')));
+      await tester.tap(find.byKey(const Key('settings_nav_modelProviders')));
       await tester.pumpAndSettle();
-      expect(find.text('\$0.0125'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('test_llm_button')));
+      await tester.pumpAndSettle();
+      expect(api.llmTestCount, 1);
+      expect(find.textContaining('连通正常 · 128 ms'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('settings_nav_usage')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('0.0125'), findsWidgets);
       expect(find.textContaining('42.9%'), findsWidgets);
 
       await tester.tap(find.byKey(const Key('settings_nav_appearance')));

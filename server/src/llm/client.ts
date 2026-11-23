@@ -59,6 +59,14 @@ export type ChatMessage =
       timestamp: number;
     };
 
+export type ChatStopReason =
+  | "stop"
+  | "length"
+  | "toolUse"
+  | "deferred"
+  | "error"
+  | "aborted";
+
 export type ChatStreamChunk =
   | { type: "thinking_delta"; delta: string; signature?: string }
   | { type: "text_delta"; delta: string }
@@ -71,6 +79,7 @@ export type ChatStreamChunk =
       cacheReadTokens?: number;
       cacheWriteTokens?: number;
       estimatedCostUsd?: number;
+      stopReason?: ChatStopReason;
     }
   | { type: "error"; code: LlmErrorCode; message: string; retryable: boolean };
 
@@ -184,6 +193,7 @@ function toPiAiMessages(messages: ChatMessage[], model: Model<Api>): Message[] {
  */
 export class PiAiChatClient implements ChatModelClient {
   readonly contextWindow: number;
+  readonly maxTokens: number;
   readonly modelId: string;
 
   constructor(
@@ -192,6 +202,7 @@ export class PiAiChatClient implements ChatModelClient {
     private readonly apiKey?: string,
   ) {
     this.contextWindow = model.contextWindow || 200_000;
+    this.maxTokens = model.maxTokens || 16_384;
     this.modelId = model.id;
   }
 
@@ -209,7 +220,10 @@ export class PiAiChatClient implements ChatModelClient {
     };
 
     const reasoning =
-      request.thinkingLevel && request.thinkingLevel !== "off" && this.model.reasoning
+      request.thinkingLevel &&
+      request.thinkingLevel !== "off" &&
+      request.thinkingLevel !== "auto" &&
+      this.model.reasoning
         ? request.thinkingLevel
         : undefined;
 
@@ -254,6 +268,7 @@ export class PiAiChatClient implements ChatModelClient {
           };
         } else if (ev.type === "done") {
           const u = ev.message.usage;
+          const stopReason: ChatStopReason = ev.reason;
           yield {
             type: "usage",
             inputTokens: u.input,
@@ -262,6 +277,7 @@ export class PiAiChatClient implements ChatModelClient {
             cacheReadTokens: u.cacheRead,
             cacheWriteTokens: u.cacheWrite,
             estimatedCostUsd: u.cost?.total,
+            stopReason,
           };
         } else if (ev.type === "error") {
           if (ev.reason === "aborted") return;

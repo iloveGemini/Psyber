@@ -44,7 +44,7 @@ export interface ModelRef {
   provider: string;             // 对应 providers 键名
   model: string;
   temperature?: number;
-  maxTokens?: number;
+  maxTokens?: number;           // 缺省时官方目录模型沿用目录上限；自定义/兜底模型（含 openai-compat）默认 16384，给推理思考链与多步写卡留足余量
 }
 ```
 
@@ -61,7 +61,8 @@ export interface ModelRef {
 | `chat`（主对话） | 429 限流 / 5xx | 指数退避重试 2 次（`1s`、`3s`）；若配置了 `slots.fallbacks` 则按顺序自动切换备用模型（仅在相对上一条助手回复的模型发生变化时广播 `turn.model_switched`）；全部耗尽则推 `turn.error { code: "RATE_LIMITED" \| "PROVIDER_ERROR", retryable: true }` 并支持客户端原地无痕重试（`POST /turns/:turnId/retry`，不重复插入用户消息；若多步工具调用已在前序步骤成功拿到工具结果，保留本轮内存检查点从断点步骤续跑而非整轮重来） |
 | `chat`（主对话） | 上下文接近/超出上限 | **先同步执行 `daily_wrapup` 整理旧段**（期间广播 SSE `turn.rollover { phase: "wrapping", reason }` 供前端显示「正在收拢这段记忆…」），整理成功后再切新 `session_id`（持久化 `active_session`，首轮冻结注入 `<continuity>`）；遇到 `CONTEXT_OVERFLOW` 且当前段存在历史时，完成整理换段后当轮自动重试一次；仅当单轮输入本身超限或整理失败时推 `turn.error { code: "CONTEXT_OVERFLOW", retryable: true }`；75% 换段或手动换段若整理失败则保留原 `session_id` 不硬切防失忆 |
 | `chat`（主对话） | 用户点击中止 | 触发 `AbortController`，落盘已生成的前缀正文（标 `metadata.aborted = true`）并推 `turn.done` |
-| `memory_task`（写作轮） | 写作阶段模型错误 / 超时 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
+| `chat`（主对话） | 输出达到上限截断（`stopReason === "length"`） | 若未产出任何正文、表达或分享，不落盘空白回复，推 `turn.error { code: "PROVIDER_ERROR", retryable: true }` 提示调大 `maxTokens` 或降低思考深度；若已流式输出部分正文则正常落盘并标 `metadata.truncated = true` |
+| `memory_task`（写作轮） | 写作阶段模型错误 / 超时 / 输出截断（`stopReason === "length"`）或仅输出思考无正文与工具调用 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
 | `memory_task`（Ring 1.5 复核） | 复核/修订调用超时、报错或 JSON 不可解析 | **非阻塞降级**：仅记录告警日志，**绝不回滚阶段 A 已落盘的合法卡片**，正常提交阶段 A 改动并推进游标 |
 | `embedding` / `reranker` | 未配置 / 超时（`> 2500ms`）/ 报错 | Ring 1 静默降级为 SQLite FTS5 2-gram 字面检索（Ring 1.5 按需叠加 IDF/单字 `LIKE`），绝不阻塞主对话 |
 

@@ -74,6 +74,29 @@ export interface RegisteredTool {
   execute: (args: Record<string, unknown>, ctx: ToolExecutionContext) => Promise<ToolResult>;
 }
 
+export interface ToolCatalogItem {
+  name: string;
+  tier: ToolTier;
+  category: string;
+  security: ToolSecurityLevel;
+  description: string;
+  tags: string[];
+  /** Tier 1 元工具锁定内置，界面展示但不可关闭 */
+  locked: boolean;
+  enabled: boolean;
+}
+
+function resolveToolCategory(tool: RegisteredTool): string {
+  if (tool.name.startsWith("mcp.")) return "外部 MCP";
+  if (tool.tags.includes("memory")) return "记忆读写";
+  if (tool.tags.includes("extension")) return "扩展调度";
+  if (tool.tags.includes("expression") || tool.tags.includes("door")) return "表达与边界";
+  if (tool.tags.includes("drawer") || tool.tags.includes("share") || tool.tags.includes("retract")) {
+    return "社交与私密";
+  }
+  return "其他工具";
+}
+
 /**
  * 三层工具注册中心：
  * - Tier 1 固定 9 工具按 ASCII 升序冻结在 Static Prefix，保护 Prompt Cache 零失效；
@@ -81,9 +104,13 @@ export interface RegisteredTool {
  */
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredTool>();
+  private readonly disabledTools = new Set<string>();
 
   register(tool: RegisteredTool): void {
     this.tools.set(tool.name, tool);
+    if (tool.tier === 1) {
+      this.disabledTools.delete(tool.name);
+    }
   }
 
   unregister(name: string): boolean {
@@ -105,6 +132,41 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /** 更新非核心扩展工具的停用集合（Tier 1 元工具强制忽略停用） */
+  setDisabledTools(names: Iterable<string>): void {
+    this.disabledTools.clear();
+    for (const raw of names) {
+      const name = raw.trim();
+      if (!name) continue;
+      const tool = this.tools.get(name);
+      if (tool && tool.tier === 1) continue;
+      this.disabledTools.add(name);
+    }
+  }
+
+  isToolEnabled(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    if (tool.tier === 1) return true;
+    return !this.disabledTools.has(name);
+  }
+
+  /** 返回全量已注册工具清单（供设置页展示 Psyber 全部能力，Tier 1 元工具标为 locked 不可关闭） */
+  listAllTools(): ToolCatalogItem[] {
+    return Array.from(this.tools.values())
+      .sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name))
+      .map((t) => ({
+        name: t.name,
+        tier: t.tier,
+        category: resolveToolCategory(t),
+        security: t.security,
+        description: t.description,
+        tags: [...t.tags],
+        locked: t.tier === 1,
+        enabled: t.tier === 1 ? true : !this.disabledTools.has(t.name),
+      }));
+  }
+
   /** 返回按 name ASCII 升序冻结的 Tier 1 工具定义列表 */
   getTier1Definitions(): ToolDefinition[] {
     return Array.from(this.tools.values())
@@ -120,7 +182,9 @@ export class ToolRegistry {
   /** 按意图关键词检索 Tier 2/3 工具并返回精简规范（≤ 1200 字符） */
   searchExtendedTools(query: string, limit = 5): string {
     const q = query.trim().toLowerCase();
-    const candidates = Array.from(this.tools.values()).filter((t) => t.tier !== 1);
+    const candidates = Array.from(this.tools.values()).filter(
+      (t) => t.tier !== 1 && !this.disabledTools.has(t.name),
+    );
     if (candidates.length === 0) {
       return "当前没有已注册的扩展工具。";
     }
@@ -159,6 +223,9 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, output: `未知工具 "${name}"，可先用 tool_search 检索可用工具` };
+    }
+    if (tool.tier !== 1 && this.disabledTools.has(name)) {
+      return { ok: false, output: `扩展工具 "${name}" 已在设置中停用` };
     }
     if (tool.guard) {
       const verdict = await tool.guard(args, ctx);

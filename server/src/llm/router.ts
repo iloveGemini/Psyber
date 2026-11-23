@@ -10,8 +10,14 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 
-import type { ModelRef, PsyberConfig, ThinkingLevel } from "../core/config.ts";
+import type {
+  ModelMetadataOverride,
+  ModelRef,
+  PsyberConfig,
+  ThinkingLevel,
+} from "../core/config.ts";
 import { loadCredentials, type StoredCredentials } from "../core/credentials.ts";
+import { ModelCatalogService, type ModelCostSpec } from "./catalog.ts";
 import {
   PiAiChatClient,
   type ChatModelClient,
@@ -31,6 +37,7 @@ export interface ResolvedByokSlot {
   baseUrl?: string;
   temperature?: number;
   maxTokens?: number;
+  metadataOverride?: ModelMetadataOverride;
 }
 
 export type ResolveSlotResult =
@@ -43,6 +50,12 @@ export interface DiscoveredModelInfo {
   provider: string;
   contextWindow?: number;
   maxTokens?: number;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  reasoning?: boolean;
+  toolCall?: boolean;
+  cost?: ModelCostSpec;
+  source?: "override" | "catalog" | "snapshot" | "pi-ai" | "fallback";
   thinkingLevels?: ThinkingLevel[];
 }
 
@@ -56,10 +69,16 @@ const ZERO_COST = {
 /** 归一化思考深度档位（兼容旧版 thinking.enabled 布尔字段） */
 export function resolveEffectiveThinkingLevel(config: PsyberConfig): ThinkingLevel {
   const level = config.llm?.thinking?.level;
-  if (level === "off" || level === "low" || level === "medium" || level === "high") {
+  if (
+    level === "auto" ||
+    level === "off" ||
+    level === "low" ||
+    level === "medium" ||
+    level === "high"
+  ) {
     return level;
   }
-  return config.llm?.thinking?.enabled === false ? "off" : "medium";
+  return config.llm?.thinking?.enabled === false ? "off" : "auto";
 }
 
 function resolveModelRef(
@@ -99,16 +118,18 @@ function resolveModelRef(
     };
   }
 
+  const trimmedModelId = ref.model.trim();
   return {
     ok: true,
     slot: {
       providerId,
       kind: providerCfg.kind,
-      modelId: ref.model.trim(),
+      modelId: trimmedModelId,
       apiKey,
       baseUrl,
       temperature: ref.temperature,
       maxTokens: ref.maxTokens,
+      metadataOverride: providerCfg.modelOverrides?.[trimmedModelId],
     },
   };
 }
@@ -152,90 +173,135 @@ export function resolveByokSlotChain(
   return { ok: true, chain };
 }
 
-function buildFallbackModel(resolved: ResolvedByokSlot): Model<Api> {
+/**
+ * 兜底 / 自定义模型（尤其 openai-compat）的默认单步输出上限（单位：Token）。
+ * 带思考链的推理模型会把 thinking tokens 计入 max_completion_tokens / max_tokens；
+ * 若给太小（如 4096），模型极易把额度耗尽在思考链里导致 finish_reason=length 无正文/无工具调用。
+ * 16384 在主流模型与中转站上限内留足思考与多步写卡空间，且可由 config.json 中槽位的 maxTokens 显式覆盖。
+ */
+export const DEFAULT_FALLBACK_MAX_TOKENS = 16_384;
+
+const defaultCatalog = new ModelCatalogService();
+
+function toPiAiInputModalities(modalities?: string[]): Array<"text" | "image"> {
+  if (!modalities || modalities.length === 0) return ["text", "image"];
+  const out: Array<"text" | "image"> = ["text"];
+  if (modalities.includes("image")) out.push("image");
+  return out;
+}
+
+function buildFallbackModel(
+  resolved: ResolvedByokSlot,
+  catalog: ModelCatalogService = defaultCatalog,
+): Model<Api> {
+  const meta = catalog.lookup(resolved.modelId, {
+    providerHint: resolved.kind === "openai-compat" ? undefined : resolved.kind,
+    override: resolved.metadataOverride,
+  });
+  const defaultMaxTokens =
+    resolved.maxTokens ?? meta?.maxTokens ?? DEFAULT_FALLBACK_MAX_TOKENS;
+  const resolvedCost = meta?.cost
+    ? {
+        input: meta.cost.input,
+        output: meta.cost.output,
+        cacheRead: meta.cost.cacheRead ?? 0,
+        cacheWrite: meta.cost.cacheWrite ?? 0,
+      }
+    : ZERO_COST;
+  const resolvedInput = toPiAiInputModalities(meta?.inputModalities);
+
   if (resolved.kind === "anthropic") {
     return {
       id: resolved.modelId,
-      name: resolved.modelId,
+      name: meta?.name ?? resolved.modelId,
       api: "anthropic-messages",
       provider: "anthropic",
       baseUrl: resolved.baseUrl ?? "https://api.anthropic.com",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: ZERO_COST,
-      contextWindow: 200_000,
-      maxTokens: resolved.maxTokens ?? 8192,
+      reasoning: meta?.reasoning ?? true,
+      input: resolvedInput,
+      cost: resolvedCost,
+      contextWindow: meta?.contextWindow ?? 200_000,
+      maxTokens: defaultMaxTokens,
     };
   }
   if (resolved.kind === "openai") {
     return {
       id: resolved.modelId,
-      name: resolved.modelId,
+      name: meta?.name ?? resolved.modelId,
       api: "openai-responses",
       provider: "openai",
       baseUrl: resolved.baseUrl ?? "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: ZERO_COST,
-      contextWindow: 128_000,
-      maxTokens: resolved.maxTokens ?? 4096,
+      reasoning: meta?.reasoning ?? true,
+      input: resolvedInput,
+      cost: resolvedCost,
+      contextWindow: meta?.contextWindow ?? 128_000,
+      maxTokens: defaultMaxTokens,
     };
   }
   if (resolved.kind === "google") {
     return {
       id: resolved.modelId,
-      name: resolved.modelId,
+      name: meta?.name ?? resolved.modelId,
       api: "google-generative-ai",
       provider: "google",
       baseUrl: resolved.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: ZERO_COST,
-      contextWindow: 1_000_000,
-      maxTokens: resolved.maxTokens ?? 8192,
+      reasoning: meta?.reasoning ?? true,
+      input: resolvedInput,
+      cost: resolvedCost,
+      contextWindow: meta?.contextWindow ?? 1_000_000,
+      maxTokens: defaultMaxTokens,
     };
   }
   return {
     id: resolved.modelId,
-    name: resolved.modelId,
+    name: meta?.name ?? resolved.modelId,
     api: "openai-completions",
     provider: resolved.providerId,
     baseUrl: resolved.baseUrl ?? "",
-    reasoning: false,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 128_000,
-    maxTokens: resolved.maxTokens ?? 4096,
+    reasoning: meta?.reasoning ?? false,
+    input: resolvedInput,
+    cost: resolvedCost,
+    contextWindow: meta?.contextWindow ?? 128_000,
+    maxTokens: defaultMaxTokens,
   };
 }
 
 /**
  * 基于 @earendil-works/pi-ai 构建可执行的流式模型客户端（支持 anthropic / openai / google / openai-compat）。
  */
-export function buildPiAiChatClient(resolved: ResolvedByokSlot): PiAiChatClient {
+export function buildPiAiChatClient(
+  resolved: ResolvedByokSlot,
+  catalog: ModelCatalogService = defaultCatalog,
+): PiAiChatClient {
   const models = createModels();
   let model: Model<Api>;
+  const ov = resolved.metadataOverride;
+
+  const applyOverrides = (base: Model<Api>): Model<Api> => ({
+    ...base,
+    ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
+    ...(ov?.contextWindow ? { contextWindow: ov.contextWindow } : {}),
+    ...(ov?.reasoning !== undefined ? { reasoning: ov.reasoning } : {}),
+    ...(ov?.inputModalities ? { input: toPiAiInputModalities(ov.inputModalities) } : {}),
+    ...(resolved.maxTokens ?? ov?.maxTokens
+      ? { maxTokens: resolved.maxTokens ?? ov?.maxTokens }
+      : {}),
+  });
 
   if (resolved.kind === "anthropic") {
     models.setProvider(anthropicProvider());
-    const catalog = models.getModel("anthropic", resolved.modelId);
-    model = catalog
-      ? { ...catalog, ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}) }
-      : buildFallbackModel(resolved);
+    const builtin = models.getModel("anthropic", resolved.modelId);
+    model = builtin ? applyOverrides(builtin) : buildFallbackModel(resolved, catalog);
   } else if (resolved.kind === "openai") {
     models.setProvider(openaiProvider());
-    const catalog = models.getModel("openai", resolved.modelId);
-    model = catalog
-      ? { ...catalog, ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}) }
-      : buildFallbackModel(resolved);
+    const builtin = models.getModel("openai", resolved.modelId);
+    model = builtin ? applyOverrides(builtin) : buildFallbackModel(resolved, catalog);
   } else if (resolved.kind === "google") {
     models.setProvider(googleProvider());
-    const catalog = models.getModel("google", resolved.modelId);
-    model = catalog
-      ? { ...catalog, ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}) }
-      : buildFallbackModel(resolved);
+    const builtin = models.getModel("google", resolved.modelId);
+    model = builtin ? applyOverrides(builtin) : buildFallbackModel(resolved, catalog);
   } else {
-    model = buildFallbackModel(resolved);
+    model = buildFallbackModel(resolved, catalog);
     models.setProvider(
       createProvider({
         id: resolved.providerId,
@@ -263,6 +329,7 @@ export async function discoverProviderModels(
   creds: StoredCredentials,
   providerFilter?: string,
   fetchImpl: typeof fetch = fetch,
+  catalog: ModelCatalogService = defaultCatalog,
 ): Promise<DiscoveredModelInfo[]> {
   const providers = config.llm?.providers ?? {};
   const entries = providerFilter
@@ -271,6 +338,33 @@ export async function discoverProviderModels(
 
   const results: DiscoveredModelInfo[] = [];
   const seen = new Set<string>();
+  const enrich = (
+    providerId: string,
+    modelId: string,
+    base?: Partial<DiscoveredModelInfo>,
+  ): DiscoveredModelInfo => {
+    const pCfg = providers[providerId];
+    const meta = catalog.lookup(modelId, {
+      providerHint: pCfg && pCfg.kind !== "openai-compat" ? pCfg.kind : undefined,
+      override: pCfg?.modelOverrides?.[modelId],
+    });
+    const reasoning = meta?.reasoning ?? base?.reasoning ?? false;
+    return {
+      id: modelId,
+      name: base?.name ?? meta?.name ?? modelId,
+      provider: providerId,
+      contextWindow: meta?.contextWindow ?? base?.contextWindow,
+      maxTokens: meta?.maxTokens ?? base?.maxTokens,
+      inputModalities: meta?.inputModalities ?? base?.inputModalities ?? ["text"],
+      outputModalities: meta?.outputModalities ?? base?.outputModalities ?? ["text"],
+      reasoning,
+      toolCall: meta?.toolCall ?? base?.toolCall ?? true,
+      ...(meta?.cost ? { cost: meta.cost } : {}),
+      source: meta?.source ?? base?.source ?? "fallback",
+      thinkingLevels: reasoning ? ["auto", "off", "low", "medium", "high"] : ["off"],
+    };
+  };
+
   const addUnique = (item: DiscoveredModelInfo) => {
     const key = `${item.provider}:${item.id}`;
     if (seen.has(key)) return;
@@ -279,6 +373,11 @@ export async function discoverProviderModels(
   };
 
   for (const [providerId, p] of entries) {
+    for (const mId of p.models ?? []) {
+      if (typeof mId === "string" && mId.trim()) {
+        addUnique(enrich(providerId, mId.trim()));
+      }
+    }
     if (p.kind === "anthropic" || p.kind === "openai" || p.kind === "google") {
       const models = createModels();
       if (p.kind === "anthropic") models.setProvider(anthropicProvider());
@@ -287,14 +386,17 @@ export async function discoverProviderModels(
 
       const list = models.getModels(p.kind);
       for (const m of list.slice(0, 40)) {
-        addUnique({
-          id: m.id,
-          name: m.name || m.id,
-          provider: providerId,
-          contextWindow: m.contextWindow,
-          maxTokens: m.maxTokens,
-          thinkingLevels: m.reasoning ? ["off", "low", "medium", "high"] : ["off"],
-        });
+        addUnique(
+          enrich(providerId, m.id, {
+            name: m.name || m.id,
+            contextWindow: m.contextWindow,
+            maxTokens: m.maxTokens,
+            inputModalities: m.input,
+            outputModalities: ["text"],
+            reasoning: m.reasoning,
+            source: "pi-ai",
+          }),
+        );
       }
     } else if (p.kind === "openai-compat" && p.baseUrl) {
       const apiKey = creds.apiKeys[providerId]?.trim() ?? "";
@@ -308,14 +410,9 @@ export async function discoverProviderModels(
           if (res.ok) {
             const json = (await res.json()) as { data?: Array<{ id?: string }> };
             if (Array.isArray(json.data)) {
-              for (const item of json.data.slice(0, 60)) {
+              for (const item of json.data.slice(0, 80)) {
                 if (typeof item?.id === "string" && item.id.trim()) {
-                  addUnique({
-                    id: item.id.trim(),
-                    name: item.id.trim(),
-                    provider: providerId,
-                    thinkingLevels: ["off", "low", "medium", "high"],
-                  });
+                  addUnique(enrich(providerId, item.id.trim()));
                 }
               }
             }
@@ -327,20 +424,21 @@ export async function discoverProviderModels(
     }
   }
 
-  // 确保当前已配置的 chat 与 fallbacks 模型总在清单中可见
+  const slots = config.llm?.slots;
   const configuredRefs: ModelRef[] = [
-    ...(config.llm?.slots?.chat ? [config.llm.slots.chat] : []),
-    ...(config.llm?.slots?.fallbacks ?? []),
+    ...(slots?.chat ? [slots.chat] : []),
+    ...(slots?.fallbacks ?? []),
+    ...(slots?.memory_task ? [slots.memory_task] : []),
+    ...(slots?.digest ? [slots.digest] : []),
+    ...(slots?.vision ? [slots.vision] : []),
+    ...(slots?.embedding ? [slots.embedding] : []),
+    ...(slots?.reranker ? [slots.reranker] : []),
+    ...(slots?.image_gen ? [slots.image_gen] : []),
   ];
   for (const ref of configuredRefs) {
     if (providerFilter && ref.provider !== providerFilter) continue;
     if (ref.provider && ref.model) {
-      addUnique({
-        id: ref.model,
-        name: ref.model,
-        provider: ref.provider,
-        thinkingLevels: ["off", "low", "medium", "high"],
-      });
+      addUnique(enrich(ref.provider, ref.model));
     }
   }
 
@@ -405,6 +503,7 @@ export interface DynamicChatModelDeps {
   dataDir: string;
   getConfig: () => PsyberConfig;
   slot?: LlmSlotName;
+  catalog?: ModelCatalogService;
   /** 可注入客户端构造工厂，供离线测试验证动态热更新与主备降级链而零外网调用 */
   clientFactory?: (resolved: ResolvedByokSlot) => ChatModelClient;
 }
@@ -424,7 +523,8 @@ export class DynamicChatModel implements ChatModelClient {
 
   constructor(private readonly deps: DynamicChatModelDeps) {
     this.slot = deps.slot ?? "chat";
-    this.clientFactory = deps.clientFactory ?? buildPiAiChatClient;
+    this.clientFactory =
+      deps.clientFactory ?? ((resolved) => buildPiAiChatClient(resolved, deps.catalog));
   }
 
   get contextWindow(): number {

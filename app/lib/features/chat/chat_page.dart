@@ -1088,7 +1088,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   sending: _sending,
                                   isReplying: activeTurn != null,
                                   isDraggingFiles: _isDraggingFiles,
-                                  thinkingLevel: settingsSnap?.thinkingLevel ?? 'medium',
+                                  thinkingLevel: settingsSnap?.thinkingLevel ?? 'auto',
                                   currentModelLabel: modelLabel,
                                   onSelectThinkingLevel: (level) => unawaited(
                                     widget.controller.patchSettings({

@@ -8,6 +8,7 @@ import { ulid } from "../core/ulid.ts";
 import type { DirectEngine, TurnCheckpoint } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
 import type { McpManager } from "../extensions/mcp.ts";
+import type { ModelCatalogService } from "../llm/catalog.ts";
 import type { ChatModelClient } from "../llm/client.ts";
 import type { ResolvedByokSlot } from "../llm/router.ts";
 import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
@@ -16,6 +17,7 @@ import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
 import type { NotificationHub } from "../notifications/hub.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
+import type { ToolRegistry } from "../tools/registry.ts";
 import { registerAdminRoutes } from "./admin_routes.ts";
 import type { PairingManager } from "./pairing.ts";
 
@@ -127,6 +129,8 @@ export interface AppDeps {
   pairing?: PairingManager;
   media?: MediaStore;
   mcp?: McpManager;
+  toolRegistry?: ToolRegistry;
+  modelCatalog?: ModelCatalogService;
   notifications?: NotificationHub;
   /** 同步高风险工具审批超时（毫秒，默认 120_000） */
   approvalTimeoutMs?: number;

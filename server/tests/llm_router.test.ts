@@ -6,6 +6,7 @@ import { DEFAULT_CIRCADIAN_CONFIG, type PsyberConfig } from "../src/core/config.
 import { saveCredentials } from "../src/core/credentials.ts";
 import type { ChatModelClient, ChatStreamChunk } from "../src/llm/client.ts";
 import {
+  DEFAULT_FALLBACK_MAX_TOKENS,
   DynamicChatModel,
   buildPiAiChatClient,
   resolveByokSlot,
@@ -183,6 +184,18 @@ describe("BYOK 动态模型路由（llm/router.ts）", () => {
         baseUrl,
       });
       expect(client.contextWindow).toBeGreaterThan(0);
+      expect(client.maxTokens).toBeGreaterThanOrEqual(DEFAULT_FALLBACK_MAX_TOKENS);
     }
+
+    // openai-compat 默认给足 16384 输出上限，且支持通过 maxTokens 显式覆盖
+    const customCompat = buildPiAiChatClient({
+      providerId: "local",
+      kind: "openai-compat",
+      modelId: "reasoning-model",
+      apiKey: "demo-key",
+      baseUrl: "http://localhost:11434/v1",
+      maxTokens: 32_768,
+    });
+    expect(customCompat.maxTokens).toBe(32_768);
   });
 });

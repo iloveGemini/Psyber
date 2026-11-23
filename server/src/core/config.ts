@@ -99,7 +99,7 @@ export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
   desktop: { enabled: true },
 };
 
-export type ThinkingLevel = "off" | "low" | "medium" | "high";
+export type ThinkingLevel = "auto" | "off" | "low" | "medium" | "high";
 
 export interface ModelRef {
   provider: string;
@@ -115,22 +115,36 @@ export interface ContextLimitsConfig {
   solo?: number;
 }
 
+export interface ModelMetadataOverride {
+  contextWindow?: number;
+  maxTokens?: number;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  reasoning?: boolean;
+  toolCall?: boolean;
+}
+
+export interface LlmProviderConfig {
+  kind: "anthropic" | "openai" | "google" | "openai-compat";
+  authMode: "oauth" | "api_key";
+  baseUrl?: string;
+  /** 该服务商下用户显式启用/收藏的模型 ID 列表 */
+  models?: string[];
+  /** 单模型手工覆写参数（最高优先级，覆盖 models.dev 与内置目录） */
+  modelOverrides?: Record<string, ModelMetadataOverride>;
+}
+
 export interface LlmConfig {
-  providers: Record<
-    string,
-    {
-      kind: "anthropic" | "openai" | "google" | "openai-compat";
-      authMode: "oauth" | "api_key";
-      baseUrl?: string;
-    }
-  >;
+  providers: Record<string, LlmProviderConfig>;
   slots: {
     chat?: ModelRef;
     fallbacks?: ModelRef[];
     memory_task?: ModelRef;
+    digest?: ModelRef;
     vision?: ModelRef;
     embedding?: ModelRef;
     reranker?: ModelRef;
+    image_gen?: ModelRef;
   };
   thinking: {
     enabled: boolean;
@@ -217,6 +231,8 @@ export interface PsyberConfig {
   llm?: LlmConfig;
   /** 外部 MCP 服务器清单（Tier 3 工具池，敏感令牌经 ${cred:<key>} 引用 credentials.json） */
   mcpServers?: McpServerConfig[];
+  /** 用户手动停用的非核心扩展工具名列表（Tier 1 元工具不可停用） */
+  disabledTools?: string[];
   /** 是否已完成初生引导 */
   genesisCompleted?: boolean;
 }
@@ -382,6 +398,9 @@ export async function loadOrCreateConfig(
       : undefined,
     llm: cfg.llm,
     mcpServers: Array.isArray(cfg.mcpServers) ? cfg.mcpServers : [],
+    disabledTools: Array.isArray(cfg.disabledTools)
+      ? cfg.disabledTools.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+      : [],
     genesisCompleted: Boolean(cfg.genesisCompleted),
   };
 }

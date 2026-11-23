@@ -184,42 +184,29 @@ class LeftArchivePanelContent extends StatelessWidget {
             left: false,
             right: false,
             bottom: !isSidebar,
-            child: Row(
-              children: [
-                Expanded(
-                  child: ListTile(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(
+                children: [
+                  IconButton(
                     key: const Key('settings_button'),
-                    dense: true,
-                    contentPadding: const EdgeInsets.fromLTRB(16, 0, 4, 0),
-                    leading: Icon(
-                      PhosphorIconsLight.slidersHorizontal,
-                      size: 19,
-                      color: colors.inkDeep,
+                    tooltip: '偏好与设置 (⌘,)',
+                    icon: Icon(
+                      PhosphorIconsLight.gearSix,
+                      size: 18,
+                      color: colors.inkQuiet,
                     ),
-                    title: Text(
-                      '偏好与设置',
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w500,
-                        color: colors.inkDeep,
-                      ),
-                    ),
-                    subtitle: Text(
-                      '模型、作息、扩展与设备',
-                      style: TextStyle(fontSize: 11, color: colors.inkQuiet),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () {
+                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                    padding: EdgeInsets.zero,
+                    onPressed: () {
                       if (!isSidebar) {
                         Navigator.of(context).pop();
                       }
                       onOpenSettings();
                     },
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: KeyedSubtree(
+                  const Spacer(),
+                  KeyedSubtree(
                     key: appearanceAnchorKey,
                     child: ValueListenableBuilder<ThemeMode>(
                       valueListenable: controller.themeModeNotifier,
@@ -233,6 +220,8 @@ class LeftArchivePanelContent extends StatelessWidget {
                           key: const Key('quick_appearance_button'),
                           tooltip: '外观与阅读色板',
                           icon: Icon(icon, size: 18, color: colors.inkQuiet),
+                          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                          padding: EdgeInsets.zero,
                           onPressed: () {
                             if (!isSidebar) {
                               Navigator.of(context).pop();
@@ -249,8 +238,8 @@ class LeftArchivePanelContent extends StatelessWidget {
                       },
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
