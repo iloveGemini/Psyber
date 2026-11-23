@@ -1,5 +1,5 @@
 ---
-version: 3
+version: 4
 name: review.md
 slot: memory_task
 description: C2.7 写后独立复核轮 Prompt（Ring 1.5 可选非阻塞复核启用，Ring 1 主流程不调用；只读视角）
@@ -29,7 +29,7 @@ description: C2.7 写后独立复核轮 Prompt（Ring 1.5 可选非阻塞复核�
 {
   "issues": [
     {
-      "cardPath": "daily/2026-11-19-example.md",
+      "cardPath": "episodes/2026/11/19/ep-example.md",
       "category": "attribution | no_bleed | omission",
       "cardQuote": "attribution/no_bleed 时必填：卡片本轮新增/修改片段中的逐字原句",
       "transcriptQuote": "omission 时必填（其他类型可选）：原始对话段中的逐字片段",

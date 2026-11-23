@@ -47,7 +47,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(
       (
         await ctx.tools.write(
-          "activities/REGISTRY.yaml",
+          "threads/REGISTRY.yaml",
           [
             "spaces:",
             "  stories:",
@@ -63,7 +63,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(
       (
         await ctx.tools.write(
-          "activities/stories/lighthouse.md",
+          "threads/stories/lighthouse.md",
           "---\ntitle: 雾里的守灯人\nkind: serial\n---\n连载停在第 4 章：主角在灯塔回廊听见昨天的录音。\n",
         )
       ).ok,
@@ -72,7 +72,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(
       (
         await ctx.tools.write(
-          "daily/2026-11-19-cat.md",
+          "episodes/2026/11/19/ep-cat.md",
           "---\ntitle: 楼下三花猫\nkind: episode\ncreated: 2026-11-19\n---\n昨天傍晚在楼下喂了一只特别黏人的三花猫。\n",
         )
       ).ok,
@@ -90,7 +90,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     });
     expect(blank.skipped).toBe(true);
 
-    // 2. 命中活动触发词 -> Track 1 直挂睡前故事卡
+    // 2. 命中线索触发词 -> Track 1 直挂睡前故事卡
     const actHit = await recallMemories({
       db: ctx.db,
       dataDir: ctx.dataDir,
@@ -101,7 +101,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       query: "今晚想听睡前故事",
     });
     expect(
-      actHit.items.some((i) => i.path === "activities/stories/lighthouse.md" && i.track === "same_activity"),
+      actHit.items.some((i) => i.path === "threads/stories/lighthouse.md" && i.track === "same_activity"),
     ).toBe(true);
 
     // 落盘对应 active 助手回复后，2h 内同一会话重复问才被去重（对齐 Spec 02 §7.5）
@@ -123,7 +123,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       turnId: "t-story-2",
       query: "今晚想听睡前故事",
     });
-    expect(deduped.items.some((i) => i.path === "activities/stories/lighthouse.md")).toBe(false);
+    expect(deduped.items.some((i) => i.path === "threads/stories/lighthouse.md")).toBe(false);
 
     // 若原助手回复被软删，则不再阻挡后续召回
     ctx.events.softDelete(storyReply.id);
@@ -136,7 +136,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       turnId: "t-story-after-del",
       query: "今晚想听睡前故事",
     });
-    expect(afterDelete.items.some((i) => i.path === "activities/stories/lighthouse.md")).toBe(true);
+    expect(afterDelete.items.some((i) => i.path === "threads/stories/lighthouse.md")).toBe(true);
 
     // 重新写入 active 助手回复并验证“接着讲”续接豁免
     ctx.events.append({
@@ -155,7 +155,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       turnId: "t-story-3",
       query: "接着讲睡前故事吧",
     });
-    expect(continued.items.some((i) => i.path === "activities/stories/lighthouse.md")).toBe(true);
+    expect(continued.items.some((i) => i.path === "threads/stories/lighthouse.md")).toBe(true);
 
     // 4. Embedding 故障平滑降级到 FTS5 2-gram
     const brokenEmbed = new MockEmbeddingClient();
@@ -170,7 +170,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       query: "还记得楼下那只三花猫吗",
       embedding: brokenEmbed,
     });
-    expect(fallback.items.some((i) => i.path === "daily/2026-11-19-cat.md")).toBe(true);
+    expect(fallback.items.some((i) => i.path === "episodes/2026/11/19/ep-cat.md")).toBe(true);
 
     // 5. /turns/:turnId/recall 与 /recall/feedback（带 Bearer 鉴权）
     const app = createApp({
@@ -192,7 +192,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       headers: authHeaders,
       body: JSON.stringify({
         turnId: "t-cat",
-        cardPath: "daily/2026-11-19-cat.md",
+        cardPath: "episodes/2026/11/19/ep-cat.md",
         verdict: "useful",
       }),
     });
@@ -204,7 +204,7 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     const traceJson = (await traceRes.json()) as {
       items: Array<{ cardPath: string; feedback?: string }>;
     };
-    expect(traceJson.items[0].cardPath).toBe("daily/2026-11-19-cat.md");
+    expect(traceJson.items[0].cardPath).toBe("episodes/2026/11/19/ep-cat.md");
     expect(traceJson.items[0].feedback).toBe("useful");
   });
 
@@ -260,11 +260,11 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(ctx.events.getSticker("cat-nod")?.useCount).toBe(1);
 
     // read 仅在主对话（mode="chat"）递增 access_count，wake 模式不累加
-    await ctx.tools.write("daily/2026-11-20-read.md", "---\ntitle: 测试精读\n---\n正文\n");
-    await registry.invoke("read", { path: "daily/2026-11-20-read.md" }, { ...toolCtx, mode: "wake" });
-    expect(ctx.index.getRow("daily/2026-11-20-read.md")?.access_count).toBe(0);
-    await registry.invoke("read", { path: "daily/2026-11-20-read.md" }, { ...toolCtx, mode: "chat" });
-    expect(ctx.index.getRow("daily/2026-11-20-read.md")?.access_count).toBe(1);
+    await ctx.tools.write("episodes/2026/11/20/ep-read.md", "---\ntitle: 测试精读\n---\n正文\n");
+    await registry.invoke("read", { path: "episodes/2026/11/20/ep-read.md" }, { ...toolCtx, mode: "wake" });
+    expect(ctx.index.getRow("episodes/2026/11/20/ep-read.md")?.access_count).toBe(0);
+    await registry.invoke("read", { path: "episodes/2026/11/20/ep-read.md" }, { ...toolCtx, mode: "chat" });
+    expect(ctx.index.getRow("episodes/2026/11/20/ep-read.md")?.access_count).toBe(1);
 
     // express 单轮 3 次节流与 durationSec 夹逼 [3, 120]
     await registry.invoke(

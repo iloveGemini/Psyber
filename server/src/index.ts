@@ -303,7 +303,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           );
           if (
             res.ok &&
-            (res.touchedMemoryPaths.includes("self.md") || res.touchedMemoryPaths.includes("user.md"))
+            (res.touchedMemoryPaths.includes("core/self.md") ||
+              res.touchedMemoryPaths.includes("core/user.md"))
           ) {
             const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
             sse.emit("identity.updated", { ...identity });
@@ -486,7 +487,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
         const hasDailyCardSinceLastBedtime = memoryIndex
           .listAllRows()
           .some((r) => {
-            if (r.space !== "daily") return false;
+            if (r.space !== "episodes") return false;
             const d = localDay(Math.max(r.created_at, r.updated_at), config.timezone);
             return d < today && (lastBedtimeNightDate === null || d > lastBedtimeNightDate);
           });

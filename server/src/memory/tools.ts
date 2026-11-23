@@ -18,19 +18,21 @@ export interface ToolResult {
 }
 
 const FIXED_WRITABLE_FILES = new Set([
-  "self.md",
-  "user.md",
-  "shelf/rules.md",
-  "shelf/mirror.md",
-  "shelf/threads.md",
-  "activities/REGISTRY.yaml",
+  "core/self.md",
+  "core/user.md",
+  "core/boundaries.md",
+  "core/mirror.md",
+  "core/open.md",
+  "core/state.md",
+  "threads/REGISTRY.yaml",
   "entities/REGISTRY.yaml",
 ]);
 
-const SINGLE_LAYER_MD_DIRS = new Set(["daily", "favorite"]);
-const GIST_PATH_RE = /^gist\/(days|weeks|months|years)\/[a-zA-Z0-9_-]+\.md$/;
-const LIVING_DIR_PATH_RE = /^(activities|entities)\/[a-z0-9][a-z0-9_-]{0,31}\/[^/]+\.md$/;
-const REGISTRY_FILES = ["activities/REGISTRY.yaml", "entities/REGISTRY.yaml"] as const;
+const SINGLE_LAYER_MD_DIRS = new Set(["favorite", "lessons"]);
+const EPISODE_INDEX_PATH_RE = /^episodes\/\d{4}(?:\/\d{2}(?:\/\d{2})?)?\/index\.md$/;
+const EPISODE_CARD_PATH_RE = /^episodes\/\d{4}\/\d{2}\/\d{2}\/(?:ep|rf)-[a-zA-Z0-9][a-zA-Z0-9_-]*\.md$/;
+const LIVING_DIR_PATH_RE = /^(threads|entities)\/[a-z0-9][a-z0-9_-]{0,31}\/[^/]+\.md$/;
+const REGISTRY_FILES = ["threads/REGISTRY.yaml", "entities/REGISTRY.yaml"] as const;
 
 /** 规范化相对路径并拦截绝对路径、..、\0、隐藏系统目录与 private/ */
 export function normalizeRelPath(rawPath: string): { ok: true; rel: string } | { ok: false; error: string } {
@@ -61,7 +63,8 @@ export function normalizeRelPath(rawPath: string): { ok: true; rel: string } | {
 
 export function isAllowedWritePath(rel: string): boolean {
   if (FIXED_WRITABLE_FILES.has(rel)) return true;
-  if (GIST_PATH_RE.test(rel)) return true;
+  if (EPISODE_INDEX_PATH_RE.test(rel)) return true;
+  if (EPISODE_CARD_PATH_RE.test(rel)) return true;
   if (LIVING_DIR_PATH_RE.test(rel)) return true;
 
   const parts = rel.split("/");
@@ -234,7 +237,7 @@ export class MemoryTools {
   }
 
   private validateCardBeforeWrite(rel: string, content: string): { error: string | null; note: string } {
-    if (rel === "activities/REGISTRY.yaml" || rel === "entities/REGISTRY.yaml") {
+    if (rel === "threads/REGISTRY.yaml" || rel === "entities/REGISTRY.yaml") {
       const check = validateRegistryYaml(rel, content);
       return { error: check.ok ? null : check.error, note: "" };
     }
@@ -249,22 +252,14 @@ export class MemoryTools {
       };
     }
 
-    if (parsed.space === "daily" && parsed.kind === "state" && parsed.tags.length === 0) {
-      return {
-        error: "daily/ 下的短期状态卡（kind: state）必须填写非空 tags（建议同时填写 ttl_days）",
-        note: "",
-      };
-    }
-
     let note = "";
     if (
-      parsed.space === "daily" &&
       parsed.kind === "state" &&
       parsed.status === "active" &&
       parsed.expiresAt !== null &&
       parsed.expiresAt <= nowMs
     ) {
-      note = "（提醒：该状态卡的 expires_at 已到期，如需延续请更新期限或新建状态卡）";
+      note = "（提醒：该状态卡的 expires_at 已到期，如需延续请更新期限或清理）";
     }
     return { error: null, note };
   }
@@ -279,7 +274,7 @@ export class MemoryTools {
     if (!rel || !isAllowedWritePath(rel)) {
       return {
         ok: false,
-        output: `不允许${actionLabel}路径 "${rawPath}"（仅允许 self.md、user.md、shelf/{rules,mirror,threads}.md、REGISTRY.yaml 或 daily/favorite/gist/activities/entities 下的合规 .md 文件）`,
+        output: `不允许${actionLabel}路径 "${rawPath}"（仅允许 core/{self,user,boundaries,mirror,open,state}.md、REGISTRY.yaml、episodes/YYYY[/MM[/DD]]/{index,ep-*,rf-*}.md 或 threads/lessons/entities/favorite 下的合规 .md 文件）`,
       };
     }
     const abs = path.join(this.memoryDir, rel);
@@ -292,7 +287,7 @@ export class MemoryTools {
   async glob(pattern: string): Promise<ToolResult> {
     const norm = normalizeRelPath(pattern);
     if (!norm.ok) return { ok: false, output: norm.error };
-    if (!norm.rel) return { ok: false, output: "pattern 不能为空，例如 daily/*.md" };
+    if (!norm.rel) return { ok: false, output: "pattern 不能为空，例如 episodes/**/*.md" };
 
     const re = globToRegex(norm.rel);
     const nowMs = this.clock.now();
@@ -442,7 +437,7 @@ export class MemoryTools {
     const { rel, abs } = target;
 
     return this.withWriteLock(async () => {
-      if (rel === "self.md" || rel === "user.md") {
+      if (rel === "core/self.md" || rel === "core/user.md") {
         try {
           await fs.access(abs);
           return {

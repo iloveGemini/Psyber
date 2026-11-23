@@ -294,7 +294,7 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         id: "tc-fail-1",
         name: "write",
         args: {
-          path: "daily/2026-11-20-strawberry.md",
+          path: "episodes/2026/11/20/ep-strawberry.md",
           content: "---\ntitle: 草莓\nkind: episode\n---\n买了草莓。\n",
         },
       },
@@ -318,17 +318,17 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     );
     expect(failed.ok).toBe(false);
     expect(ctx.events.getCursor("daily_wrapup")).toBeNull();
-    expect(ctx.index.getRow("daily/2026-11-20-strawberry.md")).toBeNull();
+    expect(ctx.index.getRow("episodes/2026/11/20/ep-strawberry.md")).toBeNull();
     expect(await fs.readFile(path.join(ctx.dataDir, "config.json"), "utf8")).toBe(originalConfigText);
 
-    // 2. bedtime 模式：先自动排空 daily_wrapup 写入草莓卡，再在 bedtime 轮注入当日已整理卡片摘要并更新 gist/days
+    // 2. bedtime 模式：先自动排空 daily_wrapup 写入草莓卡，再在 bedtime 轮注入当日已整理卡片摘要并写 episodes/YYYY/MM/DD/index.md
     mockChat.queueStream(() => [
       {
         type: "tool_call",
         id: "tc-drain-1",
         name: "write",
         args: {
-          path: "daily/2026-11-20-strawberry.md",
+          path: "episodes/2026/11/20/ep-strawberry.md",
           content: "---\ntitle: 草莓\nkind: episode\n---\n对方买了一袋草莓放冰箱。\n",
         },
       },
@@ -341,8 +341,8 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         id: "tc-bed-1",
         name: "write",
         args: {
-          path: "gist/days/2026-11.md",
-          content: "---\ntitle: 2026-11 日梗概\n---\n### 2026-11-20\n对方买了草莓放进冰箱。\n",
+          path: "episodes/2026/11/20/index.md",
+          content: "---\ntitle: 2026-11-20 日梗概\n---\n对方买了草莓放进冰箱。\n",
         },
       },
     ]);
@@ -368,22 +368,29 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(ctx.events.getCursor("bedtime")).toBeTruthy();
     // 整理轮绝不推进 door_notes_read
     expect(ctx.events.countUnreadDoorNotes()).toBe(1);
-    // bedtime 轮的输入应包含 <tidy_context>、目标 gist 路径与今日已整理卡片摘要及正文节选
+    // bedtime 轮的输入应包含 <tidy_context>、目标 index.md 路径与今日已整理卡片摘要及正文节选
     const drainReq = mockChat.requests[mockChat.requests.length - 4];
     const drainUserMsg = drainReq.messages[0];
     expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("<tidy_context>");
-    expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("当前日期：2026-11-20（周五 · ISO周 2026-W47）");
+    expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("当前日期：2026-11-20（周五）");
     expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("[2026-11-20 ");
 
     const bedtimeReq = mockChat.requests[mockChat.requests.length - 2];
     const bedtimeUserMsg = bedtimeReq.messages[0];
-    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("日梗概目标：gist/days/2026-11.md（节标题 ### 2026-11-20");
+    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("日梗概目标：episodes/2026/11/20/index.md");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("今日已整理卡片摘要");
-    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("daily/2026-11-20-strawberry.md");
+    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("episodes/2026/11/20/ep-strawberry.md");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("对方买了一袋草莓放冰箱");
 
-    // 3. 周日 bedtime（2026-11-22 周日 · 2026-W47）应带周梗概目标、本月日梗概原文及图片附件提示
-    ctx.clock.jumpToWallClock(2026, 11, 22, 23, 35, 0);
+    // 3. 当激活态时间梗概达到 80% 软水位（>= 6400 / 8000 字）时，bedtime 应提示软水位告警并递入未滚清单
+    ctx.clock.jumpToWallClock(2026, 11, 30, 23, 35, 0);
+    for (let d = 1; d <= 18; d++) {
+      const dd = String(d).padStart(2, "0");
+      await ctx.tools.write(
+        `episodes/2026/11/${dd}/index.md`,
+        `---\nupdated: 2026-11-${dd}\n---\n十一月第${d}天记录：${"记".repeat(360)}\n`,
+      );
+    }
     ctx.events.append({
       sessionId: "s2",
       turnId: "t2",
@@ -393,9 +400,9 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
       metadata: { attachments: ["a".repeat(64)] },
     });
     mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "无新增日常卡"}' }]);
-    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "完成周日梗概"}' }]);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "完成水位整理"}' }]);
 
-    const sunRes = await runMemoryTidyTask(
+    const warnRes = await runMemoryTidyTask(
       {
         db: ctx.db,
         dataDir: ctx.dataDir,
@@ -406,18 +413,19 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         memoryTools: ctx.tools,
         chatModel: mockChat,
       },
-      { taskType: "bedtime", nightDate: "2026-11-22" },
+      { taskType: "bedtime", nightDate: "2026-11-30" },
     );
-    expect(sunRes.ok).toBe(true);
-    const sunDrainMsg = mockChat.requests[mockChat.requests.length - 2].messages[0];
-    expect(sunDrainMsg.role === "user" && sunDrainMsg.content).toContain("[附带了 1 张图片]");
-    const sunBedtimeMsg = mockChat.requests[mockChat.requests.length - 1].messages[0];
-    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("当前日期：2026-11-22（周日 · ISO周 2026-W47）");
-    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("周梗概目标：gist/weeks/2026.md（节标题 ### 2026-W47");
-    expect(sunBedtimeMsg.role === "user" && sunBedtimeMsg.content).toContain("本月日梗概（gist/days/2026-11.md");
+    expect(warnRes.ok).toBe(true);
+    const warnDrainMsg = mockChat.requests[mockChat.requests.length - 2].messages[0];
+    expect(warnDrainMsg.role === "user" && warnDrainMsg.content).toContain("[附带了 1 张图片]");
+    const warnBedtimeMsg = mockChat.requests[mockChat.requests.length - 1].messages[0];
+    expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("/ 8000 字");
+    expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("超过 6400 字软水位");
+    expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("covered_until");
+    expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("当前未滚动的时间梗概清单（已达软水位");
 
     // 4. 输出截断（stopReason=length）或仅有思考链而无正文/工具调用时，必须回滚磁盘且绝不推进游标
-    ctx.clock.jumpToWallClock(2026, 11, 23, 22, 0, 0);
+    ctx.clock.jumpToWallClock(2026, 12, 1, 22, 0, 0);
     const cursorBeforeTrunc = ctx.events.getCursor("daily_wrapup");
     ctx.events.append({
       sessionId: "s3",
@@ -435,8 +443,8 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         id: "tc-trunc-1",
         name: "write",
         args: {
-          path: "daily/2026-11-23-aborted-card.md",
-          content: "---\ntitle: 截断前草稿\nkind: episode\nstatus: active\ncreated: 2026-11-23\nupdated: 2026-11-23\n---\n草稿",
+          path: "episodes/2026/12/01/ep-aborted-card.md",
+          content: "---\ntitle: 截断前草稿\nkind: episode\nstatus: active\ncreated: 2026-12-01\nupdated: 2026-12-01\n---\n草稿",
         },
       },
       { type: "usage", inputTokens: 100, outputTokens: 50, totalTokens: 150, stopReason: "toolUse" },
@@ -457,13 +465,13 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         memoryTools: ctx.tools,
         chatModel: mockChat,
       },
-      { taskType: "daily_wrapup", nightDate: "2026-11-23" },
+      { taskType: "daily_wrapup", nightDate: "2026-12-01" },
     );
     expect(truncRes.ok).toBe(false);
     expect(truncRes.error).toContain("OUTPUT_TRUNCATED");
     expect(ctx.events.getCursor("daily_wrapup")).toBe(cursorBeforeTrunc);
     await expect(
-      fs.access(path.join(ctx.dataDir, "memory/daily/2026-11-23-aborted-card.md")),
+      fs.access(path.join(ctx.dataDir, "memory/episodes/2026/12/01/ep-aborted-card.md")),
     ).rejects.toThrow();
 
     // 4b: 即使上游未报 length，仅输出思考链而无正文/工具调用，也必须判失败且不推进游标
@@ -482,7 +490,7 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         memoryTools: ctx.tools,
         chatModel: mockChat,
       },
-      { taskType: "daily_wrapup", nightDate: "2026-11-23" },
+      { taskType: "daily_wrapup", nightDate: "2026-12-01" },
     );
     expect(emptyRes.ok).toBe(false);
     expect(emptyRes.error).toContain("EMPTY_OUTPUT");
@@ -542,12 +550,14 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
       "content-type": "application/json",
     };
 
-    // 2. /genesis 一步传入 BYOK apiKey -> 直落 0600 credentials.json，不进 config.json，且刷新 card_index
+    // 2. /genesis 一步传入 BYOK apiKey 与用户代词 -> 直落 0600 credentials.json，core/user.md 自动生成「关于她」
     const genPost = await app.request("/api/v1/genesis", {
       method: "POST",
       headers: authHeaders,
       body: JSON.stringify({
         timezone: "Asia/Shanghai",
+        userName: "小夏",
+        userPronoun: "她",
         sleepWindow: { start: "23:00", end: "07:00" },
         llm: {
           providers: { openai: { kind: "openai", authMode: "api_key" } },
@@ -565,20 +575,25 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
 
     const genGet = (await (
       await app.request("/api/v1/genesis", { headers: { authorization: `Bearer ${pairJson.token}` } })
-    ).json()) as { initialized: boolean; named: boolean; hasChatProvider: boolean };
+    ).json()) as { initialized: boolean; named: boolean; hasChatProvider: boolean; userPronoun?: string };
     expect(genGet.initialized).toBe(true);
     expect(genGet.named).toBe(false);
     expect(genGet.hasChatProvider).toBe(true);
-    expect(ctx.index.getRow("self.md")).not.toBeNull();
+    expect(genGet.userPronoun).toBe("她");
+    expect(ctx.index.getRow("core/self.md")).not.toBeNull();
+    const userMdText = await fs.readFile(path.join(ctx.dataDir, "memory/core/user.md"), "utf8");
+    expect(userMdText).toContain("title: 关于她");
+    expect(userMdText).toContain("# 关于她");
+    expect(userMdText).toContain("pronoun: 她");
 
     // 重复调用 /genesis 不会清空已有自定义自述正文
-    await ctx.tools.edit("self.md", "独立个体", "热爱观察世界的独立个体");
+    await ctx.tools.edit("core/self.md", "独立个体", "热爱观察世界的独立个体");
     await app.request("/api/v1/genesis", {
       method: "POST",
       headers: authHeaders,
       body: JSON.stringify({ timezone: "Asia/Shanghai" }),
     });
-    expect(await fs.readFile(path.join(ctx.dataDir, "memory/self.md"), "utf8")).toContain("热爱观察世界");
+    expect(await fs.readFile(path.join(ctx.dataDir, "memory/core/self.md"), "utf8")).toContain("热爱观察世界");
 
     // 3. /media 上传 + ETag 缓存读取
     const form = new FormData();

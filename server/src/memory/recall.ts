@@ -167,7 +167,12 @@ export async function recallMemories(opts: {
   const allActive = index
     .listAllRows()
     .filter((r) => {
-      if (r.space === "self" || r.space === "user" || r.space === "shelf" || r.space === "gist") {
+      if (
+        r.space === "self" ||
+        r.space === "user" ||
+        r.space === "core" ||
+        r.space === "episode_index"
+      ) {
         return false;
       }
       const st = effectiveStatus(r, nowMs);
@@ -183,11 +188,11 @@ export async function recallMemories(opts: {
   }> = [];
   const selectedPaths = new Set<string>();
 
-  // Step 1: 活动目录直挂
+  // Step 1: 线索目录直挂（threads/REGISTRY.yaml）
   let matchedActivitySlug = opts.activityHint ?? null;
   if (!matchedActivitySlug) {
     try {
-      const regText = await fs.readFile(path.join(memoryDir, "activities/REGISTRY.yaml"), "utf8");
+      const regText = await fs.readFile(path.join(memoryDir, "threads/REGISTRY.yaml"), "utf8");
       const spaces = loadActivityTriggers(regText);
       for (const sp of spaces) {
         if (sp.triggers.some((t) => t && query.includes(t))) {
@@ -201,7 +206,7 @@ export async function recallMemories(opts: {
   }
 
   if (matchedActivitySlug) {
-    const spaceKey = `activity:${matchedActivitySlug}`;
+    const spaceKey = `thread:${matchedActivitySlug}`;
     const activityCards = allActive
       .filter((r) => r.space === spaceKey && !recentPaths.has(r.path))
       .slice(0, 3);
@@ -303,12 +308,12 @@ export async function recallMemories(opts: {
     }
   }
 
-  // 非特定活动闲聊时，补近 72h 未过期 daily/ 最多 2 条
+  // 非特定线索闲聊时，补近 72h 活跃 episodes/ 最多 2 条
   if (!matchedActivitySlug) {
     const recentDaily = allActive
       .filter(
         (r) =>
-          r.space === "daily" &&
+          r.space === "episodes" &&
           r.created_at >= nowMs - recentDailyWindowMs &&
           !selectedPaths.has(r.path) &&
           !recentPaths.has(r.path),

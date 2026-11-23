@@ -35,10 +35,12 @@ export interface FtsSearchHit {
 }
 
 const RESERVED_SPACES = new Set([
-  "daily",
-  "shelf",
+  "core",
+  "episodes",
+  "episode_index",
+  "threads",
+  "lessons",
   "favorite",
-  "gist",
   "entities",
   "private",
   "self",
@@ -48,9 +50,9 @@ const SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const ENTITY_ID_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 const VALID_DECAYS = new Set(["none", "slow", "short"]);
 
-/** 写前严格校验 activities/REGISTRY.yaml 或 entities/REGISTRY.yaml，防止 AI 写坏注册表 */
+/** 写前严格校验 threads/REGISTRY.yaml 或 entities/REGISTRY.yaml，防止 AI 写坏注册表 */
 export function validateRegistryYaml(
-  relPath: "activities/REGISTRY.yaml" | "entities/REGISTRY.yaml",
+  relPath: "threads/REGISTRY.yaml" | "entities/REGISTRY.yaml",
   content: string,
 ): { ok: true } | { ok: false; error: string } {
   let doc: unknown;
@@ -65,9 +67,9 @@ export function validateRegistryYaml(
   }
 
   const obj = doc as Record<string, unknown>;
-  if (relPath === "activities/REGISTRY.yaml") {
+  if (relPath === "threads/REGISTRY.yaml") {
     if (!obj.spaces || typeof obj.spaces !== "object" || Array.isArray(obj.spaces)) {
-      return { ok: false, error: "activities/REGISTRY.yaml 缺少 spaces 映射节点" };
+      return { ok: false, error: "threads/REGISTRY.yaml 缺少 spaces 映射节点" };
     }
     for (const [slug, val] of Object.entries(obj.spaces as Record<string, unknown>)) {
       if (!SLUG_RE.test(slug) || RESERVED_SPACES.has(slug)) {
@@ -276,7 +278,7 @@ export class MemoryIndex {
   }
 
   /**
-   * 索引层过期巡检：仅将到期 daily/ state 卡的 card_index.status 标为 faded，绝不修改磁盘 Markdown。
+   * 索引层过期巡检：将到期 state 卡的 card_index.status 标为 faded，绝不修改磁盘 Markdown。
    */
   expireOverdueStateCards(): number {
     const nowMs = this.clock.now();
@@ -284,8 +286,7 @@ export class MemoryIndex {
       .query(
         `UPDATE card_index
          SET status = 'faded'
-         WHERE space = 'daily'
-           AND kind = 'state'
+         WHERE kind = 'state'
            AND status = 'active'
            AND expires_at IS NOT NULL
            AND expires_at <= ?`,
@@ -294,7 +295,7 @@ export class MemoryIndex {
     return res.changes;
   }
 
-  /** 极简 FTS5 2-gram 检索（自动过滤 resolved/archived/faded 与常驻前缀文件） */
+  /** 极简 FTS5 2-gram 检索（自动过滤 resolved/archived/faded 与常驻前缀 / 梗概索引文件） */
   searchFts(query: string, limit = 5): FtsSearchHit[] {
     this.expireOverdueStateCards();
     const ftsExpr = buildSafeFtsQuery(query);
@@ -307,7 +308,7 @@ export class MemoryIndex {
          FROM card_fts f
          JOIN card_index c ON c.path = f.path
          WHERE card_fts MATCH ?
-           AND c.space NOT IN ('self', 'user', 'shelf', 'gist')
+           AND c.space NOT IN ('self', 'user', 'core', 'episode_index')
            AND c.status NOT IN ('resolved', 'archived', 'faded')
          ORDER BY rank ASC
          LIMIT ?`,

@@ -62,7 +62,7 @@ export const MEMORY_5_TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: "write",
-    description: "新建或整篇覆写记忆卡片（严禁覆写 self.md 与 user.md）",
+    description: "新建或整篇覆写记忆卡片（严禁覆写 core/self.md 与 core/user.md）",
     parameters: {
       type: "object",
       properties: {
@@ -362,7 +362,7 @@ export function registerCoreTier1Tools(
     name: "write",
     tier: 1,
     security: "guarded",
-    description: "新建或整篇覆写记忆卡片（严禁覆写 self.md 与 user.md）",
+    description: "新建或整篇覆写记忆卡片（严禁覆写 core/self.md 与 core/user.md）",
     tags: ["memory", "write"],
     parameters: {
       type: "object",

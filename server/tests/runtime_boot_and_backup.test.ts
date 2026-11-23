@@ -148,8 +148,8 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
         id: "tc-wrap-1",
         name: "write",
         args: {
-          path: "daily/2026-11-20-tea.md",
-          content: "---\nkind: moment\ntags: [茶]\n---\n对方今晚喝了热红茶准备早睡。\n",
+          path: "episodes/2026/11/20/ep-tea.md",
+          content: "---\nkind: episode\ntags: [茶]\n---\n对方今晚喝了热红茶准备早睡。\n",
         },
       },
     ]);
@@ -160,8 +160,8 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
         id: "tc-bed-1",
         name: "write",
         args: {
-          path: "gist/days/2026-11.md",
-          content: "- 2026-11-20：喝热红茶早睡。\n",
+          path: "episodes/2026/11/20/index.md",
+          content: "喝热红茶早睡。\n",
         },
       },
     ]);
@@ -173,7 +173,7 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
 
     // 验证记忆卡片与当日热备均已落盘
     const gistExists = await fs
-      .access(path.join(dataDir, "memory", "gist", "days", "2026-11.md"))
+      .access(path.join(dataDir, "memory", "episodes", "2026", "11", "20", "index.md"))
       .then(() => true)
       .catch(() => false);
     expect(gistExists).toBe(true);
@@ -323,9 +323,10 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
     });
     await rt1.stop();
 
-    // 写入一份既有日梗概，验证跨日重启首轮也能同步注入 <gist>
+    // 写入一份既有日梗概，验证跨日重启首轮也能同步注入 <continuity>
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "11", "20"), { recursive: true });
     await fs.writeFile(
-      path.join(dataDir, "memory", "gist", "days", "2026-11-20.md"),
+      path.join(dataDir, "memory", "episodes", "2026", "11", "20", "index.md"),
       "---\nupdated: 2026-11-20\n---\n前天整理了相机和三脚架。",
       "utf8",
     );

@@ -1,40 +1,47 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import YAML from "yaml";
 import { localDay, vagueWhen } from "../core/clock.ts";
 import { stripFrontmatter } from "../core/prompts.ts";
 import type { StoredEvent } from "../store/events.ts";
 import { readIdentityProfile } from "./genesis.ts";
 import type { MemoryIndex } from "./index.ts";
 
-export const DEFAULT_GIST_CHAR_BUDGET = 16_000;
+export const DEFAULT_GIST_CHAR_BUDGET = 8_000;
+export const GIST_SOFT_WARN_RATIO = 0.8;
 export const DEFAULT_DAILY_BODY_CHAR_BUDGET = 1800;
 export const DEFAULT_TAIL_CHAR_BUDGET = 2000;
 
-type GistSpan = "day" | "week" | "month" | "year";
+type GistSpan = "day" | "month" | "year";
 
-/** 单条读时防跑偏上限（略宽于写作目标 300/500/800/1000，仅拦单篇异常超长） */
+/** 单条读时防跑偏上限（略宽于写作目标 300/600/1000，仅拦单篇异常超长） */
 const GIST_ENTRY_MAX_CHARS: Record<GistSpan, number> = {
   day: 400,
-  week: 650,
-  month: 1000,
+  month: 800,
   year: 1200,
 };
 
-interface GistEntry {
+export interface GistEntry {
   span: GistSpan;
   key: string;
   text: string;
+  /** 仅 month (YYYY-MM-DD) 与 year (YYYY-MM) 有效，表示已滚动覆盖到的截止位置 */
+  coveredUntil?: string;
 }
 
-const HEADING_RE: Record<GistSpan, RegExp> = {
-  day: /^#{2,3}\s+(\d{4}-\d{2}-\d{2})\b/,
-  week: /^#{2,3}\s+(\d{4}-W\d{2})\b/,
-  month: /^#{2,3}\s+(\d{4}-\d{2})\b/,
-  year: /^#{2,3}\s+(\d{4})\b/,
-};
+export interface ActiveGistLayers {
+  years: GistEntry[];
+  activeMonths: GistEntry[];
+  activeDays: GistEntry[];
+  allMonths: GistEntry[];
+  allDays: GistEntry[];
+  totalChars: number;
+}
 
 const FULL_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const FULL_WEEK_RE = /^\d{4}-W\d{2}$/;
+const FULL_MONTH_RE = /^\d{4}-\d{2}$/;
+const YEAR_DIR_RE = /^\d{4}$/;
+const MONTH_OR_DAY_DIR_RE = /^\d{2}$/;
 
 function clipText(text: string, maxChars: number): string {
   const chars = Array.from(text);
@@ -47,80 +54,201 @@ function charLen(text: string): number {
   return Array.from(text).length;
 }
 
-/** ISO 周 YYYY-Www（周一起） */
-export function weekOf(day: string): string {
-  const [y, m, d] = day.split("-").map(Number);
-  const t = Date.UTC(y, m - 1, d);
-  const dow = (new Date(t).getUTCDay() + 6) % 7;
-  const thursday = t + (3 - dow) * 86_400_000;
-  const year = new Date(thursday).getUTCFullYear();
-  const jan4 = Date.UTC(year, 0, 4);
-  const week1Monday = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * 86_400_000;
-  const w = Math.floor((thursday - week1Monday) / (7 * 86_400_000)) + 1;
-  return `${year}-W${String(w).padStart(2, "0")}`;
+function parseIndexFrontmatter(raw: string): Record<string, unknown> {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
+  if (!match) return {};
+  try {
+    const parsed = YAML.parse(match[1]);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
 }
 
-/** ISO 周归到它周四所在的 YYYY-MM */
-function monthOfWeek(week: string): string {
-  const [y, w] = week.split("-W").map(Number);
-  const jan4 = Date.UTC(y, 0, 4);
-  const week1Monday = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * 86_400_000;
-  const thursday = week1Monday + ((w - 1) * 7 + 3) * 86_400_000;
-  return new Date(thursday).toISOString().slice(0, 7);
+function resolveCoveredUntil(
+  fm: Record<string, unknown>,
+  span: "month" | "year",
+  key: string,
+  today: string,
+): string {
+  const rawCovered = typeof fm.covered_until === "string" ? fm.covered_until.trim() : "";
+  const rawUpdated = typeof fm.updated === "string" ? fm.updated.trim() : "";
+
+  if (span === "month") {
+    if (FULL_DAY_RE.test(rawCovered)) return rawCovered;
+    if (key < today.slice(0, 7)) return `${key}-31`;
+    if (FULL_DAY_RE.test(rawUpdated) && rawUpdated.startsWith(key)) return rawUpdated;
+    return `${key}-31`;
+  }
+
+  // span === "year"
+  if (FULL_MONTH_RE.test(rawCovered)) return rawCovered;
+  if (FULL_DAY_RE.test(rawCovered)) return rawCovered.slice(0, 7);
+  if (key < today.slice(0, 4)) return `${key}-12`;
+  if (FULL_DAY_RE.test(rawUpdated) && rawUpdated.startsWith(key)) return rawUpdated.slice(0, 7);
+  if (FULL_MONTH_RE.test(rawUpdated) && rawUpdated.startsWith(key)) return rawUpdated;
+  return `${key}-12`;
+}
+
+async function readIndexFile(
+  absPath: string,
+  span: GistSpan,
+  key: string,
+  today: string,
+): Promise<GistEntry | null> {
+  try {
+    const raw = await fs.readFile(absPath, "utf8");
+    const body = stripFrontmatter(raw).trim();
+    if (!body) return null;
+    if (span === "day") {
+      return { span, key, text: body };
+    }
+    const fm = parseIndexFrontmatter(raw);
+    return {
+      span,
+      key,
+      text: body,
+      coveredUntil: resolveCoveredUntil(fm, span, key, today),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * 宽容读取某层梗概目录：兼容「单月/单年文件内多节 `### YYYY-MM-DD`」与「单篇无标题文件」。
- * 同 key 后写覆盖先写，按 key 升序返回。
+ * 扫描分形情景目录 `memory/episodes/` 下的三层 `index.md`：
+ * - `episodes/YYYY/index.md` -> year（含 covered_until: YYYY-MM）
+ * - `episodes/YYYY/MM/index.md` -> month（含 covered_until: YYYY-MM-DD）
+ * - `episodes/YYYY/MM/DD/index.md` -> day
  */
-async function readGistEntries(dir: string, span: GistSpan): Promise<GistEntry[]> {
-  let names: string[];
+export async function scanEpisodeIndexes(
+  memoryDir: string,
+  today = new Date().toISOString().slice(0, 10),
+): Promise<{
+  days: GistEntry[];
+  months: GistEntry[];
+  years: GistEntry[];
+}> {
+  const episodesDir = path.join(memoryDir, "episodes");
+  const days: GistEntry[] = [];
+  const months: GistEntry[] = [];
+  const years: GistEntry[] = [];
+
+  let yearEntries;
   try {
-    names = (await fs.readdir(dir)).filter((n) => n.endsWith(".md")).sort();
+    yearEntries = await fs.readdir(episodesDir, { withFileTypes: true });
   } catch {
-    return [];
+    return { days, months, years };
   }
 
-  const re = HEADING_RE[span];
-  const byKey = new Map<string, GistEntry>();
+  for (const yEnt of yearEntries) {
+    if (!yEnt.isDirectory() || !YEAR_DIR_RE.test(yEnt.name)) continue;
+    const yearKey = yEnt.name;
+    const yearDir = path.join(episodesDir, yearKey);
 
-  for (const name of names) {
-    let raw: string;
+    const yearEntry = await readIndexFile(path.join(yearDir, "index.md"), "year", yearKey, today);
+    if (yearEntry) years.push(yearEntry);
+
+    let monthEntries;
     try {
-      raw = await fs.readFile(path.join(dir, name), "utf8");
+      monthEntries = await fs.readdir(yearDir, { withFileTypes: true });
     } catch {
       continue;
     }
-    const body = stripFrontmatter(raw).trim();
-    if (!body) continue;
 
-    const lines = body.split(/\r?\n/);
-    const sections: Array<{ key: string; lines: string[] }> = [];
-    let current: { key: string; lines: string[] } | null = null;
+    for (const mEnt of monthEntries) {
+      if (!mEnt.isDirectory() || !MONTH_OR_DAY_DIR_RE.test(mEnt.name)) continue;
+      const monthKey = `${yearKey}-${mEnt.name}`;
+      const monthDir = path.join(yearDir, mEnt.name);
 
-    for (const line of lines) {
-      const m = re.exec(line.trim());
-      if (m) {
-        if (current) sections.push(current);
-        current = { key: m[1], lines: [] };
-      } else if (current) {
-        current.lines.push(line);
+      const monthEntry = await readIndexFile(
+        path.join(monthDir, "index.md"),
+        "month",
+        monthKey,
+        today,
+      );
+      if (monthEntry) months.push(monthEntry);
+
+      let dayEntries;
+      try {
+        dayEntries = await fs.readdir(monthDir, { withFileTypes: true });
+      } catch {
+        continue;
       }
-    }
-    if (current) sections.push(current);
 
-    if (sections.length > 0) {
-      for (const sec of sections) {
-        const text = sec.lines.join("\n").trim();
-        if (text) byKey.set(sec.key, { span, key: sec.key, text });
+      for (const dEnt of dayEntries) {
+        if (!dEnt.isDirectory() || !MONTH_OR_DAY_DIR_RE.test(dEnt.name)) continue;
+        const dayKey = `${monthKey}-${dEnt.name}`;
+        const dayEntry = await readIndexFile(
+          path.join(monthDir, dEnt.name, "index.md"),
+          "day",
+          dayKey,
+          today,
+        );
+        if (dayEntry) days.push(dayEntry);
       }
-    } else {
-      const fallbackKey = path.basename(name, ".md");
-      byKey.set(fallbackKey, { span, key: fallbackKey, text: body });
     }
   }
 
-  return Array.from(byKey.values()).sort((a, b) => a.key.localeCompare(b.key));
+  days.sort((a, b) => a.key.localeCompare(b.key));
+  months.sort((a, b) => a.key.localeCompare(b.key));
+  years.sort((a, b) => a.key.localeCompare(b.key));
+  return { days, months, years };
+}
+
+/**
+ * 计算严格零重叠、零断层的激活态三层梗概集合：
+ * - 年：全部 `YYYY/index.md`
+ * - 没滚进年的月：`YYYY-MM > 该年 covered_until`
+ * - 没滚进月的天：所属月未滚进年，且 `YYYY-MM-DD > 该月 covered_until`
+ */
+export async function selectActiveGistLayers(
+  memoryDir: string,
+  today: string,
+): Promise<ActiveGistLayers> {
+  const { days: allDays, months: allMonths, years } = await scanEpisodeIndexes(memoryDir, today);
+
+  const yearCoverage = new Map<string, string>();
+  for (const y of years) {
+    if (y.coveredUntil) yearCoverage.set(y.key, y.coveredUntil);
+  }
+
+  const monthCoverage = new Map<string, string>();
+  for (const m of allMonths) {
+    if (m.coveredUntil) monthCoverage.set(m.key, m.coveredUntil);
+  }
+
+  const activeMonths = allMonths.filter((m) => {
+    const yCov = yearCoverage.get(m.key.slice(0, 4));
+    return !yCov || m.key > yCov;
+  });
+
+  const activeDays = allDays.filter((d) => {
+    const yKey = d.key.slice(0, 4);
+    const mKey = d.key.slice(0, 7);
+    const yCov = yearCoverage.get(yKey);
+    if (yCov && mKey <= yCov) return false;
+    const mCov = monthCoverage.get(mKey);
+    return !mCov || d.key > mCov;
+  });
+
+  const entrySize = (e: GistEntry) =>
+    e.key.length + 2 + Math.min(GIST_ENTRY_MAX_CHARS[e.span], charLen(e.text)) + 1;
+  const totalChars =
+    years.reduce((sum, e) => sum + entrySize(e), 0) +
+    activeMonths.reduce((sum, e) => sum + entrySize(e), 0) +
+    activeDays.reduce((sum, e) => sum + entrySize(e), 0);
+
+  return {
+    years,
+    activeMonths,
+    activeDays,
+    allMonths,
+    allDays,
+    totalChars,
+  };
 }
 
 function selectWithinBudget(
@@ -146,73 +274,48 @@ export interface BuildContinuityOptions {
   memoryIndex: MemoryIndex;
   nowMs: number;
   timeZone: string;
-  /** 上次完成 bedtime 的夜晚日期 YYYY-MM-DD（用于无节标题的日梗概文件兜底 lastGistDay） */
+  /** 上次完成 bedtime 的夜晚日期 YYYY-MM-DD（用于兜底 lastGistDay） */
   lastBedtimeNightDate?: string | null;
   /** 上一段末尾的原始对话事件（应已按 seq <= carryOverUntilSeq 截取） */
   tailEvents?: StoredEvent[];
   /** 将用户事件格式化为自然文本（贴纸/图片标记） */
   formatUserEvent?: (ev: StoredEvent) => string;
-  /** 自传梗概金字塔总字符上限（默认 3000） */
+  /** 自传梗概总字符硬上限（默认 8000 字） */
   gistCharBudget?: number;
-  /** 未入日梗概的近期 daily/ 正文总字符上限（默认 1800） */
+  /** 未入日梗概的近期 episodes/ 正文总字符上限（默认 1800） */
   dailyBodyCharBudget?: number;
   /** 上一段末尾原话总字符上限（默认 2000） */
   tailCharBudget?: number;
 }
 
 /**
- * 组装 Psyche 风格的新会话 <continuity> 连续性块（对齐 Spec 01 §2.5 & Spec 02 §2.3）：
- * 1. 不重叠多尺度自传金字塔：年 / 月 / 周 / 天（从近到远保底预算，绝不被旧周梗概挤掉近期天梗概）；
- * 2. 【最近的经历】：仅收录晚于 lastGistDay 的活跃 daily/ 卡片正文（填平白天盘中换段空白；旧 daily/ 与 activities/ 交给召回）；
+ * 组装新会话 <continuity> 连续性块：
+ * 1. 基于 covered_until 的零重叠三层自传骨架：年 + 未滚进年的月 + 未滚进月的天（共享 8000 字硬预算，从近往远保底）；
+ * 2. 【最近的经历】：仅收录晚于 lastGistDay 的活跃 episodes/ 切片正文（填平盘中换段空白；旧卡交给召回）；
  * 3. 【上一段末尾的原话】：按字符预算（默认 2000 字）从旧段末尾向前截取真实对话，按模糊时间分组。
  */
 export async function buildContinuityBlock(opts: BuildContinuityOptions): Promise<string | null> {
   const memoryDir = path.join(opts.dataDir, "memory");
-  const gistDir = path.join(memoryDir, "gist");
   const today = localDay(opts.nowMs, opts.timeZone);
   const shortDay = (day: string) => (day.startsWith(today.slice(0, 5)) ? day.slice(5) : day);
 
-  const [allDays, allWeeks, allMonths, allYears, identity] = await Promise.all([
-    readGistEntries(path.join(gistDir, "days"), "day"),
-    readGistEntries(path.join(gistDir, "weeks"), "week"),
-    readGistEntries(path.join(gistDir, "months"), "month"),
-    readGistEntries(path.join(gistDir, "years"), "year"),
+  const [layers, identity] = await Promise.all([
+    selectActiveGistLayers(memoryDir, today),
     readIdentityProfile(opts.dataDir, opts.nowMs, opts.timeZone),
   ]);
   const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
 
-  // 严格不重叠金字塔：天（近 7） -> 周（早于最旧那天，近 4） -> 月（早于最旧那周，近 12） -> 年（早于最旧那月，近 5）
-  const candDays = allDays.slice(-7);
-  const oldestFullDay = candDays.find((d) => FULL_DAY_RE.test(d.key))?.key;
-  const candWeeks = allWeeks
-    .filter((w) => !oldestFullDay || !FULL_WEEK_RE.test(w.key) || w.key < weekOf(oldestFullDay))
-    .slice(-4);
-  const oldestFullWeek = candWeeks.find((w) => FULL_WEEK_RE.test(w.key))?.key;
-  const oldestWeekMonth = oldestFullWeek
-    ? monthOfWeek(oldestFullWeek)
-    : oldestFullDay
-      ? oldestFullDay.slice(0, 7)
-      : undefined;
-  const candMonths = allMonths
-    .filter((m) => !oldestWeekMonth || m.key < oldestWeekMonth)
-    .slice(-12);
-  const oldestMonthYear = candMonths[0]?.key.slice(0, 4) ?? oldestWeekMonth?.slice(0, 4);
-  const candYears = allYears
-    .filter((y) => !oldestMonthYear || y.key < oldestMonthYear)
-    .slice(-5);
-
-  // 预算从近往远保底分配（天 > 周 > 月 > 年），渲染时按时间从远往近（年 -> 月 -> 周 -> 天）
+  // 预算从近往远保底分配（天 > 月 > 年），渲染时按时间从远往近（年 -> 月 -> 天）
   const gistRemaining = { chars: opts.gistCharBudget ?? DEFAULT_GIST_CHAR_BUDGET };
-  const days = selectWithinBudget(candDays, gistRemaining);
-  const weeks = selectWithinBudget(candWeeks, gistRemaining);
-  const months = selectWithinBudget(candMonths, gistRemaining);
-  const years = selectWithinBudget(candYears, gistRemaining);
+  const days = selectWithinBudget(layers.activeDays, gistRemaining);
+  const months = selectWithinBudget(layers.activeMonths, gistRemaining);
+  const years = selectWithinBudget(layers.years, gistRemaining);
 
-  // 计算最后一条日梗概覆盖到的日期：用于决定哪些 daily/ 尚未写进日梗概
+  // 计算最后一条日梗概覆盖到的日期：用于决定哪些 episodes/ 切片尚未写进日梗概
   let lastGistDay: string | null = null;
-  for (let i = allDays.length - 1; i >= 0; i--) {
-    if (FULL_DAY_RE.test(allDays[i]!.key)) {
-      lastGistDay = allDays[i]!.key;
+  for (let i = layers.allDays.length - 1; i >= 0; i--) {
+    if (FULL_DAY_RE.test(layers.allDays[i]!.key)) {
+      lastGistDay = layers.allDays[i]!.key;
       break;
     }
   }
@@ -224,12 +327,12 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
     lastGistDay = opts.lastBedtimeNightDate;
   }
 
-  // 【最近的经历】：仅取晚于 lastGistDay 的活跃 daily/ 正文（睡前换段后自动为空；旧 daily/ 与 activities/ 交给召回）
+  // 【最近的经历】：仅取晚于 lastGistDay 的活跃 episodes/ 切片正文（不含 episode_index）
   const dailyBudget = opts.dailyBodyCharBudget ?? DEFAULT_DAILY_BODY_CHAR_BUDGET;
-  const dailyCandidates = opts.memoryIndex
+  const episodeCandidates = opts.memoryIndex
     .listAllRows()
     .filter((r) => {
-      if (r.space !== "daily") return false;
+      if (r.space !== "episodes") return false;
       if (r.status !== "active" && r.status !== "disputed") return false;
       const cardDay = localDay(Math.max(r.created_at, r.updated_at), opts.timeZone);
       return !lastGistDay || cardDay > lastGistDay;
@@ -239,7 +342,7 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
   let dailyUsed = 0;
   let dailyLoadedCount = 0;
 
-  for (const row of dailyCandidates) {
+  for (const row of episodeCandidates) {
     let raw: string;
     try {
       raw = await fs.readFile(path.join(memoryDir, row.path), "utf8");
@@ -317,16 +420,13 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
   if (months.length > 0) {
     sections.push(`【月】\n${months.map((g) => `${g.key}：${g.text}`).join("\n")}`);
   }
-  if (weeks.length > 0) {
-    sections.push(`【周】\n${weeks.map((g) => `${g.key}：${g.text}`).join("\n")}`);
-  }
   if (days.length > 0) {
     sections.push(`【天】\n${days.map((g) => `${shortDay(g.key)}：${g.text}`).join("\n")}`);
   }
   if (dailyKept.length > 0) {
     const dailyLines: string[] = [];
     if (dailyDropped > 0) {
-      dailyLines.push(`（更早的 ${dailyDropped} 篇近期日常笔记未展开，需要时用 grep / read 查找）`);
+      dailyLines.push(`（更早的 ${dailyDropped} 篇近期情景笔记未展开，需要时用 grep / read 查找）`);
     }
     let lastCardDay = "";
     for (const item of dailyKept) {
@@ -346,14 +446,14 @@ export async function buildContinuityBlock(opts: BuildContinuityOptions): Promis
 
   return [
     "<continuity>",
-    "接着之前的日子往下过：上一段会话已整理收尾并切入新段。以下是之前留下的梗概、近期日常笔记与上一段末尾的原话，更早的细节在记忆库里，需要时用 grep / read 查找。",
+    "接着之前的日子往下过：上一段会话已整理收尾并切入新段。以下是之前留下的梗概、近期情景笔记与上一段末尾的原话，更早的细节在记忆库里，需要时用 grep / read 查找。",
     "",
     ...sections.flatMap((s, idx) => (idx === 0 ? [s] : ["", s])),
     "</continuity>",
   ].join("\n");
 }
 
-/** 兼容入口：仅拼装梗概 + 未入日梗概的近期日常笔记 */
+/** 兼容入口：仅拼装梗概 + 未入日梗概的近期情景笔记 */
 export async function buildGistBlock(
   dataDir: string,
   memoryIndex: MemoryIndex,

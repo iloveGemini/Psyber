@@ -21,9 +21,9 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
     expect((await ctx.tools.write("../escape.md", "bad")).ok).toBe(false);
     expect((await ctx.tools.write("/etc/passwd", "bad")).ok).toBe(false);
     expect((await ctx.tools.write(".git/config", "bad")).ok).toBe(false);
-    expect((await ctx.tools.write("daily/no-extension", "bad")).ok).toBe(false);
-    expect((await ctx.tools.write("shelf/random.md", "bad")).ok).toBe(false);
-    expect((await ctx.tools.write("activities/orphan.md", "bad")).ok).toBe(false);
+    expect((await ctx.tools.write("episodes/2026/11/20/no-prefix.md", "bad")).ok).toBe(false);
+    expect((await ctx.tools.write("core/random.md", "bad")).ok).toBe(false);
+    expect((await ctx.tools.write("threads/orphan.md", "bad")).ok).toBe(false);
 
     // private/ 在全部 5 工具中被硬拦截并返回专属抽屉自救提示
     for (const res of [
@@ -38,25 +38,29 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
     }
   });
 
-  test("self.md 允许首次写入，禁止整篇覆写，允许局部 edit", async () => {
+  test("core/self.md 允许首次写入，禁止整篇覆写，允许局部 edit；core/boundaries.md 与 lessons/ 可正常写入", async () => {
     ctx = await createTestContext();
 
     const first = await ctx.tools.write(
-      "self.md",
+      "core/self.md",
       '---\ntitle: 关于我\nname: ""\npronoun: ""\n---\n# 我是谁\n\n我刚来到这里。\n',
     );
     expect(first.ok).toBe(true);
 
-    const overwrite = await ctx.tools.write("self.md", "试图覆写");
+    const overwrite = await ctx.tools.write("core/self.md", "试图覆写");
     expect(overwrite.ok).toBe(false);
     expect(overwrite.output).toContain("禁止整篇覆写");
 
-    const edited = await ctx.tools.edit("self.md", 'name: ""', "name: 阿白");
+    const edited = await ctx.tools.edit("core/self.md", 'name: ""', "name: 阿白");
     expect(edited.ok).toBe(true);
 
-    const readBack = await ctx.tools.read("self.md");
+    const readBack = await ctx.tools.read("core/self.md");
     expect(readBack.ok).toBe(true);
     expect(readBack.output).toContain("name: 阿白");
+
+    expect((await ctx.tools.write("core/boundaries.md", "# 相处边界\n\n- 困了直接睡。\n")).ok).toBe(true);
+    expect((await ctx.tools.write("lessons/bedtime-pace.md", "---\ntitle: 睡前节奏\n---\n少抛开放题。\n")).ok).toBe(true);
+    expect((await ctx.tools.write("episodes/2026/11/20/rf-pace.md", "---\ntitle: 反思\n---\n今天注意到直接讲故事更好。\n")).ok).toBe(true);
   });
 
   test("edit 支持标点/空白归一化回退匹配，零命中时返回相近片段与行号", async () => {
@@ -71,10 +75,10 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
       "末尾保持原样：100% 不动。",
     ].join("\n");
 
-    expect((await ctx.tools.write("daily/2026-11-20-walk.md", original)).ok).toBe(true);
+    expect((await ctx.tools.write("episodes/2026/11/20/ep-walk.md", original)).ok).toBe(true);
 
     const res = await ctx.tools.edit(
-      "daily/2026-11-20-walk.md",
+      "episodes/2026/11/20/ep-walk.md",
       "这一句里,有中文标点!而且 中间有多余空格.",
       "这一句已精确替换。",
     );
@@ -82,7 +86,7 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
     expect(res.output).toContain("归一化匹配成功");
 
     const diskContent = await fs.readFile(
-      path.join(ctx.dataDir, "memory/daily/2026-11-20-walk.md"),
+      path.join(ctx.dataDir, "memory/episodes/2026/11/20/ep-walk.md"),
       "utf8",
     );
     expect(diskContent).toContain("保留原样：前面有“全角引号”和  双空格。");
@@ -90,7 +94,7 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
     expect(diskContent).toContain("末尾保持原样：100% 不动。");
 
     // 零命中时返回最相似的原文件片段与行号
-    const miss = await ctx.tools.edit("daily/2026-11-20-walk.md", "末尾保持原样：999% 不存在", "x");
+    const miss = await ctx.tools.edit("episodes/2026/11/20/ep-walk.md", "末尾保持原样：999% 不存在", "x");
     expect(miss.ok).toBe(false);
     expect(miss.output).toContain("L7:");
   });
@@ -104,11 +108,11 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
   test("REGISTRY.yaml 写前校验拦截非法 Schema 与重名实体，精准 Git 提交不误收未跟踪文件", async () => {
     ctx = await createTestContext();
 
-    const badAct = await ctx.tools.write("activities/REGISTRY.yaml", "spaces:\n  cinema:\n    title: 观影\n");
-    expect(badAct.ok).toBe(false);
+    const badThread = await ctx.tools.write("threads/REGISTRY.yaml", "spaces:\n  cinema:\n    title: 观影\n");
+    expect(badThread.ok).toBe(false);
 
-    const goodAct = await ctx.tools.write(
-      "activities/REGISTRY.yaml",
+    const goodThread = await ctx.tools.write(
+      "threads/REGISTRY.yaml",
       [
         "spaces:",
         "  cinema:",
@@ -118,13 +122,13 @@ describe("T01+T02: 原生 5 记忆工具沙箱、原子写与两阶段唯一 edi
         '    card_style: "一部片一张卡"',
       ].join("\n"),
     );
-    expect(goodAct.ok).toBe(true);
+    expect(goodThread.ok).toBe(true);
 
     await fs.writeFile(path.join(ctx.dataDir, "memory/scratch.txt"), "do not commit", "utf8");
     const committed = await commitMemoryPaths(
       ctx.dataDir,
-      ["activities/REGISTRY.yaml"],
-      "memory(init): register cinema space",
+      ["threads/REGISTRY.yaml"],
+      "memory(init): register cinema thread space",
     );
     expect(committed).toBe(true);
 

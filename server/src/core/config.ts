@@ -290,13 +290,12 @@ export async function initDataDir(dataDir: string): Promise<void> {
     path.join(dataDir, "stickers"),
     path.join(dataDir, "backups"),
     path.join(dataDir, "memory"),
-    path.join(dataDir, "memory", "daily"),
-    path.join(dataDir, "memory", "shelf"),
-    path.join(dataDir, "memory", "favorite"),
-    path.join(dataDir, "memory", "gist", "days"),
-    path.join(dataDir, "memory", "gist", "weeks"),
-    path.join(dataDir, "memory", "activities"),
+    path.join(dataDir, "memory", "core"),
+    path.join(dataDir, "memory", "episodes"),
+    path.join(dataDir, "memory", "threads"),
+    path.join(dataDir, "memory", "lessons"),
     path.join(dataDir, "memory", "entities"),
+    path.join(dataDir, "memory", "favorite"),
   ];
   for (const d of dirs) {
     await fs.mkdir(d, { recursive: true });

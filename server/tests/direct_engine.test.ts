@@ -54,7 +54,7 @@ afterEach(async () => {
 describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默协议", () => {
   test("单轮多步工具循环保留本步 thinking+signature，tool_result 绝不重复注入 <runtime_context>，跨轮历史剥除 thinking", async () => {
     ctx = await createTestContext();
-    await ctx.tools.write("self.md", "---\ntitle: 关于我\nname: \"\"\npronoun: \"\"\n---\n# 我是谁\n\n还没取名字。\n");
+    await ctx.tools.write("core/self.md", "---\ntitle: 关于我\nname: \"\"\npronoun: \"\"\n---\n# 我是谁\n\n还没取名字。\n");
 
     const mockChat = new MockChatModel();
     const { engine, registry } = buildEngine(ctx, mockChat);
@@ -73,14 +73,14 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
       "write",
     ]);
 
-    // Turn 1 Step 1：先思考 + 调用 edit 修改 self.md（触发 <prefix_delta> 但不改本会话 Static Prefix 快照）
+    // Turn 1 Step 1：先思考 + 调用 edit 修改 core/self.md（触发 <prefix_delta> 但不改本会话 Static Prefix 快照）
     mockChat.queueStream(() => [
       { type: "thinking_delta", delta: "刚给了我一个名字，我顺手记进 self.md。", signature: "sig-step-1" },
       {
         type: "tool_call",
         id: "tc-1",
         name: "edit",
-        args: { path: "self.md", old_string: 'name: ""', new_string: "name: 阿白" },
+        args: { path: "core/self.md", old_string: 'name: ""', new_string: "name: 阿白" },
       },
     ]);
     // Turn 1 Step 2：收到 tool_result 后输出最终正文
@@ -88,7 +88,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
 
     const r1 = await engine.runTurn({ mode: "chat", userText: "以后叫你阿白好不好？" });
     expect(r1.text).toBe("好，那以后我就叫这个名字啦。");
-    expect(r1.touchedMemoryPaths).toEqual(["self.md"]);
+    expect(r1.touchedMemoryPaths).toEqual(["core/self.md"]);
     expect(r1.message?.thinking).toContain("顺手记进 self.md");
 
     // 检查 Step 1 请求：原话置顶、<runtime_context> 置底、创世模式已拼入
@@ -227,12 +227,12 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
   test("主对话接入 3 步召回写入 recall_traces/recallCount、换段注入 <gist>+过渡上下文、429 退避重试成功", async () => {
     ctx = await createTestContext();
     await ctx.tools.write(
-      "daily/2026-11-19-coffee.md",
+      "episodes/2026/11/19/ep-coffee.md",
       "---\ntitle: 巷口手冲咖啡\nkind: episode\ncreated: 2026-11-19\n---\n昨天下午喝了一杯埃塞水洗手冲。\n",
     );
     await ctx.tools.write(
-      "gist/days/2026-11.md",
-      "---\ntitle: 2026-11 日梗概\n---\n### 2026-11-19\n一起聊了手冲咖啡。\n",
+      "episodes/2026/11/19/index.md",
+      "---\ntitle: 2026-11-19 日梗概\n---\n一起聊了手冲咖啡。\n",
     );
 
     const mockChat = new MockChatModel(1000);
@@ -370,12 +370,12 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
   test("多步思考按 step 分段落盘 journalSteps；door.updated 严格排在助手回复之后；self/user 格式化名字与代词同步", async () => {
     ctx = await createTestContext();
     await fs.writeFile(
-      path.join(ctx.dataDir, "memory", "self.md"),
+      path.join(ctx.dataDir, "memory", "core", "self.md"),
       "---\ntitle: 关于我\nname: \"\"\npronoun: \"\"\n---\n# 我是谁\n\n未定名。\n",
       "utf8",
     );
     await fs.writeFile(
-      path.join(ctx.dataDir, "memory", "user.md"),
+      path.join(ctx.dataDir, "memory", "core", "user.md"),
       "---\ntitle: 关于你\nname: \"\"\npronoun: \"\"\n---\n# 关于你\n\n未登记。\n",
       "utf8",
     );
@@ -383,7 +383,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
     const mockChat = new MockChatModel();
     const { engine } = buildEngine(ctx, mockChat);
 
-    // Step 0: thinking + edit self.md & user.md + door(quiet)
+    // Step 0: thinking + edit core/self.md & core/user.md + door(quiet)
     mockChat.queueStream(() => [
       { type: "thinking_delta", delta: "第一步先写下名字和代词。", signature: "sig-0" },
       {
@@ -391,7 +391,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
         id: "tc-s0-1",
         name: "edit",
         args: {
-          path: "self.md",
+          path: "core/self.md",
           old_string: 'name: ""\npronoun: ""',
           new_string: "name: 阿序\npronoun: 她",
         },
@@ -401,7 +401,7 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
         id: "tc-s0-2",
         name: "edit",
         args: {
-          path: "user.md",
+          path: "core/user.md",
           old_string: 'name: ""\npronoun: ""',
           new_string: "name: 小川\npronoun: 他",
         },

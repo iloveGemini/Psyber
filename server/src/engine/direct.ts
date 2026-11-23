@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { Clock } from "../core/clock.ts";
-import { localWeekday, vagueTimeOfDay, vagueWhen } from "../core/clock.ts";
+import { localDay, localWeekday, vagueTimeOfDay, vagueWhen } from "../core/clock.ts";
 import type { DoorState, PsyberConfig } from "../core/config.ts";
 import { commitMemoryPaths } from "../core/git.ts";
 import type { MediaStore } from "../core/media.ts";
@@ -19,7 +19,7 @@ import type {
   LlmErrorCode,
 } from "../llm/client.ts";
 import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
-import { parseCardMarkdown } from "../memory/frontmatter.ts";
+import { filterActiveStateMarkdown } from "../memory/frontmatter.ts";
 import {
   parseSelfIdentity,
   readIdentityProfile,
@@ -40,11 +40,12 @@ import type {
 } from "../tools/registry.ts";
 
 const STATIC_PREFIX_PATHS = new Set([
-  "self.md",
-  "user.md",
-  "shelf/rules.md",
-  "shelf/mirror.md",
-  "shelf/threads.md",
+  "core/self.md",
+  "core/user.md",
+  "core/boundaries.md",
+  "core/mirror.md",
+  "core/open.md",
+  "core/state.md",
 ]);
 
 const MAX_TOOL_STEPS = 12;
@@ -493,21 +494,24 @@ export class DirectEngine {
     if (this.staticPrefixSnapshot !== null) {
       return this.staticPrefixSnapshot;
     }
-    const selfMd = (await readOptionalMemoryFile(this.deps.dataDir, "self.md")) ?? "";
+    const today = localDay(this.deps.clock.now(), this.deps.clock.timeZone);
+    const selfMd = (await readOptionalMemoryFile(this.deps.dataDir, "core/self.md")) ?? "";
     const mainPrompt = await readPrompt(this.deps.promptsDir, "main.md");
-    const userMd = await readOptionalMemoryFile(this.deps.dataDir, "user.md");
-    const shelfParts: string[] = [];
-    for (const f of ["shelf/rules.md", "shelf/mirror.md", "shelf/threads.md"]) {
-      const text = await readOptionalMemoryFile(this.deps.dataDir, f);
-      if (text) shelfParts.push(`### ${f}\n${text}`);
+    const userMd = await readOptionalMemoryFile(this.deps.dataDir, "core/user.md");
+    const coreParts: string[] = [];
+    for (const f of ["core/boundaries.md", "core/mirror.md", "core/open.md", "core/state.md"]) {
+      const raw = await readOptionalMemoryFile(this.deps.dataDir, f);
+      if (!raw) continue;
+      const text = f === "core/state.md" ? filterActiveStateMarkdown(raw, today) : raw;
+      if (text) coreParts.push(`### ${f}\n${text}`);
     }
 
     const sections: string[] = [];
     if (selfMd) sections.push(`<self>\n${selfMd}\n</self>`);
     sections.push(mainPrompt.body);
     if (userMd) sections.push(`<user>\n${userMd}\n</user>`);
-    if (shelfParts.length > 0) {
-      sections.push(`<shelf>\n${shelfParts.join("\n\n")}\n</shelf>`);
+    if (coreParts.length > 0) {
+      sections.push(`<core>\n${coreParts.join("\n\n")}\n</core>`);
     }
     if (this.activeState.continuity) {
       sections.push(this.activeState.continuity);
@@ -517,9 +521,9 @@ export class DirectEngine {
     return this.staticPrefixSnapshot;
   }
 
-  /** 判断是否仍处于创世未定名状态（self.md 显式空 name: "" 或旧版 named: false） */
+  /** 判断是否仍处于创世未定名状态（core/self.md 显式空 name: "" 或旧版 named: false） */
   private async isGenesisMode(): Promise<boolean> {
-    const selfMd = await readOptionalMemoryFile(this.deps.dataDir, "self.md");
+    const selfMd = await readOptionalMemoryFile(this.deps.dataDir, "core/self.md");
     if (!selfMd) return false;
     return !parseSelfIdentity(selfMd, this.deps.clock.now(), this.deps.clock.timeZone).named;
   }
@@ -1493,10 +1497,14 @@ export class DirectEngine {
 
       // 更新盘中 Static Prefix 文件的 <prefix_delta>（不回改本会话 Static Prefix 快照）
       if (!lastError) {
+        const today = localDay(this.deps.clock.now(), this.deps.clock.timeZone);
         for (const rel of toolCtx.touchedMemoryPaths) {
           if (STATIC_PREFIX_PATHS.has(rel)) {
-            const latest = await readOptionalMemoryFile(this.deps.dataDir, rel);
+            const raw = await readOptionalMemoryFile(this.deps.dataDir, rel);
+            const latest =
+              raw && rel === "core/state.md" ? filterActiveStateMarkdown(raw, today) : raw;
             if (latest) this.prefixDelta.set(rel, latest);
+            else this.prefixDelta.delete(rel);
           }
         }
       }
@@ -1505,7 +1513,7 @@ export class DirectEngine {
       const touched = Array.from(toolCtx.touchedMemoryPaths);
       if (!lastError && touched.length > 0) {
         await commitMemoryPaths(this.deps.dataDir, touched, `memory(turn): ${turnId}`);
-        if (touched.includes("self.md") || touched.includes("user.md")) {
+        if (touched.includes("core/self.md") || touched.includes("core/user.md")) {
           const updatedIdentity = await readIdentityProfile(
             this.deps.dataDir,
             this.deps.clock.now(),

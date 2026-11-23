@@ -2,11 +2,19 @@ import path from "node:path";
 import YAML from "yaml";
 import { addCalendarDays, localDateStartMs, localDay } from "../core/clock.ts";
 
-export type CardKind = "episode" | "state" | "work" | "serial" | "note";
+export type CardKind = "episode" | "reflection" | "lesson" | "state" | "work" | "serial" | "note";
 export type CardStatus = "active" | "resolved" | "disputed" | "faded" | "archived";
 export type DateKind = "ordinary" | "celebrate" | "gentle" | "deadline";
 
-export const VALID_CARD_KINDS = new Set<CardKind>(["episode", "state", "work", "serial", "note"]);
+export const VALID_CARD_KINDS = new Set<CardKind>([
+  "episode",
+  "reflection",
+  "lesson",
+  "state",
+  "work",
+  "serial",
+  "note",
+]);
 export const VALID_CARD_STATUSES = new Set<CardStatus>([
   "active",
   "resolved",
@@ -33,17 +41,20 @@ export interface ParsedCard {
   rawFrontmatter: Record<string, unknown>;
 }
 
+const EPISODE_INDEX_RE = /^episodes\/\d{4}(?:\/\d{2}(?:\/\d{2})?)?\/index\.md$/;
+
 /** 根据相对路径推导卡片所属空间标识 */
 export function inferSpace(relPath: string): string {
-  if (relPath === "self.md") return "self";
-  if (relPath === "user.md") return "user";
+  if (relPath === "core/self.md") return "self";
+  if (relPath === "core/user.md") return "user";
+  if (EPISODE_INDEX_RE.test(relPath)) return "episode_index";
   const parts = relPath.split("/");
   const top = parts[0];
-  if (top === "daily" || top === "shelf" || top === "gist" || top === "favorite") {
+  if (top === "core" || top === "episodes" || top === "lessons" || top === "favorite") {
     return top;
   }
-  if (top === "activities" && parts.length >= 3) {
-    return `activity:${parts[1]}`;
+  if (top === "threads" && parts.length >= 3) {
+    return `thread:${parts[1]}`;
   }
   if (top === "entities" && parts.length >= 3) {
     return `entity:${parts[1]}`;
@@ -51,9 +62,14 @@ export function inferSpace(relPath: string): string {
   return top;
 }
 
-function defaultKindForSpace(space: string): CardKind {
-  if (space === "daily") return "episode";
-  if (space.startsWith("activity:")) return "work";
+function defaultKindForSpace(space: string, relPath: string): CardKind {
+  if (space === "episodes") {
+    const base = path.basename(relPath, ".md");
+    if (base.startsWith("rf-")) return "reflection";
+    return "episode";
+  }
+  if (space === "lessons") return "lesson";
+  if (space.startsWith("thread:")) return "work";
   return "note";
 }
 
@@ -75,10 +91,14 @@ function extractFirstHeading(body: string): string | null {
 
 function fallbackTitleFromPath(relPath: string): string {
   const base = path.basename(relPath, ".md");
-  return base.replace(/^\d{4}-\d{2}-\d{2}-/, "") || base;
+  return base.replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/^(?:ep|rf|st)-/, "") || base;
 }
 
 function datePrefixFromPath(relPath: string): string | null {
+  const epMatch = /^episodes\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(relPath);
+  if (epMatch) {
+    return `${epMatch[1]}-${epMatch[2]}-${epMatch[3]}`;
+  }
   const base = path.basename(relPath, ".md");
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(base);
   return match ? match[1] : null;
@@ -86,6 +106,32 @@ function datePrefixFromPath(relPath: string): string | null {
 
 function normalizeTag(tag: string): string {
   return tag.normalize("NFKC").trim();
+}
+
+/**
+ * 过滤 core/state.md 中已过期的 `[至 YYYY-MM-DD]` 条目（硬护栏，防止过时短期状态继续注入常驻前缀）。
+ * 若过滤后已无有效正文行，返回 null。
+ */
+export function filterActiveStateMarkdown(markdown: string, today: string): string | null {
+  const { body } = splitFrontmatter(markdown);
+  const lines = body.split(/\r?\n/);
+  const kept: string[] = [];
+  let hasContentLine = false;
+
+  for (const line of lines) {
+    const expMatch = /\[(?:至|until:?)\s*(\d{4}-\d{2}-\d{2})\]/i.exec(line);
+    if (expMatch && expMatch[1]! < today) {
+      continue;
+    }
+    kept.push(line);
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("#")) {
+      hasContentLine = true;
+    }
+  }
+
+  if (!hasContentLine) return null;
+  return kept.join("\n").trim();
 }
 
 /**
@@ -109,7 +155,6 @@ export function parseCardMarkdown(
         raw = parsed as Record<string, unknown>;
       }
     } catch {
-      // 读时宽容：YAML 语法轻微破损时回落默认值
       raw = {};
     }
   }
@@ -121,7 +166,7 @@ export function parseCardMarkdown(
 
   const rawKind = typeof raw.kind === "string" ? (raw.kind.trim() as CardKind) : null;
   const kind: CardKind =
-    rawKind && VALID_CARD_KINDS.has(rawKind) ? rawKind : defaultKindForSpace(space);
+    rawKind && VALID_CARD_KINDS.has(rawKind) ? rawKind : defaultKindForSpace(space, relPath);
 
   const rawStatus = typeof raw.status === "string" ? (raw.status.trim() as CardStatus) : null;
   const status: CardStatus =
@@ -149,7 +194,7 @@ export function parseCardMarkdown(
 
   const mtimeDateStr = localDay(fileMtimeMs, timeZone);
 
-  // created_at：优先 frontmatter created -> 文件名日期前缀 -> fileMtime 本地日期
+  // created_at：优先 frontmatter created -> 路径/文件名日期 -> fileMtime 本地日期
   const createdDateStr =
     (typeof raw.created === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.created.trim())
       ? raw.created.trim()
@@ -166,10 +211,10 @@ export function parseCardMarkdown(
     updatedAt = contentChanged && raw.source !== "import" ? Math.max(parsedUpd, fileMtimeMs) : parsedUpd;
   }
 
-  // daily/ state 卡 TTL 与 expires_at（按日历日加减，免疫夏令时偏移）
+  // 兼容短期 state 卡 TTL 与 expires_at（按日历日加减，免疫夏令时偏移）
   let ttlDays: number | null = null;
   let expiresAt: number | null = null;
-  if (space === "daily" && kind === "state" && status === "active") {
+  if (kind === "state" && status === "active") {
     const rawTtl = Number(raw.ttl_days);
     ttlDays = Number.isInteger(rawTtl) && rawTtl >= 1 && rawTtl <= 365 ? rawTtl : 10;
 
@@ -209,7 +254,6 @@ export function effectiveStatus(
   nowMs: number,
 ): CardStatus {
   if (
-    row.space === "daily" &&
     row.kind === "state" &&
     row.status === "active" &&
     row.expires_at !== null &&

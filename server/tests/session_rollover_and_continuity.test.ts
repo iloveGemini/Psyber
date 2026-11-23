@@ -83,8 +83,8 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
         id: "bt-gist",
         name: "write",
         args: {
-          path: "gist/days/2026-11.md",
-          content: "---\nupdated: 2026-11-21\n---\n### 2026-11-21\n下午聊了去植物园看银杏。\n",
+          path: "episodes/2026/11/21/index.md",
+          content: "---\nupdated: 2026-11-21\n---\n下午聊了去植物园看银杏。\n",
         },
       },
     ]);
@@ -152,14 +152,14 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
       userEventId: u1.event.id,
     });
 
-    // 手动存记忆换段（同步执行 daily_wrapup 写入 daily/）
+    // 手动存记忆换段（同步执行 daily_wrapup 写入 episodes/）
     chat1.queueStream(() => [
       {
         type: "tool_call",
         id: "wrap-daily",
         name: "write",
         args: {
-          path: "daily/2026-11-21-big-thing.md",
+          path: "episodes/2026/11/21/ep-big-thing.md",
           content: "---\ntitle: 大事定案\nkind: episode\ncreated: 2026-11-21\n---\n今晚我们一起敲定了搬家日期。\n",
         },
       },
@@ -487,7 +487,7 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
     unsub();
   });
 
-  test("<continuity> 严格排除 activities/ 与已入日梗概的旧 daily/，保留今日 daily/ 正文，末尾原话遵守 2000 字预算", async () => {
+  test("<continuity> 严格排除 threads/ 与已入日梗概的旧 episodes/，保留今日 episodes/ 正文与当月滚动月梗概，末尾原话遵守 2000 字预算", async () => {
     const dataDir = await makeTempDir();
     const clock = new VirtualClock(0, "Asia/Shanghai");
     clock.jumpToWallClock(2026, 11, 22, 12, 0, 0);
@@ -501,44 +501,67 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
     });
     activeRuntimes.push(rt);
 
-    // 写入跨月/跨周/近日多尺度梗概（超过旧 3000 字上限，验证 16000 预算能完整保留月/周/天且单条防跑偏裁切）
-    await fs.mkdir(path.join(dataDir, "memory", "gist", "months"), { recursive: true });
+    // 写入基于 covered_until 的年/月/日分形梗概，验证零重叠零断层拼接
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2025"), { recursive: true });
     await fs.writeFile(
-      path.join(dataDir, "memory", "gist", "months", "2026.md"),
-      `---\nupdated: 2026-09-30\n---\n### 2026-09\n九月一起跑通了初版原型。${"月".repeat(400)}\n`,
+      path.join(dataDir, "memory", "episodes", "2025", "index.md"),
+      "---\ncovered_until: 2025-12\nupdated: 2025-12-31\n---\n2025年我们刚刚认识。\n",
+      "utf8",
+    );
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "08"), { recursive: true });
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "09"), { recursive: true });
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "index.md"),
+      "---\ncovered_until: 2026-08\nupdated: 2026-08-31\n---\n2026年前八个月一起打好了地基。\n",
       "utf8",
     );
     await fs.writeFile(
-      path.join(dataDir, "memory", "gist", "weeks", "2026.md"),
-      [
-        "---",
-        "updated: 2026-11-15",
-        "---",
-        `### 2026-W43\n十月下旬在整理书架。${"周".repeat(350)}`,
-        `### 2026-W44\n十月底去公园散步。${"周".repeat(350)}`,
-        `### 2026-W45\n十一月初试做面包。${"周".repeat(350)}`,
-        `### 2026-W46\n上周换了新键盘。${"周".repeat(350)}`,
-      ].join("\n"),
+      path.join(dataDir, "memory", "episodes", "2026", "08", "index.md"),
+      "---\ncovered_until: 2026-08-31\nupdated: 2026-08-31\n---\n八月已滚入年梗概，不应重复出现。\n",
       "utf8",
     );
     await fs.writeFile(
-      path.join(dataDir, "memory", "gist", "days", "2026-11.md"),
-      `---\nupdated: 2026-11-21\n---\n### 2026-11-20\n前天整理了桌面。${"天".repeat(500)}\n### 2026-11-21\n昨天完成了周末大扫除。\n`,
+      path.join(dataDir, "memory", "episodes", "2026", "09", "index.md"),
+      `---\ncovered_until: 2026-09-30\nupdated: 2026-09-30\n---\n九月一起跑通了初版原型。${"月".repeat(400)}\n`,
+      "utf8",
+    );
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "11", "10"), { recursive: true });
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "11", "20"), { recursive: true });
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "11", "21"), { recursive: true });
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "11", "22"), { recursive: true });
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "11", "index.md"),
+      "---\ncovered_until: 2026-11-15\nupdated: 2026-11-15\n---\n十一月上半月换了新键盘并试做了面包。\n",
       "utf8",
     );
     await fs.writeFile(
-      path.join(dataDir, "memory", "daily", "2026-11-21-old.md"),
+      path.join(dataDir, "memory", "episodes", "2026", "11", "10", "index.md"),
+      "---\nupdated: 2026-11-10\n---\n十号已滚入月梗概，不应重复出现。\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "11", "20", "index.md"),
+      `---\nupdated: 2026-11-20\n---\n前天整理了桌面。${"天".repeat(500)}\n`,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "11", "21", "index.md"),
+      "---\nupdated: 2026-11-21\n---\n昨天完成了周末大扫除。\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "11", "21", "ep-old.md"),
       "---\ntitle: 昨日旧卡片\nkind: episode\ncreated: 2026-11-21\nupdated: 2026-11-21\n---\n这条旧日常正文不该再塞进开局。\n",
       "utf8",
     );
     await fs.writeFile(
-      path.join(dataDir, "memory", "daily", "2026-11-22-morning.md"),
+      path.join(dataDir, "memory", "episodes", "2026", "11", "22", "ep-morning.md"),
       "---\ntitle: 上午买菜\nkind: episode\ncreated: 2026-11-22\nupdated: 2026-11-22\n---\n今天上午在菜市场买了新鲜莲藕和排骨，打算晚上煲汤。\n",
       "utf8",
     );
-    await fs.mkdir(path.join(dataDir, "memory", "activities", "cinema"), { recursive: true });
+    await fs.mkdir(path.join(dataDir, "memory", "threads", "cinema"), { recursive: true });
     await fs.writeFile(
-      path.join(dataDir, "memory", "activities", "cinema", "film.md"),
+      path.join(dataDir, "memory", "threads", "cinema", "film.md"),
       "---\ntitle: 观影记录\nkind: work\ncreated: 2026-11-22\nupdated: 2026-11-22\n---\n观影专题正文应交给召回，不进开局。\n",
       "utf8",
     );
@@ -575,13 +598,17 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
     const req = chat.requests[chat.requests.length - 1]!;
     expect(req.systemPrompt).toContain("<continuity>");
     expect(req.systemPrompt).toContain("昨天完成了周末大扫除");
-    // 16000 预算下，月/周/天金字塔全部完整保留；同时单条 500+ 字日梗概被 400 字单条上限裁切
+    // 年 + 未滚入年的月 + 未滚入月的天 严格零重叠拼接
+    expect(req.systemPrompt).toContain("2025年我们刚刚认识");
+    expect(req.systemPrompt).toContain("2026年前八个月一起打好了地基");
+    expect(req.systemPrompt).not.toContain("八月已滚入年梗概，不应重复出现");
     expect(req.systemPrompt).toContain("九月一起跑通了初版原型");
-    expect(req.systemPrompt).toContain("上周换了新键盘");
+    expect(req.systemPrompt).toContain("十一月上半月换了新键盘并试做了面包");
+    expect(req.systemPrompt).not.toContain("十号已滚入月梗概，不应重复出现");
     expect(req.systemPrompt).not.toContain("天".repeat(450));
-    // 今日 daily/ 正文必须完整进来
+    // 今日 episodes/ 正文必须完整进来
     expect(req.systemPrompt).toContain("买了新鲜莲藕和排骨，打算晚上煲汤");
-    // 旧天 daily/ 与 activities/ 不应占开局预算
+    // 旧天 episodes/ 与 threads/ 不应占开局预算
     expect(req.systemPrompt).not.toContain("这条旧日常正文不该再塞进开局");
     expect(req.systemPrompt).not.toContain("观影专题正文应交给召回，不进开局");
     // 2000 字预算应保留最后一句、截掉最早的 1600 字长段
