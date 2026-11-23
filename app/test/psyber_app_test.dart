@@ -874,15 +874,23 @@ void main() {
     await tester.pump();
 
     expect(find.text('我在听呢。'), findsOneWidget);
-    expect(find.text('思考中…'), findsOneWidget);
-    expect(find.text('翻看日记 · 进行中'), findsOneWidget);
+    expect(find.text('正在翻看日记…'), findsOneWidget);
     expect(find.text('先确认对方刚刚提到的事情'), findsNothing);
     expect(find.byKey(const Key('streaming_replying_badge')), findsNothing);
     expect(find.byKey(const Key('abort_turn_button')), findsNothing);
 
     await tester.tap(find.byKey(const Key('thinking_toggle')));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('翻看日记'), findsOneWidget);
+    expect(find.text('进行中'), findsOneWidget);
+    expect(find.text('先确认对方刚刚提到的事情'), findsNothing);
+
+    await tester.tap(find.text('查看思考'));
+    await tester.pumpAndSettle();
     expect(find.text('先确认对方刚刚提到的事情'), findsOneWidget);
+
+    Navigator.of(tester.element(find.byKey(const Key('thinking_body')))).pop();
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('chat_stop_button')));
     await tester.pump();
@@ -1119,9 +1127,7 @@ void main() {
     expect(api.switchedVersions.first['version'], 2);
     expect(find.text('第 2 版回复内容'), findsOneWidget);
 
-    // 验证点击更多菜单打开上下文操作并触发编辑重发与软删
-    await tester.tap(find.byKey(const Key('msg_more_ev_user_1')));
-    await tester.pumpAndSettle();
+    // 验证桌面端平铺操作栏直接触发编辑重发与二次点击软删
     expect(find.byKey(const Key('edit_msg_ev_user_1')), findsOneWidget);
     await tester.tap(find.byKey(const Key('edit_msg_ev_user_1')));
     await tester.pumpAndSettle();
@@ -1130,9 +1136,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('修改后的问候'), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('msg_more_ev_user_1_v2')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('delete_msg_ev_user_1_v2')));
+    await tester.tap(find.byKey(const Key('hover_delete_ev_user_1_v2')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('hover_delete_ev_user_1_v2')));
     await tester.pumpAndSettle();
     expect(find.text('修改后的问候'), findsNothing);
 
@@ -1527,15 +1533,18 @@ void main() {
     expect(find.byType(TurnJournalCard), findsOneWidget);
     expect(find.byType(ScreenToolCard), findsOneWidget);
     expect(find.byKey(const Key('model_switch_gpt-4o')), findsOneWidget);
-    expect(find.text('思索 · 翻看记忆库'), findsOneWidget);
+    expect(find.text('思考过程 · 翻看记忆库'), findsOneWidget);
     expect(find.text('看一眼屏幕'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('thinking_toggle')));
     await tester.pumpAndSettle();
+    expect(find.textContaining('翻看记忆库'), findsWidgets);
+    expect(find.byKey(const Key('thinking_body')), findsNothing);
 
+    await tester.tap(find.text('查看思考'));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('thinking_body')), findsOneWidget);
     expect(find.textContaining('先翻翻之前提到的口味'), findsOneWidget);
-    expect(find.textContaining('翻看记忆库'), findsWidgets);
   });
 
   testWidgets('草稿自动保存并恢复，且短视频消息渲染 VideoTile', (tester) async {
@@ -2125,7 +2134,7 @@ void main() {
       id: '3',
     );
     await tester.pump();
-    expect(find.text('思考中…'), findsOneWidget);
+    expect(find.text('正在思考…'), findsOneWidget);
 
     // 2. 模拟短暂重连：activeTurnId 仍在服务端运行，重连不应清空已收到的流式思考链与工具进度
     await controller.connectAndSync();
@@ -2452,14 +2461,28 @@ void main() {
         .where((e) => (e.widget as Container).decoration != null);
     expect(stickerContainer, isEmpty);
 
-    // 3. 展开多步手账折卡：按第 1 步 / 第 2 步分段渲染
+    // 3. 展开多步手账弹层：按时间线顺序渲染各步，思考默认折叠并支持手风琴切换
     await tester.tap(find.byKey(const Key('thinking_toggle')));
     await tester.pumpAndSettle();
-    expect(find.text('第 1 步'), findsOneWidget);
-    expect(find.text('第 2 步'), findsOneWidget);
+    expect(find.text('翻开看了一篇记忆'), findsOneWidget);
+    expect(find.text('修改了记忆片段'), findsOneWidget);
+    expect(find.text('查看思考'), findsNWidgets(2));
+    expect(find.text('第一步思考'), findsNothing);
+    expect(find.text('第二步思考'), findsNothing);
+    expect(
+      tester.getTopLeft(find.text('翻开看了一篇记忆')).dy,
+      lessThan(tester.getTopLeft(find.text('修改了记忆片段')).dy),
+    );
+
+    await tester.tap(find.text('查看思考').first);
+    await tester.pumpAndSettle();
     expect(find.text('第一步思考'), findsOneWidget);
+    expect(find.text('第二步思考'), findsNothing);
+
+    await tester.tap(find.text('查看思考').first);
+    await tester.pumpAndSettle();
     expect(find.text('第二步思考'), findsOneWidget);
-    // 第 1 步的思考与工具位置严格早于第 2 步的思考
+    expect(find.text('第一步思考'), findsNothing);
     expect(
       tester.getTopLeft(find.text('翻开看了一篇记忆')).dy,
       lessThan(tester.getTopLeft(find.text('第二步思考')).dy),

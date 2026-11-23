@@ -59,6 +59,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _showScrollToBottom = false;
   bool _isDraggingFiles = false;
   bool _autoScrollScheduled = false;
+  double _lastBottomInset = 0.0;
   String _lastSavedDraft = '';
 
   @override
@@ -131,6 +132,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final maxExtent = _scrollController.position.maxScrollExtent;
       if (_scrollController.offset < maxExtent) {
         _scrollController.jumpTo(maxExtent);
+      }
+    });
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+      final delta = bottomInset - _lastBottomInset;
+      _lastBottomInset = bottomInset;
+      if (delta > 0 && _scrollController.hasClients) {
+        final maxExtent = _scrollController.position.maxScrollExtent;
+        final target = !_showScrollToBottom
+            ? maxExtent
+            : (_scrollController.offset + delta).clamp(0.0, maxExtent);
+        if ((target - _scrollController.offset).abs() > 0.5) {
+          _scrollController.jumpTo(target);
+        }
       }
     });
   }
@@ -446,6 +467,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     return null;
   }
 
+  String? _findLatestAssistantMessageId(List<TimelineItem> items) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item.isAssistant &&
+          !item.retracted &&
+          !item.isSilence &&
+          !item.isMemoryTask &&
+          !item.isSystemNotice &&
+          !item.isShareOpened) {
+        return item.id;
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
@@ -638,6 +674,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   final hasMore = widget.controller.hasMoreHistory;
                                   final headerCount = hasMore ? 1 : 0;
                                   final latestUserId = _findLatestUserMessageId(items);
+                                  final latestAssistantId = _findLatestAssistantMessageId(items);
                                   return ValueListenableBuilder<bool>(
                                     valueListenable: widget.controller.recallEvalModeNotifier,
                                     builder: (context, evalEnabled, _) {
@@ -648,7 +685,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                           valueListenable: widget.controller.identityNotifier,
                                           builder: (context, identity, _) {
                                             final topListPad = isWide
-                                                ? 18.0
+                                                ? 28.0
                                                 : (MediaQuery.paddingOf(context).top + 68.0);
                                             return ListView.builder(
                                               controller: _scrollController,
@@ -656,7 +693,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                 16,
                                                 topListPad,
                                                 16,
-                                                14,
+                                                28,
                                               ),
                                               itemCount: headerCount + items.length + 1,
                                             itemBuilder: (context, index) {
@@ -851,6 +888,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                   controller: widget.controller,
                                                   showRecallBar: evalEnabled,
                                                   isLatestUserMessage: item.id == latestUserId,
+                                                  isLatestAssistantMessage: item.id == latestAssistantId,
                                                   doorState: door.state,
                                                 );
                                               }
@@ -880,6 +918,49 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     },
                                   );
                                 },
+                              ),
+                              if (isWide)
+                                Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  height: 36,
+                                  child: IgnorePointer(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            colors.mineralCanvas,
+                                            colors.mineralCanvas.withValues(alpha: 0.8),
+                                            colors.mineralCanvas.withValues(alpha: 0.0),
+                                          ],
+                                          stops: const [0.0, 0.58, 1.0],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                height: 22,
+                                child: IgnorePointer(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          colors.mineralCanvas.withValues(alpha: 0.0),
+                                          colors.mineralCanvas,
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ),
                               if (_showScrollToBottom)
                                 Positioned(
@@ -1111,6 +1192,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   final modelLabel = (slot != null && slot.model.isNotEmpty)
                                       ? '${slot.provider} · ${slot.model}'
                                       : null;
+                                  final availableSlots = <ModelSlotView>[];
+                                  if (settingsSnap != null) {
+                                    for (final entry in settingsSnap.providers.entries) {
+                                      for (final m in entry.value.models) {
+                                        final trimmed = m.trim();
+                                        if (trimmed.isNotEmpty) {
+                                          availableSlots.add(
+                                            ModelSlotView(
+                                              provider: entry.key,
+                                              model: trimmed,
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    }
+                                  }
                                   return AdaptiveComposer(
                                     door: door,
                                     residentName: identity.residentName,
@@ -1125,6 +1222,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   isDraggingFiles: _isDraggingFiles,
                                   thinkingLevel: settingsSnap?.thinkingLevel ?? 'auto',
                                   currentModelLabel: modelLabel,
+                                  currentChatSlot: slot,
+                                  availableModelSlots: availableSlots,
+                                  onSelectChatSlot: (nextSlot) => unawaited(
+                                    widget.controller.patchSettings({
+                                      'llm': {
+                                        'slots': {'chat': nextSlot.toJson()},
+                                      },
+                                    }),
+                                  ),
                                   onSelectThinkingLevel: (level) => unawaited(
                                     widget.controller.patchSettings({
                                       'llm': {

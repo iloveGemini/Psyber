@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/models/models.dart';
+import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
 
 /// 模型切换点极淡分隔线（仅在相对上一条助手回复切了模型时呈现）。
@@ -31,9 +32,11 @@ class ModelSwitchDivider extends StatelessWidget {
   }
 }
 
-/// 同轮「思考 + 多步工具调用」按步分段手账折卡（Spec 04 §5.4）：
-/// - 按 step 顺序分段渲染每一步的思考与工具动作，避免多步思考糊成一坨；
-/// - 保留 Key('thinking_toggle') 与 Key('thinking_body') 供流畅展开阅读；
+/// 同轮「思考 + 多步工具调用」极简摘要行 + 竖向时间线详情层：
+/// - 行内仅保留单行摘要（`⏱ 摘要 >`），不撑开主聊天流；
+/// - 点击后：移动端拉起圆角 BottomSheet，桌面端弹出轻弹层；
+///   - 纯思考（无工具步骤）：直接展开并以 RichMessageText 渲染 Markdown；
+///   - 多步思考/工具动作：默认折叠各步思考正文，点击按手风琴模式在固定最大高度（220px）的可滚动划窗中展开；
 /// - 隐私敏感工具（look_at_screen）永不收入此卡，由下方 ScreenToolCard 独立展示。
 class TurnJournalCard extends StatefulWidget {
   const TurnJournalCard({
@@ -56,13 +59,26 @@ class TurnJournalCard extends StatefulWidget {
 }
 
 class _TurnJournalCardState extends State<TurnJournalCard> {
-  bool _expanded = false;
+  DateTime? _streamStartedAt;
+  int? _elapsedSec;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isStreaming) {
+      _streamStartedAt = DateTime.now();
+    }
+  }
 
   @override
   void didUpdateWidget(covariant TurnJournalCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.isStreaming && !widget.isStreaming && _expanded) {
-      _expanded = false;
+    if (!oldWidget.isStreaming && widget.isStreaming) {
+      _streamStartedAt = DateTime.now();
+      _elapsedSec = null;
+    } else if (oldWidget.isStreaming && !widget.isStreaming && _streamStartedAt != null) {
+      final secs = DateTime.now().difference(_streamStartedAt!).inSeconds;
+      _elapsedSec = secs > 0 ? secs : 1;
     }
   }
 
@@ -140,20 +156,139 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
     ];
   }
 
-  String _headerTitle(List<_JournalToolStep> tools, bool hasThinking) {
-    if (widget.isStreaming) {
-      return hasThinking ? '思考中…' : '翻看手账…';
+  /// 将分步思考与工具调用展平为竖向时间线节点，保持时间先后顺序。
+  List<_TimelineNode> _buildTimelineNodes(List<_RenderedJournalStep> steps) {
+    final nodes = <_TimelineNode>[];
+    for (final step in steps) {
+      if (step.thinking.isNotEmpty) {
+        if (step.tools.length == 1) {
+          final tool = step.tools.first;
+          nodes.add(
+            _TimelineNode(
+              title: tool.label,
+              body: step.thinking,
+              status: tool.status,
+            ),
+          );
+          continue;
+        }
+        nodes.add(
+          _TimelineNode(
+            body: step.thinking,
+            status: widget.isStreaming ? 'running' : 'done',
+          ),
+        );
+      }
+      for (final tool in step.tools) {
+        nodes.add(
+          _TimelineNode(
+            title: tool.label,
+            status: tool.status,
+          ),
+        );
+      }
     }
+    return nodes;
+  }
+
+  String _inlineSummaryText(List<_JournalToolStep> tools, bool hasThinking) {
+    if (widget.isStreaming) {
+      final running = tools.where((t) => t.status == 'running').toList(growable: false);
+      if (running.isNotEmpty) {
+        return '正在${running.last.label}…';
+      }
+      return hasThinking ? '正在思考…' : '翻看手账…';
+    }
+
+    final timePrefix = (_elapsedSec != null && _elapsedSec! > 0)
+        ? '思考了 $_elapsedSec 秒'
+        : (hasThinking ? '思考过程' : '');
+
     if (tools.isEmpty) {
-      return '思考过程';
+      return timePrefix.isNotEmpty ? timePrefix : '思考过程';
     }
     final firstLabel = tools.first.label;
-    if (tools.length == 1) {
-      return hasThinking ? '思索 · $firstLabel' : firstLabel;
+    final toolPart = tools.length == 1 ? firstLabel : '$firstLabel 等 ${tools.length} 步';
+    if (timePrefix.isEmpty) return toolPart;
+    return '$timePrefix · $toolPart';
+  }
+
+  String _sheetTitle(List<_JournalToolStep> tools, bool hasThinking) {
+    if (widget.isStreaming) {
+      return hasThinking ? '正在思考…' : '执行步骤';
     }
-    return hasThinking
-        ? '思索与动作 · $firstLabel 等 ${tools.length} 步'
-        : '$firstLabel 等 ${tools.length} 步';
+    if (_elapsedSec != null && _elapsedSec! > 0) {
+      return '思考了 $_elapsedSec 秒';
+    }
+    if (hasThinking && tools.isNotEmpty) {
+      return '思考与步骤（${tools.length} 步）';
+    }
+    if (tools.isNotEmpty) {
+      return '执行步骤（${tools.length} 步）';
+    }
+    return '思考过程';
+  }
+
+  void _openDetailModal(
+    BuildContext context, {
+    required String title,
+    required List<_TimelineNode> nodes,
+  }) {
+    final isWide = MediaQuery.sizeOf(context).width >= 720;
+    if (isWide) {
+      showDialog<void>(
+        context: context,
+        builder: (dialogCtx) {
+          final colors = dialogCtx.colors;
+          final maxH = MediaQuery.sizeOf(dialogCtx).height * 0.72;
+          return Dialog(
+            backgroundColor: colors.letterSurface,
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: BorderSide(color: colors.hairline),
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: 540, maxHeight: maxH),
+              child: _JournalDetailContent(
+                title: title,
+                nodes: nodes,
+                showDragHandle: false,
+                onClose: () => Navigator.of(dialogCtx).pop(),
+              ),
+            ),
+          );
+        },
+      );
+      return;
+    }
+
+    final outerColors = context.colors;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: outerColors.letterSurface,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        side: BorderSide(color: outerColors.hairline),
+      ),
+      builder: (sheetCtx) {
+        final maxH = MediaQuery.sizeOf(sheetCtx).height * 0.78;
+        return ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxH),
+          child: SafeArea(
+            top: false,
+            child: _JournalDetailContent(
+              title: title,
+              nodes: nodes,
+              showDragHandle: true,
+              onClose: () => Navigator.of(sheetCtx).pop(),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -167,166 +302,374 @@ class _TurnJournalCardState extends State<TurnJournalCard> {
     }
 
     final colors = context.colors;
-    final runningSteps =
-        allTools.where((s) => s.status == 'running').toList(growable: false);
-    final firstThinkingIndex =
-        renderedSteps.indexWhere((s) => s.thinking.isNotEmpty);
+    final nodes = _buildTimelineNodes(renderedSteps);
+    final summaryText = _inlineSummaryText(allTools, hasThinking);
+    final title = _sheetTitle(allTools, hasThinking);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 8,
-            runSpacing: 4,
+      child: InkWell(
+        key: const Key('thinking_toggle'),
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => _openDetailModal(context, title: title, nodes: nodes),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              InkWell(
-                key: const Key('thinking_toggle'),
-                borderRadius: BorderRadius.circular(8),
-                onTap: () => setState(() => _expanded = !_expanded),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '✦',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          color: colors.inkFaint,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _headerTitle(allTools, hasThinking),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: colors.inkQuiet,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        _expanded
-                            ? PhosphorIconsLight.caretUp
-                            : PhosphorIconsLight.caretDown,
-                        size: 13,
-                        color: colors.inkFaint,
-                      ),
-                    ],
+              Icon(
+                widget.isStreaming
+                    ? PhosphorIconsLight.circleDashed
+                    : PhosphorIconsLight.clock,
+                size: 14.5,
+                color: colors.inkQuiet,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  summaryText,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: colors.inkQuiet,
+                    height: 1.35,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (widget.isStreaming)
-                for (final r in runningSteps)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: colors.mineralCanvas,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: colors.hairline),
-                    ),
-                    child: Text(
-                      '${r.label} · 进行中',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: colors.inkQuiet,
-                      ),
-                    ),
-                  ),
+              const SizedBox(width: 4),
+              Icon(
+                PhosphorIconsLight.caretRight,
+                size: 13,
+                color: colors.inkFaint,
+              ),
             ],
           ),
-          if (_expanded)
-            Container(
-              margin: const EdgeInsets.only(top: 5, left: 4),
-              padding: const EdgeInsets.only(left: 10, top: 4, bottom: 4),
-              decoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(color: colors.hairline, width: 2),
+        ),
+      ),
+    );
+  }
+}
+
+class _JournalDetailContent extends StatefulWidget {
+  const _JournalDetailContent({
+    required this.title,
+    required this.nodes,
+    required this.showDragHandle,
+    required this.onClose,
+  });
+
+  final String title;
+  final List<_TimelineNode> nodes;
+  final bool showDragHandle;
+  final VoidCallback onClose;
+
+  @override
+  State<_JournalDetailContent> createState() => _JournalDetailContentState();
+}
+
+class _JournalDetailContentState extends State<_JournalDetailContent> {
+  int? _expandedIndex;
+
+  bool get _isPureThinking =>
+      widget.nodes.length == 1 &&
+      (widget.nodes.first.title == null || widget.nodes.first.title!.isEmpty) &&
+      widget.nodes.first.body != null &&
+      widget.nodes.first.body!.isNotEmpty;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final firstBodyIndex =
+        widget.nodes.indexWhere((n) => n.body != null && n.body!.isNotEmpty);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.showDragHandle)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colors.hairline,
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (var i = 0; i < renderedSteps.length; i++) ...[
-                    if (i > 0)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Divider(
-                          height: 1,
-                          thickness: 0.7,
-                          color: colors.hairline.withValues(alpha: 0.8),
+            ),
+          ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, widget.showDragHandle ? 12 : 16, 16, 12),
+          child: Row(
+            children: [
+              Material(
+                color: colors.mineralCanvas,
+                shape: CircleBorder(side: BorderSide(color: colors.hairline)),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: widget.onClose,
+                  child: SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: Icon(
+                      PhosphorIconsLight.x,
+                      size: 15,
+                      color: colors.inkDeep,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  widget.title,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w600,
+                    color: colors.inkDeep,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 32),
+            ],
+          ),
+        ),
+        Divider(height: 1, color: colors.hairline.withValues(alpha: 0.7)),
+        Flexible(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+            child: _isPureThinking
+                ? RichMessageText(
+                    key: const Key('thinking_body'),
+                    text: widget.nodes.first.body!,
+                    baseStyle: TextStyle(
+                      fontSize: 13.5,
+                      height: 1.68,
+                      color: colors.inkDeep,
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (var i = 0; i < widget.nodes.length; i++)
+                        _TimelineStepRow(
+                          node: widget.nodes[i],
+                          isLast: i == widget.nodes.length - 1,
+                          expanded: _expandedIndex == i,
+                          onToggleExpand: () {
+                            setState(() {
+                              _expandedIndex = (_expandedIndex == i) ? null : i;
+                            });
+                          },
+                          bodyKey: i == firstBodyIndex
+                              ? const Key('thinking_body')
+                              : Key('thinking_body_$i'),
                         ),
-                      ),
-                    if (renderedSteps.length > 1)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          '第 ${i + 1} 步',
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w500,
-                            color: colors.inkFaint,
+                    ],
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TimelineStepRow extends StatelessWidget {
+  const _TimelineStepRow({
+    required this.node,
+    required this.isLast,
+    required this.expanded,
+    required this.onToggleExpand,
+    this.bodyKey,
+  });
+
+  final _TimelineNode node;
+  final bool isLast;
+  final bool expanded;
+  final VoidCallback onToggleExpand;
+  final Key? bodyKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final hasTitle = node.title != null && node.title!.isNotEmpty;
+    final hasBody = node.body != null && node.body!.isNotEmpty;
+    final dotColor = switch (node.status) {
+      'error' => colors.dangerInk,
+      'running' => colors.accent,
+      _ => colors.inkQuiet,
+    };
+
+    return Stack(
+      children: [
+        if (!isLast)
+          Positioned(
+            left: 9.25,
+            top: 18,
+            bottom: 2,
+            child: Container(
+              width: 1.5,
+              color: colors.hairline,
+            ),
+          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 20,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 7),
+                child: Center(
+                  child: Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: dotColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: isLast ? 0 : 18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                  if (hasTitle)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            node.title!,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              height: 1.45,
+                              fontWeight: FontWeight.w500,
+                              color: colors.inkDeep,
+                            ),
                           ),
                         ),
-                      ),
-                    if (renderedSteps[i].thinking.isNotEmpty)
-                      SelectableText(
-                        renderedSteps[i].thinking,
-                        key: i == firstThinkingIndex
-                            ? const Key('thinking_body')
-                            : Key('thinking_body_$i'),
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          height: 1.55,
-                          color: colors.inkQuiet,
-                        ),
-                      ),
-                    if (renderedSteps[i].thinking.isNotEmpty &&
-                        renderedSteps[i].tools.isNotEmpty)
-                      const SizedBox(height: 6),
-                    for (final stepTool in renderedSteps[i].tools)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 3),
+                        if (node.status == 'running' || node.status == 'error') ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            node.status == 'running' ? '进行中' : '未成',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: node.status == 'error'
+                                  ? colors.dangerInk
+                                  : colors.inkQuiet,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  if (hasBody) ...[
+                    if (hasTitle) const SizedBox(height: 4),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: onToggleExpand,
+                      child: Padding(
+                        padding: hasTitle
+                            ? const EdgeInsets.symmetric(vertical: 2)
+                            : EdgeInsets.zero,
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              stepTool.status == 'error'
-                                  ? PhosphorIconsLight.warningCircle
-                                  : stepTool.status == 'running'
-                                      ? PhosphorIconsLight.circleDashed
-                                      : PhosphorIconsLight.check,
-                              size: 12.5,
-                              color: stepTool.status == 'error'
-                                  ? colors.dangerInk
-                                  : colors.inkFaint,
+                            Text(
+                              expanded
+                                  ? '收起思考'
+                                  : (hasTitle ? '查看思考' : '思考片段'),
+                              style: hasTitle
+                                  ? TextStyle(
+                                      fontSize: 12.5,
+                                      color: colors.inkQuiet,
+                                      fontWeight: FontWeight.w500,
+                                    )
+                                  : TextStyle(
+                                      fontSize: 14.5,
+                                      height: 1.45,
+                                      fontWeight: FontWeight.w500,
+                                      color: colors.inkDeep,
+                                    ),
                             ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                '${stepTool.label}${stepTool.status == 'running' ? ' · 进行中' : stepTool.status == 'error' ? ' · 未成' : ''}',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: colors.inkQuiet,
-                                ),
-                              ),
+                            SizedBox(width: hasTitle ? 3 : 5),
+                            Icon(
+                              expanded
+                                  ? PhosphorIconsLight.caretUp
+                                  : PhosphorIconsLight.caretDown,
+                              size: hasTitle ? 12.5 : 14,
+                              color: hasTitle ? colors.inkFaint : colors.inkQuiet,
                             ),
                           ],
                         ),
                       ),
+                    ),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 160),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.topCenter,
+                      child: expanded
+                          ? Container(
+                              key: bodyKey,
+                              width: double.infinity,
+                              margin: const EdgeInsets.only(top: 6),
+                              constraints: const BoxConstraints(maxHeight: 220),
+                              decoration: BoxDecoration(
+                                color: colors.mineralCanvas,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: colors.hairline.withValues(alpha: 0.85),
+                                ),
+                              ),
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                child: RichMessageText(
+                                  text: node.body!,
+                                  baseStyle: TextStyle(
+                                    fontSize: 13,
+                                    height: 1.62,
+                                    color: colors.inkDeep,
+                                  ),
+                                ),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
                   ],
-                ],
+                    ],
+                  ),
+                ),
               ),
-            ),
+            ],
+          ),
         ],
-      ),
-    );
+      );
   }
+}
+
+class _TimelineNode {
+  const _TimelineNode({
+    this.title,
+    this.body,
+    this.status = 'done',
+  });
+
+  final String? title;
+  final String? body;
+  final String status;
 }
 
 class _RenderedJournalStep {

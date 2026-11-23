@@ -5,33 +5,49 @@ import 'package:flutter/services.dart';
 import 'theme.dart';
 
 /// 零第三方依赖的轻量正文渲染器：
-/// 支持代码块（带一键复制）、引用块、加粗、斜体与行内代码，并保持文字可选中复制。
+/// 支持段落拆分、分隔线、标题、代码块（带一键复制）、引用块、加粗、斜体与行内代码，并保持文字可选中复制。
 class RichMessageText extends StatelessWidget {
   const RichMessageText({
     super.key,
     required this.text,
     this.baseStyle,
+    this.selectable = true,
   });
 
   final String text;
   final TextStyle? baseStyle;
+  final bool selectable;
+
+  Widget _buildRichText(TextSpan span, {StrutStyle? strutStyle}) {
+    if (selectable) {
+      return SelectableText.rich(span, strutStyle: strutStyle);
+    }
+    return Text.rich(span, strutStyle: strutStyle);
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final style = baseStyle ??
         TextStyle(
-          fontSize: 15,
-          height: 1.62,
+          fontSize: 15.5,
+          height: 1.72,
           color: colors.inkDeep,
         );
+    final strutStyle = StrutStyle(
+      fontSize: style.fontSize,
+      height: style.height,
+      forceStrutHeight: true,
+      leadingDistribution: TextLeadingDistribution.even,
+    );
     final blocks = _parseBlocks(text);
     if (blocks.length == 1 && blocks.first is _ParagraphBlock) {
-      return SelectableText.rich(
+      return _buildRichText(
         TextSpan(
           style: style,
           children: _parseInline((blocks.first as _ParagraphBlock).text, style, colors),
         ),
+        strutStyle: strutStyle,
       );
     }
 
@@ -39,20 +55,58 @@ class RichMessageText extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
-          if (i > 0) const SizedBox(height: 10),
-          _buildBlock(context, blocks[i], style, colors),
+          if (i > 0) SizedBox(height: _blockGap(blocks[i - 1], blocks[i])),
+          _buildBlock(context, blocks[i], style, strutStyle, colors),
         ],
       ],
     );
+  }
+
+  double _blockGap(_ContentBlock prev, _ContentBlock curr) {
+    if (curr is _HeadingBlock) return 16;
+    if (prev is _HeadingBlock) return 6;
+    if (prev is _DividerBlock || curr is _DividerBlock) return 12;
+    if (prev is _CodeBlock || curr is _CodeBlock) return 12;
+    if (prev is _QuoteBlock || curr is _QuoteBlock) return 12;
+    return 11;
   }
 
   Widget _buildBlock(
     BuildContext context,
     _ContentBlock block,
     TextStyle style,
+    StrutStyle strutStyle,
     PsyberColors colors,
   ) {
     switch (block) {
+      case _DividerBlock():
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Divider(
+            height: 1,
+            thickness: 1,
+            color: colors.hairline.withValues(alpha: 0.85),
+          ),
+        );
+      case _HeadingBlock(:final level, :final text):
+        final baseSize = style.fontSize ?? 15.5;
+        final headingSize = switch (level) {
+          1 => baseSize + 4.0,
+          2 => baseSize + 2.5,
+          3 => baseSize + 1.0,
+          _ => baseSize,
+        };
+        final headingStyle = style.copyWith(
+          fontSize: headingSize,
+          height: 1.42,
+          fontWeight: FontWeight.w600,
+        );
+        return _buildRichText(
+          TextSpan(
+            style: headingStyle,
+            children: _parseInline(text, headingStyle, colors),
+          ),
+        );
       case _CodeBlock(:final language, :final code):
         return Container(
           width: double.infinity,
@@ -114,6 +168,7 @@ class RichMessageText extends StatelessWidget {
           ),
         );
       case _QuoteBlock(:final text):
+        final quoteStyle = style.copyWith(color: colors.inkQuiet);
         return Container(
           padding: EdgeInsets.fromLTRB(
             12,
@@ -138,19 +193,21 @@ class RichMessageText extends StatelessWidget {
               ),
             ),
           ),
-          child: SelectableText.rich(
+          child: _buildRichText(
             TextSpan(
-              style: style.copyWith(color: colors.inkQuiet),
-              children: _parseInline(text, style.copyWith(color: colors.inkQuiet), colors),
+              style: quoteStyle,
+              children: _parseInline(text, quoteStyle, colors),
             ),
+            strutStyle: strutStyle,
           ),
         );
       case _ParagraphBlock(:final text):
-        return SelectableText.rich(
+        return _buildRichText(
           TextSpan(
             style: style,
             children: _parseInline(text, style, colors),
           ),
+          strutStyle: strutStyle,
         );
     }
   }
@@ -165,6 +222,16 @@ class _ParagraphBlock extends _ContentBlock {
   final String text;
 }
 
+class _HeadingBlock extends _ContentBlock {
+  const _HeadingBlock({required this.level, required this.text});
+  final int level;
+  final String text;
+}
+
+class _DividerBlock extends _ContentBlock {
+  const _DividerBlock();
+}
+
 class _QuoteBlock extends _ContentBlock {
   const _QuoteBlock(this.text);
   final String text;
@@ -176,8 +243,11 @@ class _CodeBlock extends _ContentBlock {
   final String code;
 }
 
+final RegExp _dividerPattern = RegExp(r'^\s*(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$');
+final RegExp _headingPattern = RegExp(r'^(#{1,4})\s+(.+)$');
+
 List<_ContentBlock> _parseBlocks(String input) {
-  final lines = input.split('\n');
+  final lines = input.replaceAll('\r\n', '\n').split('\n');
   final blocks = <_ContentBlock>[];
   final paraBuffer = <String>[];
   final quoteBuffer = <String>[];
@@ -197,11 +267,12 @@ List<_ContentBlock> _parseBlocks(String input) {
   var i = 0;
   while (i < lines.length) {
     final line = lines[i];
-    if (line.trimLeft().startsWith('```')) {
+    final trimmedLeft = line.trimLeft();
+
+    if (trimmedLeft.startsWith('```')) {
       flushParagraph();
       flushQuote();
-      final fence = line.trimLeft();
-      final language = fence.substring(3).trim();
+      final language = trimmedLeft.substring(3).trim();
       final codeLines = <String>[];
       i += 1;
       while (i < lines.length && !lines[i].trimLeft().startsWith('```')) {
@@ -213,9 +284,38 @@ List<_ContentBlock> _parseBlocks(String input) {
       continue;
     }
 
-    if (line.trimLeft().startsWith('> ')) {
+    if (line.trim().isEmpty) {
       flushParagraph();
-      quoteBuffer.add(line.trimLeft().substring(2));
+      flushQuote();
+      i += 1;
+      continue;
+    }
+
+    if (_dividerPattern.hasMatch(line)) {
+      flushParagraph();
+      flushQuote();
+      blocks.add(const _DividerBlock());
+      i += 1;
+      continue;
+    }
+
+    final headingMatch = _headingPattern.firstMatch(trimmedLeft);
+    if (headingMatch != null) {
+      flushParagraph();
+      flushQuote();
+      blocks.add(
+        _HeadingBlock(
+          level: headingMatch.group(1)!.length,
+          text: headingMatch.group(2)!.trim(),
+        ),
+      );
+      i += 1;
+      continue;
+    }
+
+    if (trimmedLeft.startsWith('> ')) {
+      flushParagraph();
+      quoteBuffer.add(trimmedLeft.substring(2));
       i += 1;
       continue;
     }
@@ -250,7 +350,7 @@ List<InlineSpan> _parseInline(String text, TextStyle baseStyle, [PsyberColors? c
         TextSpan(
           text: ' ${token.substring(1, token.length - 1)} ',
           style: PsyberTheme.monoStyle.copyWith(
-            fontSize: (baseStyle.fontSize ?? 15) - 1.5,
+            fontSize: (baseStyle.fontSize ?? 15.5) - 1.5,
             backgroundColor: colors?.codeSurface ?? PsyberTheme.codeSurface,
             color: colors?.inkDeep ?? PsyberTheme.inkDeep,
           ),

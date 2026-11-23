@@ -254,6 +254,7 @@ class MessageBubbleRow extends StatefulWidget {
     required this.controller,
     required this.showRecallBar,
     required this.isLatestUserMessage,
+    this.isLatestAssistantMessage = false,
     required this.doorState,
   });
 
@@ -261,6 +262,7 @@ class MessageBubbleRow extends StatefulWidget {
   final AppController controller;
   final bool showRecallBar;
   final bool isLatestUserMessage;
+  final bool isLatestAssistantMessage;
   final DoorState doorState;
 
   @override
@@ -270,12 +272,26 @@ class MessageBubbleRow extends StatefulWidget {
 class _MessageBubbleRowState extends State<MessageBubbleRow> {
   bool _hovered = false;
   bool _armingDelete = false;
+  bool _copied = false;
   Timer? _deleteArmTimer;
+  Timer? _copiedTimer;
 
   @override
   void dispose() {
     _deleteArmTimer?.cancel();
+    _copiedTimer?.cancel();
     super.dispose();
+  }
+
+  void _handleCopy() {
+    final content = widget.item.content;
+    if (content.trim().isEmpty) return;
+    unawaited(Clipboard.setData(ClipboardData(text: content)));
+    _copiedTimer?.cancel();
+    setState(() => _copied = true);
+    _copiedTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => _copied = false);
+    });
   }
 
   void _onDeleteTap() {
@@ -689,6 +705,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                             if (hasText)
                               RichMessageText(
                                 text: item.content,
+                                selectable: MediaQuery.sizeOf(context).width >= 720,
                                 baseStyle: item.urgent
                                     ? PsyberTheme.editorialSerif.copyWith(
                                         fontSize: 15,
@@ -783,6 +800,7 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                 if (item.content.isNotEmpty)
                   RichMessageText(
                     text: item.content,
+                    selectable: MediaQuery.sizeOf(context).width >= 720,
                     baseStyle: (isUser && !item.isDoorNote && !item.urgent)
                         // 用户气泡用主题 userText（实心强调色上的反白字）
                         ? TextStyle(
@@ -790,16 +808,24 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                             height: 1.62,
                             color: colors.userText,
                           )
-                        // 纸卡片用固定色（浅纸配深字）；住户消息用主题墨色
-                        : PsyberTheme.editorialSerif.copyWith(
-                            fontSize: 15,
-                            height: 1.66,
-                            color: item.isDoorNote
-                                ? paperCardInk
-                                : isUrgentCard
-                                    ? urgentCardInk
-                                    : colors.inkDeep,
-                          ),
+                        // 纸卡片/紧急卡片/阅读主题保留衬线体；默认主题住户消息用清爽无衬线
+                        : (item.isDoorNote || isUrgentCard || colors.useReadingChrome)
+                            ? PsyberTheme.editorialSerif.copyWith(
+                                fontSize: 15.5,
+                                height: 1.74,
+                                letterSpacing: 0.2,
+                                color: item.isDoorNote
+                                    ? paperCardInk
+                                    : isUrgentCard
+                                        ? urgentCardInk
+                                        : colors.inkDeep,
+                              )
+                            : TextStyle(
+                                fontSize: 15.5,
+                                height: 1.72,
+                                letterSpacing: 0.15,
+                                color: colors.inkDeep,
+                              ),
                   ),
                 for (final share in item.shares)
                   ShareCard(
@@ -994,20 +1020,30 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
           onEnter: (_) => setState(() => _hovered = true),
           onExit: (_) => setState(() => _hovered = false),
           child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
             onSecondaryTapUp: (_) => _openContextActions(),
-            onLongPress: _openContextActions,
+            onLongPress: () {
+              if (MediaQuery.sizeOf(context).width < 720) {
+                unawaited(HapticFeedback.mediumImpact());
+              }
+              _openContextActions();
+            },
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Row(
-                mainAxisAlignment:
-                    isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (isUser) _buildHoverActionPill(isLeft: true),
-                  Flexible(
-                    child: ConstrainedBox(
+              padding: const EdgeInsets.only(top: 6, bottom: 2),
+              child: Align(
+                alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: Column(
+                  crossAxisAlignment:
+                      isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ConstrainedBox(
                       constraints: BoxConstraints(
-                        maxWidth: isUser ? 540 : 580,
+                        maxWidth: isUser
+                            ? 540
+                            : (item.isDoorNote
+                                ? 580
+                                : PsyberTheme.readingMaxWidth),
                       ),
                       child: ValueListenableBuilder<bool>(
                         valueListenable: widget.controller.isAppForegroundNotifier,
@@ -1025,9 +1061,9 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                         child: displayBody,
                       ),
                     ),
-                  ),
-                  if (!isUser) _buildHoverActionPill(isLeft: false),
-                ],
+                    _buildHoverActionPill(),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1036,84 +1072,133 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
     );
   }
 
-  Widget _buildHoverActionPill({required bool isLeft}) {
+  Widget _buildHoverActionPill() {
     final colors = context.colors;
     final item = widget.item;
+    final isDesktop = MediaQuery.sizeOf(context).width >= 720;
+
+    final hasText = item.content.trim().isNotEmpty;
+    final canEdit = widget.isLatestUserMessage &&
+        (!widget.doorState.isDoorNoteMode || item.isDoorNote);
+    final canReroll = item.isAssistant &&
+        item.kind == 'chat' &&
+        !widget.doorState.isDoorNoteMode &&
+        !widget.doorState.isReadOnly;
     final canRetract = item.isUser &&
         !item.retracted &&
         !widget.doorState.isReadOnly &&
         widget.controller.activeTurnNotifier.value == null;
     final canDelete = !widget.doorState.isReadOnly;
-    final visible = _hovered || _armingDelete;
+    final iconColor = colors.inkQuiet;
 
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 120),
-      opacity: visible ? 1.0 : 0.0,
-      child: Padding(
-        padding: EdgeInsets.only(
-          left: isLeft ? 0 : 4,
-          right: isLeft ? 4 : 0,
-          bottom: 2,
+    Widget buildActionIcon({
+      Key? key,
+      required IconData icon,
+      required String tooltip,
+      required VoidCallback onPressed,
+      Color? color,
+    }) {
+      return IconButton(
+        key: key,
+        icon: Icon(icon, size: 15, color: color ?? iconColor),
+        tooltip: tooltip,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 28, height: 24),
+        style: IconButton.styleFrom(
+          minimumSize: const Size(28, 24),
+          fixedSize: const Size(28, 24),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (canRetract)
-              IconButton(
-                key: Key('hover_retract_${item.id}'),
-                icon: Icon(
-                  PhosphorIconsLight.arrowUDownLeft,
-                  size: 15,
-                  color: colors.inkQuiet,
+        onPressed: onPressed,
+      );
+    }
+
+    Widget buildActionRow() {
+      return Padding(
+        padding: const EdgeInsets.only(top: 3),
+        child: SizedBox(
+          height: 24,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasText)
+                buildActionIcon(
+                  key: Key('hover_copy_${item.id}'),
+                  icon: _copied ? PhosphorIconsLight.check : PhosphorIconsLight.copy,
+                  tooltip: _copied ? '已复制' : '复制文字',
+                  color: _copied ? colors.statusSuccess : iconColor,
+                  onPressed: _handleCopy,
                 ),
-                tooltip: '撤回这一条（${widget.controller.identityNotifier.value.residentSubject}看不到内容）',
-                padding: const EdgeInsets.all(4),
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
-                onPressed: () => unawaited(_handleRetract()),
-              ),
-            if (canDelete)
-              InkWell(
-                key: Key('hover_delete_${item.id}'),
-                borderRadius: BorderRadius.circular(6),
-                onTap: _onDeleteTap,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 4),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (_armingDelete)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 3),
-                          child: Text(
-                            '再点删除',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: colors.dangerInk,
-                              fontWeight: FontWeight.w500,
+              if (canEdit)
+                buildActionIcon(
+                  key: Key('edit_msg_${item.id}'),
+                  icon: PhosphorIconsLight.pencilSimple,
+                  tooltip: '编辑并重发',
+                  onPressed: () => unawaited(_handleEdit()),
+                ),
+              if (canReroll)
+                buildActionIcon(
+                  key: Key('reroll_msg_${item.id}'),
+                  icon: PhosphorIconsLight.arrowClockwise,
+                  tooltip: '再说一次',
+                  onPressed: () => unawaited(_handleReroll()),
+                ),
+              if (canRetract)
+                buildActionIcon(
+                  key: Key('hover_retract_${item.id}'),
+                  icon: PhosphorIconsLight.arrowUDownLeft,
+                  tooltip:
+                      '撤回这一条（${widget.controller.identityNotifier.value.residentSubject}看不到内容）',
+                  onPressed: () => unawaited(_handleRetract()),
+                ),
+              if (canDelete)
+                InkWell(
+                  key: Key('hover_delete_${item.id}'),
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: _onDeleteTap,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_armingDelete)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 3),
+                            child: Text(
+                              '再点删除',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: colors.dangerInk,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ),
+                        Icon(
+                          PhosphorIconsLight.trash,
+                          size: 15,
+                          color: _armingDelete ? colors.dangerInk : iconColor,
                         ),
-                      Icon(
-                        PhosphorIconsLight.trash,
-                        size: 15,
-                        color: _armingDelete ? colors.dangerInk : colors.inkQuiet,
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            IconButton(
-              key: Key('msg_more_${item.id}'),
-              icon: Icon(PhosphorIconsLight.dotsThree, size: 17, color: colors.inkQuiet),
-              tooltip: '消息操作',
-              padding: const EdgeInsets.all(4),
-              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-              onPressed: _openContextActions,
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    }
+
+    final activeFeedback = _armingDelete || _copied;
+    if (isDesktop) {
+      return AnimatedOpacity(
+        duration: const Duration(milliseconds: 120),
+        opacity: (_hovered || activeFeedback) ? 1.0 : 0.0,
+        child: buildActionRow(),
+      );
+    }
+
+    // 移动端不显示行内操作栏，留足 16px 底部呼吸间距，长按呼出操作弹页
+    return const SizedBox(height: 16);
   }
 }
 
@@ -1151,7 +1236,7 @@ class StreamingAssistantBubble extends StatelessWidget {
         child: Align(
           alignment: Alignment.centerLeft,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 580),
+            constraints: const BoxConstraints(maxWidth: PsyberTheme.readingMaxWidth),
             child: MotionBubbleWrapper(
               motion: hasVisibleBody ? active.latestExpression?.motion : null,
               active: isForeground,
@@ -1205,11 +1290,19 @@ class StreamingAssistantBubble extends StatelessWidget {
                     if (active.text.isNotEmpty)
                       RichMessageText(
                         text: active.text,
-                        baseStyle: PsyberTheme.editorialSerif.copyWith(
-                          fontSize: 15,
-                          height: 1.66,
-                          color: colors.inkDeep,
-                        ),
+                        baseStyle: colors.useReadingChrome
+                            ? PsyberTheme.editorialSerif.copyWith(
+                                fontSize: 15.5,
+                                height: 1.74,
+                                letterSpacing: 0.2,
+                                color: colors.inkDeep,
+                              )
+                            : TextStyle(
+                                fontSize: 15.5,
+                                height: 1.72,
+                                letterSpacing: 0.15,
+                                color: colors.inkDeep,
+                              ),
                       )
                     else if (liveSticker == null && !hasJournal && screenTools.isEmpty)
                       Row(

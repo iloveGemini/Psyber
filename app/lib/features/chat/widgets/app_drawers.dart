@@ -179,67 +179,83 @@ class LeftArchivePanelContent extends StatelessWidget {
         Divider(height: 1, color: colors.hairline),
         Material(
           color: isSidebar ? Colors.transparent : colors.mineralCanvas,
-          child: SafeArea(
-            top: false,
-            left: false,
-            right: false,
-            bottom: !isSidebar,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                children: [
-                  IconButton(
-                    key: const Key('settings_button'),
-                    tooltip: '偏好与设置 (⌘,)',
-                    icon: Icon(
-                      PhosphorIconsLight.gearSix,
-                      size: 18,
-                      color: colors.inkQuiet,
-                    ),
-                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-                    padding: EdgeInsets.zero,
-                    onPressed: () {
-                      if (!isSidebar) {
-                        Navigator.of(context).pop();
-                      }
-                      onOpenSettings();
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              10,
+              6,
+              10,
+              isSidebar
+                  ? 6.0
+                  : (() {
+                      final bottomSafe = MediaQuery.paddingOf(context).bottom;
+                      return bottomSafe > 0
+                          ? math.max(bottomSafe - 16.0, 10.0)
+                          : 8.0;
+                    })(),
+            ),
+            child: Row(
+              children: [
+                IconButton(
+                  key: const Key('settings_button'),
+                  tooltip: '偏好与设置 (⌘,)',
+                  icon: Icon(
+                    PhosphorIconsLight.gearSix,
+                    size: 18,
+                    color: colors.inkQuiet,
+                  ),
+                  constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+                  style: IconButton.styleFrom(
+                    minimumSize: const Size(34, 34),
+                    fixedSize: const Size(34, 34),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  padding: EdgeInsets.zero,
+                  onPressed: () {
+                    if (!isSidebar) {
+                      Navigator.of(context).pop();
+                    }
+                    onOpenSettings();
+                  },
+                ),
+                const Spacer(),
+                KeyedSubtree(
+                  key: appearanceAnchorKey,
+                  child: ValueListenableBuilder<ThemeMode>(
+                    valueListenable: controller.themeModeNotifier,
+                    builder: (context, mode, _) {
+                      final icon = switch (mode) {
+                        ThemeMode.light => PhosphorIconsLight.sun,
+                        ThemeMode.dark => PhosphorIconsLight.moon,
+                        ThemeMode.system => PhosphorIconsLight.circleHalf,
+                      };
+                      return IconButton(
+                        key: const Key('quick_appearance_button'),
+                        tooltip: '外观与阅读色板',
+                        icon: Icon(icon, size: 18, color: colors.inkQuiet),
+                        constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+                        style: IconButton.styleFrom(
+                          minimumSize: const Size(34, 34),
+                          fixedSize: const Size(34, 34),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          if (!isSidebar) {
+                            Navigator.of(context).pop();
+                          }
+                          unawaited(
+                            showAppearancePopover(
+                              context,
+                              anchorKey: appearanceAnchorKey,
+                              controller: controller,
+                            ),
+                          );
+                        },
+                      );
                     },
                   ),
-                  const Spacer(),
-                  KeyedSubtree(
-                    key: appearanceAnchorKey,
-                    child: ValueListenableBuilder<ThemeMode>(
-                      valueListenable: controller.themeModeNotifier,
-                      builder: (context, mode, _) {
-                        final icon = switch (mode) {
-                          ThemeMode.light => PhosphorIconsLight.sun,
-                          ThemeMode.dark => PhosphorIconsLight.moon,
-                          ThemeMode.system => PhosphorIconsLight.circleHalf,
-                        };
-                        return IconButton(
-                          key: const Key('quick_appearance_button'),
-                          tooltip: '外观与阅读色板',
-                          icon: Icon(icon, size: 18, color: colors.inkQuiet),
-                          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-                          padding: EdgeInsets.zero,
-                          onPressed: () {
-                            if (!isSidebar) {
-                              Navigator.of(context).pop();
-                            }
-                            unawaited(
-                              showAppearancePopover(
-                                context,
-                                anchorKey: appearanceAnchorKey,
-                                controller: controller,
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
