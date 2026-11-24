@@ -48,6 +48,7 @@ import {
 import { syncStaticStickers } from "./expression/stickers.ts";
 import { registerBashTool } from "./extensions/bash.ts";
 import { registerFsTools } from "./extensions/fs_tools.ts";
+import { registerMemoryHistoryTool } from "./extensions/memory_history.ts";
 import { registerWebFetchTool } from "./extensions/web_fetch.ts";
 import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import { ModelCatalogService } from "./llm/catalog.ts";
@@ -236,6 +237,9 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   registerFsTools(registry, {
     dataDir,
     getConfig: () => config,
+  });
+  registerMemoryHistoryTool(registry, {
+    dataDir,
   });
   registerWebFetchTool(registry, {
     fetchImpl: opts.fetchImpl,

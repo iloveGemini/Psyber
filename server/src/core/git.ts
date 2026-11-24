@@ -183,3 +183,72 @@ export async function listChangedMemoryPathsSince(
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+/** 只读查询 memory/.git 提交历史（用于 memory_history 工具回溯记忆演变） */
+export async function readMemoryGitLog(
+  dataDir: string,
+  opts: { relPath?: string; limit?: number; since?: string } = {},
+): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
+  const memoryDir = path.join(dataDir, "memory");
+  const head = await getMemoryHeadCommit(dataDir);
+  if (!head) {
+    return { ok: true, stdout: "" };
+  }
+  const limit = Math.max(1, Math.min(50, Math.floor(opts.limit ?? 10)));
+  const args = [
+    "-c",
+    "core.quotepath=false",
+    "log",
+    "-n",
+    String(limit),
+    "--date=iso-strict",
+    "--stat",
+    "--format=commit %h | %ad | %s",
+  ];
+  if (opts.since) {
+    args.push(`--since=${opts.since}`);
+  }
+  if (opts.relPath) {
+    args.push("--", opts.relPath);
+  }
+  const res = await runGit(memoryDir, args);
+  if (res.code !== 0) {
+    return { ok: false, error: res.stderr.trim() || `git log failed (code=${res.code})` };
+  }
+  return { ok: true, stdout: res.stdout.trim() };
+}
+
+/** 只读查看 memory/.git 单次提交的变更详情（commit + diff） */
+export async function readMemoryGitShow(
+  dataDir: string,
+  commitRef: string,
+  opts: { relPath?: string } = {},
+): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
+  const memoryDir = path.join(dataDir, "memory");
+  const head = await getMemoryHeadCommit(dataDir);
+  if (!head) {
+    return { ok: false, error: "记忆仓目前还没有任何提交记录。" };
+  }
+  const verify = await runGit(memoryDir, ["cat-file", "-e", `${commitRef}^{commit}`]);
+  if (verify.code !== 0) {
+    return { ok: false, error: `未找到对应的记忆提交记录：${commitRef}` };
+  }
+  const args = [
+    "-c",
+    "core.quotepath=false",
+    "show",
+    "--date=iso-strict",
+    "--stat",
+    "--patch",
+    "--format=commit %h | %ad | %s",
+    commitRef,
+  ];
+  if (opts.relPath) {
+    args.push("--", opts.relPath);
+  }
+  const res = await runGit(memoryDir, args);
+  if (res.code !== 0) {
+    return { ok: false, error: res.stderr.trim() || `git show failed (code=${res.code})` };
+  }
+  return { ok: true, stdout: res.stdout.trim() };
+}
