@@ -94,6 +94,8 @@ function resolveToolCategory(tool: RegisteredTool): string {
   if (tool.tags.includes("drawer") || tool.tags.includes("share") || tool.tags.includes("retract")) {
     return "社交与私密";
   }
+  if (tool.tags.includes("system") || tool.tags.includes("bash")) return "本机与系统";
+  if (tool.tags.includes("web") || tool.tags.includes("network")) return "联网与浏览";
   return "其他工具";
 }
 

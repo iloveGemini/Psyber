@@ -51,6 +51,7 @@ export interface McpPreset {
   url?: string;
   headers?: Record<string, string>;
   trustLevel: McpTrustLevel;
+  autoAllowTools?: string[];
   secretKeys?: string[];
 }
 
@@ -77,13 +78,14 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "tavily",
     label: "Tavily 联网搜索",
-    description: "通过 Streamable HTTP 接入 Tavily 实时网页检索",
+    description: "通过 Streamable HTTP 接入 Tavily 实时网页检索（只读搜索默认免审批）",
     transport: "streamable_http",
     url: "https://mcp.tavily.com/mcp/",
     headers: {
       Authorization: "Bearer ${cred:tavily_api_key}",
     },
     trustLevel: "confirm",
+    autoAllowTools: ["tavily-search", "tavily-extract", "tavily_search", "tavily_extract"],
     secretKeys: ["tavily_api_key"],
   },
   {

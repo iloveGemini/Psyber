@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type { Hono } from "hono";
 import {
@@ -5,6 +6,7 @@ import {
   DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_RECALL_CONFIG,
   saveConfig,
+  type BashToolConfig,
   type CircadianConfig,
   type LlmConfig,
   type McpServerConfig,
@@ -15,6 +17,16 @@ import {
 } from "../core/config.ts";
 import { loadCredentials, saveCredentials, type StoredCredentials } from "../core/credentials.ts";
 import { MAX_MEDIA_UPLOAD_BYTES, MediaStore } from "../core/media.ts";
+import {
+  buildBashPolicy,
+  DEFAULT_BASH_MAX_OUTPUT_CHARS,
+  DEFAULT_BASH_TIMEOUT_MS,
+  expandHomePath,
+  findProtectedPathHit,
+  MAX_BASH_TIMEOUT_MS,
+  MIN_BASH_TIMEOUT_MS,
+  resolveRealPathSafe,
+} from "../extensions/bash.ts";
 import { MCP_PRESETS, validateMcpServers } from "../extensions/mcp.ts";
 import {
   buildPiAiChatClient,
@@ -133,6 +145,12 @@ function sanitizeSettings(
       ),
     },
     recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
+    bash: {
+      allowedDirs: cfg.bash?.allowedDirs ?? [],
+      timeoutMs: cfg.bash?.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
+      maxOutputChars: cfg.bash?.maxOutputChars ?? DEFAULT_BASH_MAX_OUTPUT_CHARS,
+      ...(deps.dataDir ? { workspaceDir: path.join(deps.dataDir, "workspace") } : {}),
+    },
     mcpServers,
     tools: deps.toolRegistry?.listAllTools() ?? [],
     disabledTools: cfg.disabledTools ?? [],
@@ -208,6 +226,87 @@ function validateNotificationsPatch(patch: Partial<NotificationsConfig>): string
     return "notifications.ntfy.serverUrl 必须为合法的 http:// 或 https:// 地址";
   }
   return null;
+}
+
+const MIN_BASH_MAX_OUTPUT_CHARS = 256;
+const MAX_BASH_MAX_OUTPUT_CHARS = 64_000;
+const MAX_BASH_ALLOWED_DIRS = 32;
+
+async function validateBashPatch(
+  patch: Partial<BashToolConfig>,
+  dataDir?: string,
+): Promise<{ ok: true; value: Partial<BashToolConfig> } | { ok: false; error: string }> {
+  const out: Partial<BashToolConfig> = {};
+  if (patch.timeoutMs !== undefined) {
+    if (
+      typeof patch.timeoutMs !== "number" ||
+      !Number.isFinite(patch.timeoutMs) ||
+      patch.timeoutMs < MIN_BASH_TIMEOUT_MS ||
+      patch.timeoutMs > MAX_BASH_TIMEOUT_MS
+    ) {
+      return {
+        ok: false,
+        error: `bash.timeoutMs 须为 ${MIN_BASH_TIMEOUT_MS}..${MAX_BASH_TIMEOUT_MS} 之间的数字`,
+      };
+    }
+    out.timeoutMs = Math.floor(patch.timeoutMs);
+  }
+  if (patch.maxOutputChars !== undefined) {
+    if (
+      typeof patch.maxOutputChars !== "number" ||
+      !Number.isFinite(patch.maxOutputChars) ||
+      patch.maxOutputChars < MIN_BASH_MAX_OUTPUT_CHARS ||
+      patch.maxOutputChars > MAX_BASH_MAX_OUTPUT_CHARS
+    ) {
+      return {
+        ok: false,
+        error: `bash.maxOutputChars 须为 ${MIN_BASH_MAX_OUTPUT_CHARS}..${MAX_BASH_MAX_OUTPUT_CHARS} 之间的数字`,
+      };
+    }
+    out.maxOutputChars = Math.floor(patch.maxOutputChars);
+  }
+  if (patch.allowedDirs !== undefined) {
+    if (!Array.isArray(patch.allowedDirs)) {
+      return { ok: false, error: "bash.allowedDirs 必须为字符串数组" };
+    }
+    if (patch.allowedDirs.length > MAX_BASH_ALLOWED_DIRS) {
+      return { ok: false, error: `bash.allowedDirs 最多配置 ${MAX_BASH_ALLOWED_DIRS} 个目录` };
+    }
+    const homeDir = await resolveRealPathSafe(os.homedir());
+    const policy = dataDir ? await buildBashPolicy(dataDir) : null;
+    const deduped: string[] = [];
+    const seenReal = new Set<string>();
+    for (const raw of patch.allowedDirs) {
+      if (typeof raw !== "string") {
+        return { ok: false, error: "bash.allowedDirs 元素必须为字符串" };
+      }
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      if (trimmed.includes("\0")) {
+        return { ok: false, error: "bash.allowedDirs 路径包含非法空字符" };
+      }
+      const expanded = expandHomePath(trimmed);
+      if (!path.isAbsolute(expanded)) {
+        return { ok: false, error: `bash.allowedDirs 须使用绝对路径或 ~/ 开头：${trimmed}` };
+      }
+      const realDir = await resolveRealPathSafe(expanded);
+      if (realDir === "/" || realDir === homeDir || (policy && realDir === policy.dataDir)) {
+        return { ok: false, error: `禁止将根目录、主目录或实例数据根目录加入免审目录：${trimmed}` };
+      }
+      if (policy) {
+        const hit = findProtectedPathHit(realDir, policy);
+        if (hit) {
+          return { ok: false, error: `禁止将受保护敏感路径（${path.basename(hit)}）加入免审目录：${trimmed}` };
+        }
+      }
+      if (!seenReal.has(realDir)) {
+        seenReal.add(realDir);
+        deduped.push(trimmed);
+      }
+    }
+    out.allowedDirs = deduped;
+  }
+  return { ok: true, value: out };
 }
 
 /** 注册配对、创世引导、媒体仓与脱敏设置子路由，避免 app.ts 单文件发散膨胀 */
@@ -561,6 +660,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         apiKeys?: Record<string, string>;
       };
       credentials?: Record<string, { apiKey?: string }>;
+      bash?: Partial<BashToolConfig>;
       mcpServers?: McpServerConfig[];
       mcpSecrets?: Record<string, string>;
       disabledTools?: string[];
@@ -584,6 +684,17 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (body.notifications && typeof body.notifications === "object") {
       const err = validateNotificationsPatch(body.notifications);
       if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
+    }
+    let validatedBash: Partial<BashToolConfig> | null = null;
+    if (body.bash !== undefined) {
+      if (!body.bash || typeof body.bash !== "object" || Array.isArray(body.bash)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "bash 配置必须为对象" } }, 400);
+      }
+      const checked = await validateBashPatch(body.bash, deps.dataDir);
+      if (!checked.ok) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: checked.error } }, 400);
+      }
+      validatedBash = checked.value;
     }
     let validatedMcpServers: McpServerConfig[] | null = null;
     if (body.mcpServers !== undefined) {
@@ -646,6 +757,14 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     }
     if (body.recall && typeof body.recall === "object") {
       cfg.recall = { ...(cfg.recall ?? DEFAULT_RECALL_CONFIG), ...body.recall };
+    }
+    if (validatedBash !== null) {
+      cfg.bash = {
+        ...(cfg.bash ?? {}),
+        ...(validatedBash.allowedDirs !== undefined ? { allowedDirs: validatedBash.allowedDirs } : {}),
+        ...(validatedBash.timeoutMs !== undefined ? { timeoutMs: validatedBash.timeoutMs } : {}),
+        ...(validatedBash.maxOutputChars !== undefined ? { maxOutputChars: validatedBash.maxOutputChars } : {}),
+      };
     }
     if (body.llm && typeof body.llm === "object") {
       const rawLevel = body.llm.thinking?.level;

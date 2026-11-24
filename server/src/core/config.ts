@@ -188,6 +188,16 @@ export interface McpServerConfig {
   timeoutMs?: number;
 }
 
+/** 内置 bash 工具安全边界配置（落盘于 <dataDir>/config.json 的 bash 节点） */
+export interface BashToolConfig {
+  /** 允许免审读/废纸篓删除的目录列表（支持 ~/ 展开；始终默认包含 <dataDir>/workspace） */
+  allowedDirs?: string[];
+  /** 单次命令执行超时（毫秒，默认 30_000，上限 120_000） */
+  timeoutMs?: number;
+  /** 命令输出最大字符数（默认 8000） */
+  maxOutputChars?: number;
+}
+
 /**
  * 单 Psyber 实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
@@ -235,6 +245,8 @@ export interface PsyberConfig {
   llm?: LlmConfig;
   /** 外部 MCP 服务器清单（Tier 3 工具池，敏感令牌经 ${cred:<key>} 引用 credentials.json） */
   mcpServers?: McpServerConfig[];
+  /** 内置 bash 工具安全边界配置（允许目录、超时与输出上限） */
+  bash?: BashToolConfig;
   /** 用户手动停用的非核心扩展工具名列表（Tier 1 元工具不可停用） */
   disabledTools?: string[];
   /** 是否已完成初生引导 */
@@ -401,6 +413,23 @@ export async function loadOrCreateConfig(
       : undefined,
     llm: cfg.llm,
     mcpServers: Array.isArray(cfg.mcpServers) ? cfg.mcpServers : [],
+    bash: cfg.bash
+      ? {
+          ...(Array.isArray(cfg.bash.allowedDirs)
+            ? {
+                allowedDirs: cfg.bash.allowedDirs.filter(
+                  (d): d is string => typeof d === "string" && d.trim().length > 0,
+                ),
+              }
+            : {}),
+          ...(typeof cfg.bash.timeoutMs === "number" && Number.isFinite(cfg.bash.timeoutMs)
+            ? { timeoutMs: cfg.bash.timeoutMs }
+            : {}),
+          ...(typeof cfg.bash.maxOutputChars === "number" && Number.isFinite(cfg.bash.maxOutputChars)
+            ? { maxOutputChars: cfg.bash.maxOutputChars }
+            : {}),
+        }
+      : undefined,
     disabledTools: Array.isArray(cfg.disabledTools)
       ? cfg.disabledTools.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
       : [],

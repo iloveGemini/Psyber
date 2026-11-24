@@ -46,6 +46,9 @@ import {
   type TidyTaskType,
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
+import { registerBashTool } from "./extensions/bash.ts";
+import { registerFsTools } from "./extensions/fs_tools.ts";
+import { registerWebFetchTool } from "./extensions/web_fetch.ts";
 import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import { ModelCatalogService } from "./llm/catalog.ts";
 import type { ChatModelClient } from "./llm/client.ts";
@@ -99,6 +102,8 @@ export interface BootOptions {
   mcpReconnectDelaysMs?: number[];
   /** 同步工具审批超时（毫秒，默认 120_000） */
   approvalTimeoutMs?: number;
+  /** 可注入 bash 内置 trash 废纸篓目录，供离线测试隔离避免触碰真实废纸篓 */ 
+  bashTrashDir?: string;
   /** 是否启动后台定时心跳（生产默认 true，单测可传 false 后手动调用 tickHeartbeat） */
   startHeartbeatTimer?: boolean;
   /** 启动发现昨夜因关机错过 bedtime 时是否自动在后台补跑（默认 true） */
@@ -222,6 +227,18 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     getConfig: () => config,
     saveConfig: (cfg) => saveConfig(dataDir, cfg),
     drawer,
+  });
+  registerBashTool(registry, {
+    dataDir,
+    getConfig: () => config,
+    trashDir: opts.bashTrashDir,
+  });
+  registerFsTools(registry, {
+    dataDir,
+    getConfig: () => config,
+  });
+  registerWebFetchTool(registry, {
+    fetchImpl: opts.fetchImpl,
   });
   registry.setDisabledTools(config.disabledTools ?? []);
 
