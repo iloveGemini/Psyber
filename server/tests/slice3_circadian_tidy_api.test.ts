@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createApp } from "../src/api/app.ts";
 import { PairingManager } from "../src/api/pairing.ts";
-import { runMemoryTidyTask } from "../src/engine/tidy.ts";
+import { computeColdTidyBudgetChars, runMemoryTidyTask } from "../src/engine/tidy.ts";
 import { evaluateHeartbeat, getSleepWindowStatus, renderCircadianState } from "../src/mood/circadian.ts";
 import { NotificationHub } from "../src/notifications/hub.ts";
 import { createTestContext, type TestContext } from "./helpers.ts";
@@ -32,8 +32,8 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(getSleepWindowStatus(t0015, tz)).toEqual({ inSleepWindow: true, nightDate: "2026-11-20" });
     expect(renderCircadianState(t2345, tz)).toBe("夜间静默窗");
 
-    // 23:45 未跑过 bedtime -> sleep_tidy
-    const d1 = evaluateHeartbeat({
+    // 23:45 距上次对话仅 1 分钟（仍在热聊中）-> idle，等待静默满 30 分钟再跑 bedtime
+    const dActive = evaluateHeartbeat({
       nowMs: t2345,
       timeZone: tz,
       doorState: "open",
@@ -44,21 +44,73 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
       unreadDoorNotesCount: 0,
       oldestUnreadDoorNoteMs: null,
     });
+    expect(dActive).toEqual({ action: "idle" });
+
+    // 23:45 未跑过 bedtime 且已静默 35 分钟 -> sleep_tidy
+    const d1 = evaluateHeartbeat({
+      nowMs: t2345,
+      timeZone: tz,
+      doorState: "open",
+      lastBedtimeNightDate: null,
+      lastInteractionMs: t2345 - 35 * 60_000,
+      lastWakeMs: null,
+      consecutiveUnansweredWakes: 0,
+      unreadDoorNotesCount: 0,
+      oldestUnreadDoorNoteMs: null,
+    });
     expect(d1).toEqual({ action: "sleep_tidy", nightDate: "2026-11-20" });
 
-    // 00:15 同一夜已跑过 -> idle，绝不重跑
+    // 00:15 同一夜已跑过（即便刚被用户叫醒聊过）-> idle，绝不重跑 bedtime
     const d2 = evaluateHeartbeat({
       nowMs: t0015,
       timeZone: tz,
       doorState: "open",
       lastBedtimeNightDate: "2026-11-20",
-      lastInteractionMs: t2345 - 60_000,
+      lastInteractionMs: t0015 - 5 * 60_000,
       lastWakeMs: null,
       consecutiveUnansweredWakes: 0,
       unreadDoorNotesCount: 0,
       oldestUnreadDoorNoteMs: null,
     });
     expect(d2).toEqual({ action: "idle" });
+
+    // 通宵聊穿 07:30 睡眠窗：07:34 聊完，08:05 静默满 30 分钟 -> 补跑昨夜 bedtime（不截断）
+    const t0805 = Date.UTC(2026, 10, 21, 0, 5, 0);
+    const t0734 = Date.UTC(2026, 10, 20, 23, 34, 0);
+    const dAllNighterQuiet = evaluateHeartbeat({
+      nowMs: t0805,
+      timeZone: tz,
+      doorState: "open",
+      lastBedtimeNightDate: "2026-11-19",
+      hasUnsettledPriorNight: true,
+      lastInteractionMs: t0734,
+      lastWakeMs: null,
+      consecutiveUnansweredWakes: 0,
+      unreadDoorNotesCount: 0,
+      oldestUnreadDoorNoteMs: null,
+    });
+    expect(dAllNighterQuiet).toEqual({ action: "sleep_tidy", nightDate: "2026-11-20" });
+
+    // 通宵持续连聊到 11:45（超过 sleepEnd 07:30 + 4h 硬上限）-> 强制按 sleepEnd 截断补跑昨夜 bedtime
+    const t1145 = Date.UTC(2026, 10, 21, 3, 45, 0);
+    const dAllNighterForce = evaluateHeartbeat({
+      nowMs: t1145,
+      timeZone: tz,
+      doorState: "open",
+      lastBedtimeNightDate: "2026-11-19",
+      hasUnsettledPriorNight: true,
+      lastInteractionMs: t1145 - 5 * 60_000,
+      lastWakeMs: null,
+      consecutiveUnansweredWakes: 0,
+      unreadDoorNotesCount: 0,
+      oldestUnreadDoorNoteMs: null,
+    });
+    expect(dAllNighterForce.action).toBe("sleep_tidy");
+    if (dAllNighterForce.action === "sleep_tidy") {
+      expect(dAllNighterForce.nightDate).toBe("2026-11-20");
+      expect(dAllNighterForce.cutoffBeforeSleepEnd).toBe(true);
+      expect(dAllNighterForce.sleepEndMs).toBe(Date.UTC(2026, 10, 20, 23, 30, 0));
+    }
 
     // 白天 14:00（06:00 UTC），连续未回 >= 2 时彻底静默
     const t1400 = Date.UTC(2026, 10, 21, 6, 0, 0);
@@ -313,6 +365,7 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
         memoryIndex: ctx.index,
         memoryTools: ctx.tools,
         chatModel: mockChat,
+        retryDelaysMs: [],
       },
       { taskType: "daily_wrapup" },
     );
@@ -376,7 +429,11 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(drainUserMsg.role === "user" && drainUserMsg.content).toContain("[2026-11-20 ");
 
     const bedtimeReq = mockChat.requests[mockChat.requests.length - 2];
-    const bedtimeUserMsg = bedtimeReq.messages[0];
+    // 单批排空后应同会话续接 Step 2（保持 systemPrompt 逐字节一致且 messages 包含 Step 1 原话与工具调用历史）
+    expect(bedtimeReq.systemPrompt).toBe(drainReq.systemPrompt);
+    expect(bedtimeReq.messages.length).toBeGreaterThan(1);
+    const bedtimeUserMsg = bedtimeReq.messages[bedtimeReq.messages.length - 1];
+    expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("<bedtime_phase>");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("日梗概目标：episodes/2026/11/20/index.md");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("今日已整理卡片摘要");
     expect(bedtimeUserMsg.role === "user" && bedtimeUserMsg.content).toContain("episodes/2026/11/20/ep-strawberry.md");
@@ -418,7 +475,8 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(warnRes.ok).toBe(true);
     const warnDrainMsg = mockChat.requests[mockChat.requests.length - 2].messages[0];
     expect(warnDrainMsg.role === "user" && warnDrainMsg.content).toContain("[附带了 1 张图片]");
-    const warnBedtimeMsg = mockChat.requests[mockChat.requests.length - 1].messages[0];
+    const warnBedtimeReq = mockChat.requests[mockChat.requests.length - 1];
+    const warnBedtimeMsg = warnBedtimeReq.messages[warnBedtimeReq.messages.length - 1];
     expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("/ 8000 字");
     expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("超过 6400 字软水位");
     expect(warnBedtimeMsg.role === "user" && warnBedtimeMsg.content).toContain("covered_until");
@@ -495,6 +553,152 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
     expect(emptyRes.ok).toBe(false);
     expect(emptyRes.error).toContain("EMPTY_OUTPUT");
     expect(ctx.events.getCursor("daily_wrapup")).toBe(cursorBeforeTrunc);
+  });
+
+  test("runMemoryTidyTask: 冷写预算随上下文动态计算、遇瞬时 503 原地重试保留已写卡、遇超窗自动折半切批", async () => {
+    ctx = await createTestContext();
+
+    // 1. 动态预算公式：min(contextWindow * 0.75, contextLimits.chat) * 0.6
+    expect(computeColdTidyBudgetChars({ contextWindow: 200_000 })).toBe(90_000);
+    expect(
+      computeColdTidyBudgetChars(
+        { contextWindow: 1_000_000 },
+        {
+          ...ctx.config,
+          llm: {
+            providers: {},
+            slots: {},
+            thinking: { enabled: false },
+            ...(ctx.config.llm ?? {}),
+            contextLimits: { chat: 80_000 },
+          },
+        },
+      ),
+    ).toBe(48_000);
+    expect(computeColdTidyBudgetChars({ contextWindow: 8_000 })).toBe(4_000);
+
+    // 2. 单步瞬时 503 重试：第 1 步写卡，第 2 步先 503 再成功 -> 保留第 1 步已写卡片并成功提交
+    ctx.events.append({
+      sessionId: "s-retry",
+      turnId: "t-retry",
+      role: "user",
+      kind: "chat",
+      content: "记录一条关于海獭的有趣对话",
+    });
+    const mockChat = new MockChatModel();
+    mockChat.queueStream(() => [
+      {
+        type: "tool_call",
+        id: "tc-retry-1",
+        name: "write",
+        args: {
+          path: "episodes/2026/11/20/ep-otter-retry.md",
+          content: "---\ntitle: 海獭重试\nkind: episode\n---\n海獭牵手睡觉。\n",
+        },
+      },
+    ]);
+    mockChat.queueStream(() => [
+      {
+        type: "error",
+        code: "PROVIDER_ERROR",
+        message: "Service unavailable: high demand",
+        retryable: true,
+      },
+    ]);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "重试后成功提交海獭卡"}' }]);
+
+    const retryRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: mockChat,
+        retryDelaysMs: [0, 0],
+      },
+      { taskType: "daily_wrapup" },
+    );
+    expect(retryRes.ok).toBe(true);
+    expect(retryRes.committed).toBe(true);
+    expect(retryRes.touchedMemoryPaths).toContain("episodes/2026/11/20/ep-otter-retry.md");
+    expect(ctx.index.getRow("episodes/2026/11/20/ep-otter-retry.md")).not.toBeNull();
+
+    // 3. 配额用尽（usage limit）绝不重试，立即失败回滚
+    ctx.events.append({
+      sessionId: "s-quota",
+      turnId: "t-quota",
+      role: "user",
+      kind: "chat",
+      content: "配额耗尽测试",
+    });
+    const quotaMock = new MockChatModel();
+    quotaMock.queueStream(() => [
+      {
+        type: "error",
+        code: "PROVIDER_ERROR",
+        message: "You've reached your usage limit for this model.",
+        retryable: true,
+      },
+    ]);
+    const quotaRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: quotaMock,
+        retryDelaysMs: [0, 0],
+      },
+      { taskType: "daily_wrapup" },
+    );
+    expect(quotaRes.ok).toBe(false);
+    expect(quotaMock.requests.length).toBe(1);
+
+    // 4. 冷写遇 CONTEXT_OVERFLOW 时自动折半重切批处理并全部排空
+    ctx.events.append({
+      sessionId: "s-ovf",
+      turnId: "t-ovf-1",
+      role: "user",
+      kind: "chat",
+      content: "甲".repeat(3_500),
+    });
+    ctx.events.append({
+      sessionId: "s-ovf",
+      turnId: "t-ovf-2",
+      role: "user",
+      kind: "chat",
+      content: "乙".repeat(3_500),
+    });
+    const ovfMock = new MockChatModel(20_000); // 20_000 * 0.75 * 0.6 = 9_000 字，首次会打包两条进同一批
+    ovfMock.queueStream(() => [
+      { type: "error", code: "CONTEXT_OVERFLOW", message: "prompt is too long", retryable: true },
+    ]);
+    ovfMock.queueStream(() => [{ type: "text_delta", delta: '{"summary": "折半第1批完成"}' }]);
+    ovfMock.queueStream(() => [{ type: "text_delta", delta: '{"summary": "折半第2批完成"}' }]);
+
+    const ovfRes = await runMemoryTidyTask(
+      {
+        db: ctx.db,
+        dataDir: ctx.dataDir,
+        promptsDir: PROMPTS_DIR,
+        clock: ctx.clock,
+        events: ctx.events,
+        memoryIndex: ctx.index,
+        memoryTools: ctx.tools,
+        chatModel: ovfMock,
+        retryDelaysMs: [0],
+      },
+      { taskType: "daily_wrapup" },
+    );
+    expect(ovfRes.ok).toBe(true);
+    expect(ovfRes.processedEvents).toBe(3); // 包含上面 quota 未消化的 1 条 + 本次 2 条
+    expect(ovfMock.requests.length).toBe(3);
   });
 
   test("API 端点闭环：/auth/pair 防伪造头爆破、/genesis BYOK 0600 落盘与防覆写、/media、/settings 校验脱敏与未回重置", async () => {

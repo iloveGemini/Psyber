@@ -252,16 +252,33 @@ export class MemoryTools {
       };
     }
 
-    let note = "";
+    const notes: string[] = [];
     if (
       parsed.kind === "state" &&
       parsed.status === "active" &&
       parsed.expiresAt !== null &&
       parsed.expiresAt <= nowMs
     ) {
-      note = "（提醒：该状态卡的 expires_at 已到期，如需延续请更新期限或清理）";
+      notes.push("提醒：该状态卡的 expires_at 已到期，如需延续请更新期限或清理");
     }
-    return { error: null, note };
+    const normTitle = parsed.title.trim().replace(/\s+/g, " ").toLowerCase();
+    const isFixedCoreOrIndex =
+      rel.startsWith("core/") || EPISODE_INDEX_PATH_RE.test(rel);
+    if (normTitle && !isFixedCoreOrIndex) {
+      const dup = this.index
+        .listAllRows()
+        .find(
+          (r) =>
+            r.path !== rel &&
+            r.title.trim().replace(/\s+/g, " ").toLowerCase() === normTitle,
+        );
+      if (dup) {
+        notes.push(
+          `提醒：已有同名标题卡片 ${dup.path}，建议给 title 加简短日期或区分词以保证 [[短标题]] 唯一`,
+        );
+      }
+    }
+    return { error: null, note: notes.length > 0 ? `（${notes.join("；")}）` : "" };
   }
 
   private async resolveWritableTarget(
@@ -386,15 +403,84 @@ export class MemoryTools {
     return { ok: true, output: fallbackNote + hits.join("\n") };
   }
 
+  /** 支持按 [[短标题]] 或纯标题解析到 memory/ 相对路径（先精确匹配，再唯一子串匹配） */
+  private resolveTitleToPath(
+    rawTitle: string,
+  ): { kind: "exact"; path: string } | { kind: "ambiguous"; candidates: Array<{ path: string; title: string }> } | { kind: "none" } {
+    const cleaned = rawTitle
+      .trim()
+      .replace(/^\[\[/, "")
+      .replace(/\]\]$/, "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+    if (!cleaned) return { kind: "none" };
+    const rows = this.index.listAllRows();
+
+    const exact = rows.filter(
+      (r) => r.title.trim().replace(/\s+/g, " ").toLowerCase() === cleaned,
+    );
+    if (exact.length === 1) return { kind: "exact", path: exact[0]!.path };
+    if (exact.length > 1) {
+      return {
+        kind: "ambiguous",
+        candidates: exact.slice(0, 5).map((r) => ({ path: r.path, title: r.title })),
+      };
+    }
+
+    const partial = rows.filter((r) =>
+      r.title.trim().replace(/\s+/g, " ").toLowerCase().includes(cleaned),
+    );
+    if (partial.length === 1) return { kind: "exact", path: partial[0]!.path };
+    if (partial.length > 1) {
+      return {
+        kind: "ambiguous",
+        candidates: partial.slice(0, 5).map((r) => ({ path: r.path, title: r.title })),
+      };
+    }
+    return { kind: "none" };
+  }
+
   async read(
     rawPath: string,
     opts: { offset?: number; limit?: number; countAccess?: boolean } = {},
   ): Promise<ToolResult> {
-    const norm = normalizeRelPath(rawPath);
-    if (!norm.ok) return { ok: false, output: norm.error };
-    if (!norm.rel) return { ok: false, output: "read 需要提供相对路径" };
+    const trimmedInput = rawPath.trim();
+    const isWikilink = /^\[\[.+\]\]$/.test(trimmedInput);
+    const norm = isWikilink ? null : normalizeRelPath(trimmedInput);
+    if (norm && !norm.ok) return { ok: false, output: norm.error };
 
-    const abs = path.join(this.memoryDir, norm.rel);
+    let resolvedRel = norm?.rel ?? "";
+    let resolvedViaTitle = false;
+
+    const tryResolveByTitle = (): ToolResult | null => {
+      const matched = this.resolveTitleToPath(trimmedInput);
+      if (matched.kind === "exact") {
+        resolvedRel = matched.path;
+        resolvedViaTitle = true;
+        return null;
+      }
+      if (matched.kind === "ambiguous") {
+        const list = matched.candidates.map((c) => `- [[${c.title}]] -> ${c.path}`).join("\n");
+        return {
+          ok: false,
+          output: `标题 "${trimmedInput}" 匹配到多张卡片，请改用更精确的标题或相对路径：\n${list}`,
+        };
+      }
+      return null;
+    };
+
+    if (isWikilink) {
+      const ambigErr = tryResolveByTitle();
+      if (ambigErr) return ambigErr;
+      if (!resolvedRel) {
+        return { ok: false, output: `未找到标题为 ${trimmedInput} 的记忆卡片` };
+      }
+    } else if (!resolvedRel) {
+      return { ok: false, output: "read 需要提供相对路径或 [[短标题]]" };
+    }
+
+    let abs = path.join(this.memoryDir, resolvedRel);
     if (!(await assertInsideMemoryRoot(this.memoryDir, abs))) {
       return { ok: false, output: `路径逃逸拦截: ${rawPath}` };
     }
@@ -403,28 +489,48 @@ export class MemoryTools {
     try {
       content = await fs.readFile(abs, "utf8");
     } catch {
-      const suggestions = this.index
-        .listAllRows()
-        .map((r) => r.path)
-        .filter((p) => p.includes(path.basename(norm.rel, ".md")) || p.startsWith(norm.rel.split("/")[0]))
-        .slice(0, 3);
-      const hint = suggestions.length > 0 ? `；相近文件：${suggestions.join(", ")}` : "";
-      return { ok: false, output: `文件不存在: ${norm.rel}${hint}` };
+      if (!isWikilink && !resolvedRel.includes("/")) {
+        const ambigErr = tryResolveByTitle();
+        if (ambigErr) return ambigErr;
+        if (resolvedViaTitle) {
+          abs = path.join(this.memoryDir, resolvedRel);
+          if (!(await assertInsideMemoryRoot(this.memoryDir, abs))) {
+            return { ok: false, output: `路径逃逸拦截: ${rawPath}` };
+          }
+          content = await fs.readFile(abs, "utf8");
+        } else {
+          const suggestions = this.index
+            .listAllRows()
+            .map((r) => r.path)
+            .filter((p) => p.includes(path.basename(resolvedRel, ".md")))
+            .slice(0, 3);
+          const hint = suggestions.length > 0 ? `；相近文件：${suggestions.join(", ")}` : "";
+          return { ok: false, output: `文件不存在: ${resolvedRel}${hint}` };
+        }
+      } else {
+        const suggestions = this.index
+          .listAllRows()
+          .map((r) => r.path)
+          .filter((p) => p.includes(path.basename(resolvedRel, ".md")) || p.startsWith(resolvedRel.split("/")[0]))
+          .slice(0, 3);
+        const hint = suggestions.length > 0 ? `；相近文件：${suggestions.join(", ")}` : "";
+        return { ok: false, output: `文件不存在: ${resolvedRel}${hint}` };
+      }
     }
 
     const offset = Math.max(0, opts.offset ?? 0);
     const limit = Math.max(1, opts.limit ?? 8000);
     const slice = content.slice(offset, offset + limit);
 
-    const row = this.index.getRow(norm.rel);
-    let prefix = "";
+    const row = this.index.getRow(resolvedRel);
+    let prefix = resolvedViaTitle ? `[路径: ${resolvedRel}]\n` : "";
     if (row) {
       const st = effectiveStatus(row, this.clock.now());
       if (st === "faded") {
-        prefix = "[索引状态: faded（已过短期 TTL）]\n";
+        prefix += "[索引状态: faded（已过短期 TTL）]\n";
       }
       if (opts.countAccess && offset === 0) {
-        this.index.incrementAccess(norm.rel);
+        this.index.incrementAccess(resolvedRel);
       }
     }
 

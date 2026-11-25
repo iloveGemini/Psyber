@@ -268,6 +268,14 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
     expect(desktopSent).toHaveLength(1);
     unsubscribe();
 
+    // 3b. 23:40 进入睡眠窗且距 22:00 已静默 > 30m -> 完成 11-21 bedtime 日结
+    clock.jumpToWallClock(2026, 11, 21, 23, 40, 0);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "整理 11-21 主动唤醒记录"}' }]);
+    mockChat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "11-21 日梗概"}' }]);
+    const bedtime1121 = await runtime.tickHeartbeat();
+    expect(bedtime1121).toEqual({ action: "sleep_tidy", nightDate: "2026-11-21" });
+    await runtime.waitForIdle();
+
     // 4. 次日 10:00（距上次唤醒 > 3h），因连续未回真正开口已达 2 次 -> 退避静默
     clock.jumpToWallClock(2026, 11, 22, 10, 0, 0);
     const suppressed = await runtime.tickHeartbeat();

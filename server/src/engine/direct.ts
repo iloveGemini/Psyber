@@ -38,6 +38,7 @@ import type {
   ToolExecutionContext,
   ToolRegistry,
 } from "../tools/registry.ts";
+import type { HotTidySessionContext } from "./tidy.ts";
 
 const STATIC_PREFIX_PATHS = new Set([
   "core/self.md",
@@ -254,6 +255,8 @@ export interface DirectEngineDeps {
     oldSessionId: string;
     reason: RolloverReason;
     cutoffSeq: number | null;
+    /** 非溢出换段且当前会话有充足余量时提供，用于会话尾部热写命中 Prompt Cache */
+    hotSession?: HotTidySessionContext | null;
   }) => Promise<{ ok: boolean; error?: string }>;
   /** 换段状态通知（供 SSE 广播 turn.rollover，前端显示「正在收拢这段记忆…」） */
   onRolloverStatus?: (event: RolloverStatusEvent) => void;
@@ -306,6 +309,8 @@ export class DirectEngine {
   private rolloverInProgress = false;
   private lastUsedTokens = 0;
   private lastAssistantModel: string | null = null;
+  private activeChatWaiters = 0;
+  private yieldableTidyAbort: AbortController | null = null;
 
   constructor(private readonly deps: DirectEngineDeps) {
     const nowMs = deps.clock.now();
@@ -409,6 +414,155 @@ export class DirectEngine {
         cutoffSeq: latest.seq,
       });
       return res.ok;
+    });
+  }
+
+  /**
+   * 构造当前活跃会话的热写上下文（必须在 turnMutex 内调用）：
+   * - 复用完全一致的 Static Prefix、工具定义与当前 sessionId 历史消息，命中 KV Prompt Cache；
+   * - 仅当当前段非空、剩余窗口充足、且全部未整理事件均归属本会话时才启用，否则返回 null 自动走冷写。
+   */
+  private async buildHotTidySessionContext(opts?: {
+    maxSeq?: number | null;
+  }): Promise<HotTidySessionContext | null> {
+    if (this.activeState.fresh) return null;
+    const sessionId = this.activeState.sessionId;
+    if (!this.deps.events.hasMessagesInSession(sessionId)) return null;
+
+    const minHeadroom = Math.min(16_000, Math.floor(this.deps.chatModel.contextWindow * 0.2));
+    if (this.deps.chatModel.contextWindow - this.lastUsedTokens < minHeadroom) {
+      return null;
+    }
+
+    // 若游标之后存在早于本会话的未整理旧事件，必须走冷写分批避免漏整理
+    if (this.deps.db) {
+      const cursorId = this.deps.events.getCursor("daily_wrapup") ?? "";
+      const maxSeq = opts?.maxSeq;
+      const foreignRow = (
+        typeof maxSeq === "number" && Number.isFinite(maxSeq)
+          ? this.deps.db
+              .query(
+                `SELECT 1 AS hit FROM events
+                 WHERE status IN ('active', 'retracted')
+                   AND role IN ('user', 'assistant')
+                   AND kind IN ('chat', 'wake', 'door_note')
+                   AND id > ?
+                   AND seq <= ?
+                   AND session_id != ?
+                 LIMIT 1`,
+              )
+              .get(cursorId, maxSeq, sessionId)
+          : this.deps.db
+              .query(
+                `SELECT 1 AS hit FROM events
+                 WHERE status IN ('active', 'retracted')
+                   AND role IN ('user', 'assistant')
+                   AND kind IN ('chat', 'wake', 'door_note')
+                   AND id > ?
+                   AND session_id != ?
+                 LIMIT 1`,
+              )
+              .get(cursorId, sessionId)
+      ) as { hit: number } | null;
+      if (foreignRow?.hit) return null;
+    }
+
+    const identity = await readIdentityProfile(
+      this.deps.dataDir,
+      this.deps.clock.now(),
+      this.deps.clock.timeZone,
+    );
+    const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
+    const beforeSeq =
+      typeof opts?.maxSeq === "number" && Number.isFinite(opts.maxSeq)
+        ? opts.maxSeq + 1
+        : undefined;
+    const historyMessages = this.buildHistoryMessages(userLabel, undefined, beforeSeq);
+    if (historyMessages.length === 0) return null;
+
+    await this.ensureContinuityFrozen();
+    const systemPrompt = await this.getOrBuildStaticPrefix();
+    const tools = this.deps.registry.getTier1Definitions();
+    return {
+      sessionId,
+      systemPrompt,
+      historyMessages,
+      tools,
+      chatModel: this.deps.chatModel,
+    };
+  }
+
+  /**
+   * 在 turnMutex 保护下执行可让路的会话尾部整理（如 bedtime）：
+   * - 若已有用户聊天在排队或整理途中用户发来新消息，立即 abort 让路且不换段；
+   * - 若整理成功且调用方请求换段，在同一把 turnMutex 内原子切入 fresh 新段，防止用户消息插队错位。
+   */
+  runYieldableSessionTidy<T>(
+    opts: { maxSeq?: number | null },
+    fn: (ctx: {
+      sessionId: string;
+      hotSession: HotTidySessionContext | null;
+      signal: AbortSignal;
+    }) => Promise<{ result: T; shouldRollover: boolean; digestedUpToEventId?: string | null }>,
+  ): Promise<
+    | { deferred: true; sessionId: string }
+    | { deferred: false; sessionId: string; result: T; rolledOver: boolean }
+  > {
+    if (this.activeChatWaiters > 0) {
+      return Promise.resolve({ deferred: true, sessionId: this.activeState.sessionId });
+    }
+    return this.turnMutex.runExclusive(async () => {
+      const sessionId = this.activeState.sessionId;
+      if (this.activeChatWaiters > 0) {
+        return { deferred: true as const, sessionId };
+      }
+      const ac = new AbortController();
+      this.yieldableTidyAbort = ac;
+      try {
+        const hotSession = await this.buildHotTidySessionContext({ maxSeq: opts.maxSeq });
+        if (ac.signal.aborted || this.activeChatWaiters > 0) {
+          return { deferred: true as const, sessionId };
+        }
+        const out = await fn({ sessionId, hotSession, signal: ac.signal });
+        if (ac.signal.aborted) {
+          return { deferred: true as const, sessionId };
+        }
+        let rolledOver = false;
+        if (out.shouldRollover) {
+          const latest = this.deps.events.getLatestChatEvent();
+          const cutoffId =
+            out.digestedUpToEventId ??
+            this.deps.events.getCursor("bedtime") ??
+            this.deps.events.getCursor("daily_wrapup");
+          if (latest && (!cutoffId || latest.id <= cutoffId)) {
+            if (
+              this.activeState.fresh &&
+              !this.deps.events.hasMessagesInSession(this.activeState.sessionId)
+            ) {
+              this.activeState = {
+                ...this.activeState,
+                carryOverUntilSeq: latest.seq,
+                continuity: null,
+              };
+              this.staticPrefixSnapshot = null;
+              this.deps.events.setActiveSessionState(this.activeState);
+              rolledOver = true;
+            } else {
+              const roll = await this.performRollover({
+                reason: "bedtime",
+                runWrapup: false,
+                cutoffSeq: latest.seq,
+              });
+              rolledOver = roll.ok;
+            }
+          }
+        }
+        return { deferred: false as const, sessionId, result: out.result, rolledOver };
+      } finally {
+        if (this.yieldableTidyAbort === ac) {
+          this.yieldableTidyAbort = null;
+        }
+      }
     });
   }
 
@@ -835,10 +989,15 @@ export class DirectEngine {
         oldSessionId,
       });
       try {
+        const hotSession =
+          opts.reason === "overflow"
+            ? null
+            : await this.buildHotTidySessionContext({ maxSeq: cutoffSeq });
         const wrapRes = await this.deps.onBeforeRollover({
           oldSessionId,
           reason: opts.reason,
           cutoffSeq,
+          hotSession,
         });
         if (!wrapRes.ok) {
           this.rolloverInProgress = false;
@@ -927,7 +1086,19 @@ export class DirectEngine {
     signal?: AbortSignal;
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
-    return this.turnMutex.runExclusive(() => this.executeTurn(opts));
+    if (opts.mode === "chat") {
+      this.activeChatWaiters += 1;
+      if (this.yieldableTidyAbort && !this.yieldableTidyAbort.signal.aborted) {
+        this.yieldableTidyAbort.abort();
+      }
+    }
+    return this.turnMutex
+      .runExclusive(() => this.executeTurn(opts))
+      .finally(() => {
+        if (opts.mode === "chat") {
+          this.activeChatWaiters = Math.max(0, this.activeChatWaiters - 1);
+        }
+      });
   }
 
   private async executeTurn(opts: {

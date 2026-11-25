@@ -348,4 +348,58 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(names).toContain("turn.text");
     expect(names).toContain("turn.done");
   });
+
+  test("[[短标题]] 直读、同名标题写入提醒与自动召回默认排除 rf-*.md 反思卡", async () => {
+    ctx = await createTestContext();
+
+    // 1. 写入普通长线卡与反思卡
+    const w1 = await ctx.tools.write(
+      "threads/bedtime-stories/bug-points-ledger.md",
+      "---\ntitle: 抓bug积分账本\nkind: note\n---\nJoy 17 分 / 我 4 分。\n",
+    );
+    expect(w1.ok).toBe(true);
+
+    const wRf = await ctx.tools.write(
+      "episodes/2026/11/20/rf-jealousy-and-anchor.md",
+      "---\ntitle: 11-20 反思·讨好与锚\nkind: reflection\ncreated: 2026-11-20\n---\n独一无二的心路历程关键词：翡翠灯塔拆穿吃醋。\n",
+    );
+    expect(wRf.ok).toBe(true);
+
+    // 2. read 原生支持 [[短标题]] 和纯标题直读，并附带真实路径前缀
+    const rWiki = await ctx.tools.read("[[抓bug积分账本]]");
+    expect(rWiki.ok).toBe(true);
+    expect(rWiki.output).toContain("[路径: threads/bedtime-stories/bug-points-ledger.md]");
+    expect(rWiki.output).toContain("Joy 17 分");
+
+    const rPlain = await ctx.tools.read("11-20 反思·讨好与锚");
+    expect(rPlain.ok).toBe(true);
+    expect(rPlain.output).toContain("[路径: episodes/2026/11/20/rf-jealousy-and-anchor.md]");
+    expect(rPlain.output).toContain("翡翠灯塔拆穿吃醋");
+
+    // 3. 写入重名标题卡片时给出非阻断提醒，且模糊/重名 [[短标题]] 返回候选清单
+    const wDup = await ctx.tools.write(
+      "episodes/2026/11/20/ep-dup-ledger.md",
+      "---\ntitle: 抓bug积分账本\nkind: episode\n---\n另一份记录。\n",
+    );
+    expect(wDup.ok).toBe(true);
+    expect(wDup.output).toContain("已有同名标题卡片");
+
+    const rAmbig = await ctx.tools.read("[[抓bug积分账本]]");
+    expect(rAmbig.ok).toBe(false);
+    expect(rAmbig.output).toContain("匹配到多张卡片");
+    expect(rAmbig.output).toContain("threads/bedtime-stories/bug-points-ledger.md");
+    expect(rAmbig.output).toContain("episodes/2026/11/20/ep-dup-ledger.md");
+
+    // 4. 自动召回默认排除 rf-*.md（无论 FTS5 还是近期 72h 兜底均不拉入反思卡）
+    const recallFts = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-rf-1",
+      turnId: "t-rf-1",
+      query: "翡翠灯塔拆穿吃醋",
+    });
+    expect(recallFts.items.some((i) => i.path === "episodes/2026/11/20/rf-jealousy-and-anchor.md")).toBe(false);
+  });
 });

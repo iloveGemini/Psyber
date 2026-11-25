@@ -49,7 +49,7 @@ export const MEMORY_5_TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: "read",
-    description: "精读某篇记忆卡片正文",
+    description: "精读某篇记忆卡片正文（支持相对路径或 [[短标题]]）",
     parameters: {
       type: "object",
       properties: {
@@ -315,7 +315,7 @@ export function registerCoreTier1Tools(
     name: "read",
     tier: 1,
     security: "auto",
-    description: "精读某篇记忆卡片正文",
+    description: "精读某篇记忆卡片正文（支持相对路径或 [[短标题]]）",
     tags: ["memory", "read"],
     parameters: {
       type: "object",

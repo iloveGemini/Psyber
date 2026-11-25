@@ -615,4 +615,215 @@ describe("同步换段、sessionId 持久化、<continuity> 金字塔与安全�
     expect(req.systemPrompt).toContain("最后一句简短收尾");
     expect(req.systemPrompt).not.toContain("最早的一段超长旧话_");
   });
+
+  test("会话尾部热写整理：复用逐字节一致的 Static Prefix 与工具集命中缓存、不污染 events、广播 turn.tidy，热写超容自动降级冷写", async () => {
+    const dataDir = await makeTempDir();
+    const clock = new VirtualClock(0, "Asia/Shanghai");
+    clock.jumpToWallClock(2026, 11, 23, 15, 0, 0);
+
+    const chat = new MockChatModel(50_000);
+    const rt = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chat,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rt);
+
+    const tidyFrames: SseFrame[] = [];
+    const unsub = rt.sse.subscribe((f) => {
+      if (f.event === "turn.tidy") tidyFrames.push(f);
+    });
+
+    const sess1 = rt.engine.getActiveSessionId();
+    const u1 = rt.events.append({
+      sessionId: sess1,
+      role: "user",
+      kind: "chat",
+      content: "今天试做了一锅番茄牛腩，超香！",
+    });
+    chat.queueStream(() => [
+      { type: "text_delta", delta: "听起来就很有食欲，牛腩炖烂了吗？" },
+      { type: "usage", inputTokens: 800, outputTokens: 100, totalTokens: 900 },
+    ]);
+    await rt.engine.runTurn({
+      mode: "chat",
+      userText: u1.event.content,
+      userEventId: u1.event.id,
+    });
+    const chatReq = chat.requests[0]!;
+
+    // 1. 手动存记忆换段：走会话尾部热写
+    chat.queueStream(() => [
+      {
+        type: "tool_call",
+        id: "hot-w1",
+        name: "write",
+        args: {
+          path: "episodes/2026/11/23/ep-beef-stew.md",
+          content: "---\ntitle: 番茄牛腩\nkind: episode\ncreated: 2026-11-23\n---\n做了番茄牛腩。\n",
+        },
+      },
+    ]);
+    chat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "记下番茄牛腩"}' }]);
+
+    const roll = await rt.engine.manualRollover();
+    expect(roll.ok).toBe(true);
+    expect(rt.engine.getActiveSessionId()).not.toBe(sess1);
+
+    const hotReq = chat.requests[1]!;
+    // 精确前缀一致（KV Cache 命中关键前提）
+    expect(hotReq.systemPrompt).toBe(chatReq.systemPrompt);
+    expect(hotReq.tools.map((t) => t.name)).toEqual(chatReq.tools.map((t) => t.name));
+    expect(hotReq.messages.length).toBe(3); // user + assistant + <tidy_mode>
+    expect(String(hotReq.messages[2]!.content)).toContain("<tidy_mode");
+    // <tidy_mode> 绝不落盘进 events 聊天表
+    const allEvs = rt.events.listSessionMessages(sess1);
+    expect(allEvs.some((e) => e.content.includes("<tidy_mode"))).toBe(false);
+    // SSE 收到 turn.tidy started -> done（mode=hot）
+    expect(tidyFrames.some((f) => f.data.phase === "started" && f.data.mode === "hot")).toBe(true);
+    expect(tidyFrames.some((f) => f.data.phase === "done" && f.data.mode === "hot")).toBe(true);
+
+    // 2. 新段再聊一句后热写遭遇 CONTEXT_OVERFLOW -> 自动降级冷写成功并广播 mode=cold
+    const sess2 = rt.engine.getActiveSessionId();
+    const u2 = rt.events.append({
+      sessionId: sess2,
+      role: "user",
+      kind: "chat",
+      content: "明天准备再熬点排骨汤",
+    });
+    chat.queueStream(() => [
+      { type: "text_delta", delta: "好主意，加点玉米和胡萝卜。" },
+      { type: "usage", inputTokens: 800, outputTokens: 100, totalTokens: 900 },
+    ]);
+    await rt.engine.runTurn({
+      mode: "chat",
+      userText: u2.event.content,
+      userEventId: u2.event.id,
+    });
+
+    // 热写报 CONTEXT_OVERFLOW -> 自动回落冷写成功
+    chat.queueStream(() => [
+      { type: "error", code: "CONTEXT_OVERFLOW", message: "too long for hot tail", retryable: true },
+    ]);
+    chat.queueStream(() => [{ type: "text_delta", delta: '{"summary": "冷写兜底完成"}' }]);
+
+    const roll2 = await rt.engine.manualRollover();
+    expect(roll2.ok).toBe(true);
+    expect(rt.engine.getActiveSessionId()).not.toBe(sess2);
+    expect(tidyFrames.some((f) => f.data.phase === "done" && f.data.mode === "cold")).toBe(true);
+
+    unsub();
+  });
+
+  test("bedtime 热写期间用户发来新消息：立即 abort 让路回滚、广播 turn.tidy deferred、不换段且用户对话正常完成", async () => {
+    const dataDir = await makeTempDir();
+    const clock = new VirtualClock(0, "Asia/Shanghai");
+    clock.jumpToWallClock(2026, 11, 23, 21, 0, 0);
+
+    let tidyStartedResolve: (() => void) | null = null;
+    const tidyStarted = new Promise<void>((r) => {
+      tidyStartedResolve = r;
+    });
+
+    // 自定义可观察 signal 中止的 MockChatModel
+    let callIdx = 0;
+    const abortableModel = {
+      contextWindow: 50_000,
+      modelId: "mock-abortable",
+      async *stream(req: { signal?: AbortSignal }) {
+        const idx = callIdx++;
+        if (idx === 0) {
+          // 正常第一轮对话
+          yield { type: "text_delta" as const, delta: "晚上好呀！" };
+          yield { type: "usage" as const, inputTokens: 500, outputTokens: 50, totalTokens: 550 };
+          return;
+        }
+        if (idx === 1) {
+          // bedtime 热写：先写一张临时卡，然后阻塞等待被用户新消息 abort
+          yield {
+            type: "tool_call" as const,
+            id: "tc-defer-1",
+            name: "write",
+            args: {
+              path: "episodes/2026/11/23/ep-should-rollback.md",
+              content: "---\ntitle: 未完成卡片\n---\n应被回滚。\n",
+            },
+          };
+          return;
+        }
+        if (idx === 2) {
+          // 第二步挂起直到 signal.aborted
+          tidyStartedResolve?.();
+          await new Promise<void>((resolve) => {
+            if (req.signal?.aborted) {
+              resolve();
+              return;
+            }
+            req.signal?.addEventListener("abort", () => resolve(), { once: true });
+            setTimeout(resolve, 2000);
+          });
+          yield { type: "text_delta" as const, delta: '{"summary": "不应提交"}' };
+          return;
+        }
+        // 用户插话的新一轮对话
+        yield { type: "text_delta" as const, delta: "我还没睡呢，接着聊！" };
+      },
+    };
+
+    const rt = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: abortableModel,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rt);
+
+    const tidyFrames: SseFrame[] = [];
+    const unsub = rt.sse.subscribe((f) => {
+      if (f.event === "turn.tidy") tidyFrames.push(f);
+    });
+
+    const sess1 = rt.engine.getActiveSessionId();
+    const u1 = rt.events.append({
+      sessionId: sess1,
+      role: "user",
+      kind: "chat",
+      content: "晚上好",
+    });
+    await rt.engine.runTurn({
+      mode: "chat",
+      userText: u1.event.content,
+      userEventId: u1.event.id,
+    });
+
+    // 23:40 静默超 30m 触发 bedtime 热写
+    clock.jumpToWallClock(2026, 11, 23, 23, 40, 0);
+    const hb = await rt.tickHeartbeat();
+    expect(hb).toEqual({ action: "sleep_tidy", nightDate: "2026-11-23" });
+
+    // 等到 bedtime 整理进入第二步后，用户突然发来新消息
+    await tidyStarted;
+    const u2 = rt.events.append({
+      sessionId: sess1,
+      role: "user",
+      kind: "chat",
+      content: "等等我还没睡！",
+    });
+    const chatRes = await rt.engine.runTurn({
+      mode: "chat",
+      userText: u2.event.content,
+      userEventId: u2.event.id,
+    });
+    await rt.waitForIdle();
+
+    expect(chatRes.text).toBe("我还没睡呢，接着聊！");
+    // 整理让路回滚：不换段、不记 bedtime 完成、临时卡片已回滚、广播 turn.tidy deferred
+    expect(rt.engine.getActiveSessionId()).toBe(sess1);
+    expect(rt.events.getBedtimeNightDate()).toBeNull();
+    expect(rt.memoryIndex.getRow("episodes/2026/11/23/ep-should-rollback.md")).toBeNull();
+    expect(tidyFrames.some((f) => f.data.phase === "deferred")).toBe(true);
+
+    unsub();
+  });
 });

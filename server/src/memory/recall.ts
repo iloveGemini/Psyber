@@ -171,7 +171,8 @@ export async function recallMemories(opts: {
         r.space === "self" ||
         r.space === "user" ||
         r.space === "core" ||
-        r.space === "episode_index"
+        r.space === "episode_index" ||
+        r.kind === "reflection"
       ) {
         return false;
       }
@@ -294,7 +295,7 @@ export async function recallMemories(opts: {
       if (added >= 5) break;
       if (selectedPaths.has(hit.path) || recentPaths.has(hit.path)) continue;
       const row = index.getRow(hit.path);
-      if (!row) continue;
+      if (!row || row.kind === "reflection") continue;
       const kwScore = Math.min(1, Math.max(0.1, -hit.rank / (-hit.rank + 1.2)));
       selected.push({
         row,

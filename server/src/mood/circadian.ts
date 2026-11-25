@@ -1,4 +1,4 @@
-import { addCalendarDays, localDay } from "../core/clock.ts";
+import { addCalendarDays, localDateStartMs, localDay } from "../core/clock.ts";
 import {
   DEFAULT_CIRCADIAN_CONFIG,
   type CircadianConfig,
@@ -7,7 +7,14 @@ import {
 
 export type HeartbeatDecision =
   | { action: "idle" }
-  | { action: "sleep_tidy"; nightDate: string }
+  | {
+      action: "sleep_tidy";
+      nightDate: string;
+      /** 通宵持续聊天超过硬上限时置为 true，调用方应截断到 sleepEnd 之前的消息，把白天新消息留给今天 */
+      cutoffBeforeSleepEnd?: boolean;
+      /** cutoffBeforeSleepEnd 为 true 时对应的睡眠窗结束时间戳（Unix 毫秒） */
+      sleepEndMs?: number;
+    }
   | { action: "proactive"; reason: string };
 
 export interface HeartbeatSnapshot {
@@ -17,6 +24,8 @@ export interface HeartbeatSnapshot {
   doorState: DoorState;
   /** 上次完成 bedtime 睡前整理对应的夜晚日期（YYYY-MM-DD） */
   lastBedtimeNightDate: string | null;
+  /** 是否存在尚未完成日结的前一夜对话/卡片（用于通宵聊穿睡眠窗后的白天补跑） */
+  hasUnsettledPriorNight?: boolean;
   /** 上次任意有效对话/唤醒时间戳（Unix 毫秒） */
   lastInteractionMs: number | null;
   /** 上次主动唤醒时间戳（Unix 毫秒） */
@@ -31,7 +40,7 @@ export interface HeartbeatSnapshot {
   userUndisturbed?: boolean;
 }
 
-function parseHhMm(hhmm: string, fallbackMin: number): number {
+export function parseHhMm(hhmm: string, fallbackMin: number): number {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
   if (!m) return fallbackMin;
   const h = Number(m[1]);
@@ -50,6 +59,31 @@ function getLocalMinutesOfDay(epochMs: number, timeZone: string): number {
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   return h * 60 + m;
+}
+
+/** 计算某自然日（YYYY-MM-DD）指定 HH:mm 在目标时区对应的 Unix 毫秒数 */
+export function localWallClockMs(dayStr: string, hhmm: string, fallbackMin: number, timeZone: string): number {
+  const mins = parseHhMm(hhmm, fallbackMin);
+  return localDateStartMs(dayStr, timeZone) + mins * 60_000;
+}
+
+/**
+ * 将任意时间戳归属到逻辑作息日（YYYY-MM-DD）：
+ * 跨午夜睡眠窗（如 23:30–07:30）下，凌晨 00:00–07:30 归属前一日夜晚，避免熬夜对话被零点腰斩。
+ */
+export function getLogicalNightDate(
+  epochMs: number,
+  timeZone: string,
+  circadian: CircadianConfig = DEFAULT_CIRCADIAN_CONFIG,
+): string {
+  const startMin = parseHhMm(circadian.sleepStart, 23 * 60 + 30);
+  const endMin = parseHhMm(circadian.sleepEnd, 7 * 60 + 30);
+  const curMin = getLocalMinutesOfDay(epochMs, timeZone);
+  const today = localDay(epochMs, timeZone);
+  if (startMin > endMin && curMin < endMin) {
+    return addCalendarDays(today, -1);
+  }
+  return today;
 }
 
 /**
@@ -101,20 +135,55 @@ export function renderCircadianState(
 }
 
 /**
- * Ring 1 扁平作息心跳确定性判定器（对齐 Spec 03 §3.2）：
- * 1) 落入睡眠窗且当夜未跑过 bedtime -> sleep_tidy；
- * 2) 仍在睡眠窗内 -> idle；
- * 3) 清醒期满足冷却、未回上限 < 2，且满足未读纸条 ≥ 30m 或开门闲置 ≥ proactiveMinGapMin -> proactive。
+ * Ring 1 扁平作息心跳确定性判定器（睡眠窗与 bedtime 日结解耦）：
+ * 1) 落入睡眠窗且当夜未跑过 bedtime：距上次互动静默 >= bedtimeIdleMin（默认 30m）才触发 sleep_tidy，避免热聊中途腰斩；
+ * 2) 仍在睡眠窗内（含已跑过 bedtime 又被用户叫醒的场景）-> idle，绝不重复跑 bedtime，也不主动 wake；
+ * 3) 跨出睡眠窗（白天）若昨夜因通宵/关机漏跑 bedtime：
+ *    - 静默 >= bedtimeIdleMin -> 立即补跑昨夜 sleep_tidy（完整收拢通宵对话）；
+ *    - 超过 sleepEnd + bedtimeForceAfterSleepEndMin（默认 4h）仍在连聊 -> 强制按 sleepEnd 截断补跑昨夜 sleep_tidy；
+ * 4) 清醒期满足冷却、未回上限 < 2，且满足未读纸条 ≥ 30m 或开门闲置 ≥ proactiveMinGapMin -> proactive。
  */
 export function evaluateHeartbeat(snap: HeartbeatSnapshot): HeartbeatDecision {
   const cfg = snap.circadian ?? DEFAULT_CIRCADIAN_CONFIG;
+  const idleMin = Math.max(
+    0,
+    cfg.bedtimeIdleMin ?? DEFAULT_CIRCADIAN_CONFIG.bedtimeIdleMin ?? 30,
+  );
+  const forceAfterMin = Math.max(
+    idleMin,
+    cfg.bedtimeForceAfterSleepEndMin ?? DEFAULT_CIRCADIAN_CONFIG.bedtimeForceAfterSleepEndMin ?? 240,
+  );
+  const isQuietEnoughForBedtime =
+    snap.lastInteractionMs === null || snap.nowMs - snap.lastInteractionMs >= idleMin * 60_000;
+
   const { inSleepWindow, nightDate } = getSleepWindowStatus(snap.nowMs, snap.timeZone, cfg);
 
   if (inSleepWindow) {
-    if (snap.lastBedtimeNightDate !== nightDate) {
+    if (snap.lastBedtimeNightDate !== nightDate && isQuietEnoughForBedtime) {
       return { action: "sleep_tidy", nightDate };
     }
     return { action: "idle" };
+  }
+
+  // 白天补跑：昨晚因通宵聊天或关机错过了 bedtime
+  const today = localDay(snap.nowMs, snap.timeZone);
+  const yesterdayNight = addCalendarDays(today, -1);
+  if (
+    snap.hasUnsettledPriorNight &&
+    (snap.lastBedtimeNightDate === null || snap.lastBedtimeNightDate < yesterdayNight)
+  ) {
+    if (isQuietEnoughForBedtime) {
+      return { action: "sleep_tidy", nightDate: yesterdayNight };
+    }
+    const sleepEndMs = localWallClockMs(today, cfg.sleepEnd, 7 * 60 + 30, snap.timeZone);
+    if (snap.nowMs >= sleepEndMs + forceAfterMin * 60_000) {
+      return {
+        action: "sleep_tidy",
+        nightDate: yesterdayNight,
+        cutoffBeforeSleepEnd: true,
+        sleepEndMs,
+      };
+    }
   }
 
   if (!cfg.proactiveEnabled) {

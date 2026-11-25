@@ -43,10 +43,14 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
 
 /** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */
 export interface CircadianConfig {
-  /** 睡眠静默窗开始时刻（HH:mm，实例本地时区，默认 "23:30"；调早会更早触发睡前整理并进入静默） */
+  /** 睡眠静默窗开始时刻（HH:mm，实例本地时区，默认 "23:30"；仅控制夜间静默与抑制主动打扰） */
   sleepStart: string;
   /** 睡眠静默窗结束时刻（HH:mm，实例本地时区，默认 "07:30"；调晚会延长早晨免打扰） */
   sleepEnd: string;
+  /** 进入睡眠窗（或通宵跨出睡眠窗）后，距上次互动静默至少多久才触发 bedtime 日结（单位：分钟，默认 30） */
+  bedtimeIdleMin?: number;
+  /** 通宵持续聊天跨出睡眠窗后，最晚延迟多久强制按 sleepEnd 截断补跑昨夜 bedtime（单位：分钟，默认 240，即 4 小时） */
+  bedtimeForceAfterSleepEndMin?: number;
   /** 心跳巡检间隔（单位：分钟，默认 30；调小响应更及时，调大更省后台开销） */
   heartbeatIntervalMin: number;
   /** 是否启用定时心跳主动唤醒（默认 true；关闭后仅保留睡前整理与正常聊天） */
@@ -60,6 +64,8 @@ export interface CircadianConfig {
 export const DEFAULT_CIRCADIAN_CONFIG: CircadianConfig = {
   sleepStart: "23:30",
   sleepEnd: "07:30",
+  bedtimeIdleMin: 30,
+  bedtimeForceAfterSleepEndMin: 240,
   heartbeatIntervalMin: 30,
   proactiveEnabled: true,
   proactiveMinGapMin: 240,

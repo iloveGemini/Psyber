@@ -31,7 +31,7 @@ import {
 import { MediaStore } from "./core/media.ts";
 import { AsyncMutex } from "./core/mutex.ts";
 import { ulid } from "./core/ulid.ts";
-import { DirectEngine } from "./engine/direct.ts";
+import { DirectEngine, type RolloverReason } from "./engine/direct.ts";
 import {
   evaluateAndRunReflect,
   maybeRunReflectAfterBedtime,
@@ -42,6 +42,7 @@ import {
 import { SseHub } from "./engine/sse.ts";
 import {
   runMemoryTidyTask,
+  type HotTidySessionContext,
   type TidyTaskOutcome,
   type TidyTaskType,
 } from "./engine/tidy.ts";
@@ -89,6 +90,8 @@ export interface BootOptions {
   clock?: Clock;
   /** 可注入对话模型客户端，供离线测试阻断外网调用 */
   chatModel?: ChatModelClient;
+  /** 整理与反思轮的单步瞬时错误退避延迟（离线测试注入 chatModel 时默认空数组不等待） */
+  tidyRetryDelaysMs?: number[];
   /** 可注入决策模型客户端（供离线测试验证反思门控） */
   decisionClient?: DecisionClient;
   /** 可注入桌面通知发送器，供离线测试阻断系统弹窗 */
@@ -143,7 +146,7 @@ export interface PsyberRuntime {
   /** 手动触发一次作息心跳判定（用于测试或 CLI 调试） */
   tickHeartbeat: () => Promise<HeartbeatDecision>;
   /** 将异步记忆整理任务排入单队列（自动去重，不阻塞前台对话） */
-  enqueueTidy: (taskType: TidyTaskType, nightDate?: string) => Promise<TidyTaskOutcome | null>;
+  enqueueTidy: (taskType: TidyTaskType, nightDate?: string, maxSeq?: number | null) => Promise<TidyTaskOutcome | null>;
   /** 手动触发一次日/周深度反思门控与执行（用于测试或 CLI 调试） */
   triggerReflect: (scope: ReflectScope, targetDay?: string) => Promise<ReflectTaskOutcome>;
   /** 手动触发一次 SQLite VACUUM INTO 本地日原子热备 */
@@ -332,10 +335,71 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
   };
 
-  const runSyncDailyWrapup = async (
-    cutoffSeq: number | null,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  /** 判断整理槽位是否与主对话共用同一模型（共用时才启用会话尾部热写以命中 Prompt Cache） */
+  const canUseHotTidyModel = (): boolean => {
+    if (opts.chatModel) return true;
+    const chatSlot = config.llm?.slots?.chat;
+    const memSlot = config.llm?.slots?.memory_task;
+    if (!memSlot) return true;
+    return Boolean(chatSlot && memSlot.provider === chatSlot.provider && memSlot.model === chatSlot.model);
+  };
+
+  const tidyRetryDelaysMs = opts.tidyRetryDelaysMs ?? (opts.chatModel ? [] : undefined);
+  // 仅在生产环境或测试显式注入 decisionClient 时在 bedtime 中合并日反思门控，避免离线测试共用 MockChatModel 抢占队列
+  const bedtimeDecisionClient = opts.decisionClient ?? (opts.chatModel ? undefined : decisionClient);
+
+  const runPostBedtimeReflectAndBackup = async (targetNight: string): Promise<void> => {
+    if (stopped) return;
+    await tidyMutex.runExclusive(async () => {
+      if (stopped) return;
+      // 换段之后独立异步跑日/周反思与热备，不阻塞新段聊天也不受旧段尾部干扰
+      const reflectRes = await maybeRunReflectAfterBedtime(
+        {
+          db,
+          dataDir,
+          promptsDir,
+          clock,
+          memoryIndex,
+          memoryTools,
+          chatModel: tidyModel,
+          decisionClient,
+          getConfig: () => config,
+          ...(tidyRetryDelaysMs !== undefined ? { retryDelaysMs: tidyRetryDelaysMs } : {}),
+        },
+        { targetDay: targetNight },
+      );
+      const reflectTouched = [
+        ...reflectRes.daily.touchedMemoryPaths,
+        ...(reflectRes.weekly?.touchedMemoryPaths ?? []),
+      ];
+      if (
+        reflectTouched.includes("core/self.md") ||
+        reflectTouched.includes("core/user.md")
+      ) {
+        const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
+        sse.emit("identity.updated", { ...identity });
+      }
+      // Spec 05 §4.1：bedtime 睡前整理与反思完成后自动触发一次 VACUUM INTO 本地日原子热备
+      await triggerBackup();
+    });
+  };
+
+  const runSyncDailyWrapup = async (ctx: {
+    oldSessionId: string;
+    reason: RolloverReason;
+    cutoffSeq: number | null;
+    hotSession?: HotTidySessionContext | null;
+  }): Promise<{ ok: boolean; error?: string }> => {
     if (stopped) return { ok: false, error: "服务正在停机" };
+    const useHot = ctx.reason !== "overflow" && canUseHotTidyModel() && Boolean(ctx.hotSession);
+    const initialMode: "hot" | "cold" = useHot ? "hot" : "cold";
+    sse.emit("turn.tidy", {
+      phase: "started",
+      taskType: "daily_wrapup",
+      mode: initialMode,
+      reason: ctx.reason,
+      sessionId: ctx.oldSessionId,
+    });
     const outcome = await tidyMutex.runExclusive(async () => {
       if (stopped) return null;
       return runMemoryTidyTask(
@@ -349,17 +413,51 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           memoryTools,
           chatModel: tidyModel,
           getConfig: () => config,
+          ...(tidyRetryDelaysMs !== undefined ? { retryDelaysMs: tidyRetryDelaysMs } : {}),
         },
-        { taskType: "daily_wrapup", maxSeq: cutoffSeq },
+        {
+          taskType: "daily_wrapup",
+          maxSeq: ctx.cutoffSeq,
+          hotSession: useHot ? ctx.hotSession : null,
+        },
       );
     });
-    if (!outcome) return { ok: false, error: "服务正在停机" };
+    if (!outcome) {
+      sse.emit("turn.tidy", {
+        phase: "error",
+        taskType: "daily_wrapup",
+        mode: initialMode,
+        reason: ctx.reason,
+        sessionId: ctx.oldSessionId,
+        message: "服务正在停机",
+      });
+      return { ok: false, error: "服务正在停机" };
+    }
+    if (
+      outcome.ok &&
+      (outcome.touchedMemoryPaths.includes("core/self.md") ||
+        outcome.touchedMemoryPaths.includes("core/user.md"))
+    ) {
+      const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
+      sse.emit("identity.updated", { ...identity });
+    }
+    sse.emit("turn.tidy", {
+      phase: outcome.ok ? "done" : "error",
+      taskType: "daily_wrapup",
+      mode: outcome.mode ?? initialMode,
+      reason: ctx.reason,
+      sessionId: ctx.oldSessionId,
+      ...(outcome.ok
+        ? { summary: outcome.summary, touchedMemoryPaths: outcome.touchedMemoryPaths }
+        : { message: outcome.error || "整理记忆失败" }),
+    });
     return { ok: outcome.ok, error: outcome.error };
   };
 
   const enqueueTidy = (
     taskType: TidyTaskType,
     nightDate?: string,
+    maxSeq?: number | null,
   ): Promise<TidyTaskOutcome | null> => {
     if (stopped) return Promise.resolve(null);
     if (taskType === "daily_wrapup") {
@@ -374,90 +472,205 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
 
     const job = (async () => {
-      let bedtimeDigestedEventId: string | null | undefined;
-      let shouldNotifyBedtimeDone = false;
+      const targetNight =
+        taskType === "bedtime" ? nightDate ?? localDay(clock.now(), config.timezone) : undefined;
+      const reason = taskType === "bedtime" ? "bedtime" : "background";
+      let completedBedtimeNight: string | null = null;
+      let coldBedtimeDigestedEventId: string | null | undefined;
+      let shouldRolloverAfterCold = false;
+      let finalOutcome: TidyTaskOutcome | null = null;
 
-      const outcome = await tidyMutex.runExclusive(async () => {
-        try {
-          if (stopped) return null;
-          const targetNight =
-            taskType === "bedtime" ? nightDate ?? localDay(clock.now(), config.timezone) : undefined;
-          const res = await runMemoryTidyTask(
-            {
-              db,
-              dataDir,
-              promptsDir,
-              clock,
-              events,
-              memoryIndex,
-              memoryTools,
-              chatModel: tidyModel,
-              getConfig: () => config,
+      try {
+        if (stopped) return null;
+        const allowHot = canUseHotTidyModel() && Boolean(engineRef);
+
+        if (allowHot && engineRef) {
+          // 单向锁顺序：turnMutex（可让路）-> tidyMutex，杜绝死锁；用户发消息即刻 abort 让路
+          let startedEmitted = false;
+          let activeMode: "hot" | "cold" = "cold";
+          let activeSessionId = engineRef.getActiveSessionId();
+
+          const runRes = await engineRef.runYieldableSessionTidy(
+            { maxSeq },
+            async ({ sessionId, hotSession, signal }) => {
+              activeSessionId = sessionId;
+              activeMode = hotSession ? "hot" : "cold";
+              startedEmitted = true;
+              sse.emit("turn.tidy", {
+                phase: "started",
+                taskType,
+                mode: activeMode,
+                reason,
+                sessionId,
+                ...(targetNight ? { nightDate: targetNight } : {}),
+              });
+              const res = await tidyMutex.runExclusive(async () => {
+                if (stopped) return null;
+                return runMemoryTidyTask(
+                  {
+                    db,
+                    dataDir,
+                    promptsDir,
+                    clock,
+                    events,
+                    memoryIndex,
+                    memoryTools,
+                    chatModel: tidyModel,
+                    ...(taskType === "bedtime" && bedtimeDecisionClient ? { decisionClient: bedtimeDecisionClient } : {}),
+                    getConfig: () => config,
+                    ...(tidyRetryDelaysMs !== undefined ? { retryDelaysMs: tidyRetryDelaysMs } : {}),
+                  },
+                  { taskType, nightDate: targetNight, maxSeq, hotSession, signal },
+                );
+              });
+              return {
+                result: res,
+                shouldRollover: Boolean(res?.ok && !res.deferred && taskType === "bedtime"),
+                digestedUpToEventId: res?.lastProcessedEventId ?? null,
+              };
             },
-            { taskType, nightDate: targetNight },
           );
-          if (
-            res.ok &&
-            (res.touchedMemoryPaths.includes("core/self.md") ||
-              res.touchedMemoryPaths.includes("core/user.md"))
-          ) {
-            const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
-            sse.emit("identity.updated", { ...identity });
+
+          if (runRes.deferred) {
+            if (startedEmitted) {
+              sse.emit("turn.tidy", {
+                phase: "deferred",
+                taskType,
+                mode: activeMode,
+                reason,
+                sessionId: runRes.sessionId,
+                ...(targetNight ? { nightDate: targetNight } : {}),
+                message: "检测到新对话，已暂缓整理等待下次空闲",
+              });
+            }
+            return null;
           }
-          if (taskType === "bedtime" && res.ok && targetNight) {
-            lastBedtimeNightDate = targetNight;
-            // 睡前整理完成后按 Git 变更 + Decision 门控自动评估日反思与周日回顾反思
-            const reflectRes = await maybeRunReflectAfterBedtime(
+
+          finalOutcome = runRes.result;
+          if (finalOutcome) {
+            const mode = finalOutcome.mode ?? activeMode;
+            if (finalOutcome.deferred) {
+              sse.emit("turn.tidy", {
+                phase: "deferred",
+                taskType,
+                mode,
+                reason,
+                sessionId: activeSessionId,
+                ...(targetNight ? { nightDate: targetNight } : {}),
+                message: "检测到新对话，已暂缓整理等待下次空闲",
+              });
+              return finalOutcome;
+            }
+            if (
+              finalOutcome.ok &&
+              (finalOutcome.touchedMemoryPaths.includes("core/self.md") ||
+                finalOutcome.touchedMemoryPaths.includes("core/user.md"))
+            ) {
+              const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
+              sse.emit("identity.updated", { ...identity });
+            }
+            sse.emit("turn.tidy", {
+              phase: finalOutcome.ok ? "done" : "error",
+              taskType,
+              mode,
+              reason,
+              sessionId: activeSessionId,
+              ...(targetNight ? { nightDate: targetNight } : {}),
+              ...(finalOutcome.ok
+                ? {
+                    summary: finalOutcome.summary,
+                    touchedMemoryPaths: finalOutcome.touchedMemoryPaths,
+                  }
+                : { message: finalOutcome.error || "整理记忆失败" }),
+            });
+            if (taskType === "bedtime" && finalOutcome.ok && targetNight) {
+              lastBedtimeNightDate = targetNight;
+              completedBedtimeNight = targetNight;
+            }
+          }
+        } else {
+          // 独立冷写槽位（memory_task 与 chat 使用不同模型）
+          const sessionId = engineRef?.getActiveSessionId();
+          sse.emit("turn.tidy", {
+            phase: "started",
+            taskType,
+            mode: "cold",
+            reason,
+            ...(sessionId ? { sessionId } : {}),
+            ...(targetNight ? { nightDate: targetNight } : {}),
+          });
+          finalOutcome = await tidyMutex.runExclusive(async () => {
+            if (stopped) return null;
+            return runMemoryTidyTask(
               {
                 db,
                 dataDir,
                 promptsDir,
                 clock,
+                events,
                 memoryIndex,
                 memoryTools,
                 chatModel: tidyModel,
-                decisionClient,
+                ...(taskType === "bedtime" && bedtimeDecisionClient ? { decisionClient: bedtimeDecisionClient } : {}),
                 getConfig: () => config,
+                ...(tidyRetryDelaysMs !== undefined ? { retryDelaysMs: tidyRetryDelaysMs } : {}),
               },
-              { targetDay: targetNight },
+              { taskType, nightDate: targetNight, maxSeq },
             );
-            const reflectTouched = [
-              ...reflectRes.daily.touchedMemoryPaths,
-              ...(reflectRes.weekly?.touchedMemoryPaths ?? []),
-            ];
+          });
+          if (finalOutcome) {
             if (
-              reflectTouched.includes("core/self.md") ||
-              reflectTouched.includes("core/user.md")
+              finalOutcome.ok &&
+              (finalOutcome.touchedMemoryPaths.includes("core/self.md") ||
+                finalOutcome.touchedMemoryPaths.includes("core/user.md"))
             ) {
               const identity = await readIdentityProfile(dataDir, clock.now(), config.timezone);
               sse.emit("identity.updated", { ...identity });
             }
-            // Spec 05 §4.1：bedtime 睡前整理与反思完成后自动触发一次 VACUUM INTO 本地日原子热备
-            await triggerBackup();
-            bedtimeDigestedEventId = res.lastProcessedEventId;
-            shouldNotifyBedtimeDone = true;
-          }
-          return res;
-        } finally {
-          if (taskType === "daily_wrapup") {
-            dailyWrapupQueued = false;
-          } else {
-            queuedBedtimeNightDate = null;
+            sse.emit("turn.tidy", {
+              phase: finalOutcome.ok ? "done" : "error",
+              taskType,
+              mode: "cold",
+              reason,
+              ...(sessionId ? { sessionId } : {}),
+              ...(targetNight ? { nightDate: targetNight } : {}),
+              ...(finalOutcome.ok
+                ? {
+                    summary: finalOutcome.summary,
+                    touchedMemoryPaths: finalOutcome.touchedMemoryPaths,
+                  }
+                : { message: finalOutcome.error || "整理记忆失败" }),
+            });
+            if (taskType === "bedtime" && finalOutcome.ok && targetNight) {
+              lastBedtimeNightDate = targetNight;
+              completedBedtimeNight = targetNight;
+              coldBedtimeDigestedEventId = finalOutcome.lastProcessedEventId;
+              shouldRolloverAfterCold = true;
+            }
           }
         }
-      });
-
-      // 必须在释放 tidyMutex 后再调 onBedtimeCompleted（获取 turnMutex），严守单向锁顺序防死锁
-      if (shouldNotifyBedtimeDone && !stopped) {
-        await engineRef?.onBedtimeCompleted(bedtimeDigestedEventId);
+      } finally {
+        if (taskType === "daily_wrapup") {
+          dailyWrapupQueued = false;
+        } else {
+          queuedBedtimeNightDate = null;
+        }
       }
-      return outcome;
+
+      if (shouldRolloverAfterCold && !stopped) {
+        await engineRef?.onBedtimeCompleted(coldBedtimeDigestedEventId);
+      }
+      // 反思与热备在换段之后独立执行，不阻塞新段聊天
+      if (completedBedtimeNight && !stopped) {
+        await runPostBedtimeReflectAndBackup(completedBedtimeNight);
+      }
+      return finalOutcome;
     })();
 
     return trackBackground(job);
   };
 
-  // Stage 8: 装配 DirectEngine（换段前先同步排空 daily_wrapup，期间通过 SSE turn.rollover 通知前端）
+  // Stage 8: 装配 DirectEngine（换段前先同步排空 daily_wrapup，期间通过 SSE turn.tidy / turn.rollover 通知前端）
   const engine = new DirectEngine({
     dataDir,
     promptsDir,
@@ -469,12 +682,32 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     chatModel,
     db,
     media,
-    onBeforeRollover: ({ cutoffSeq }) => runSyncDailyWrapup(cutoffSeq),
+    onBeforeRollover: (ctx) => runSyncDailyWrapup(ctx),
     onRolloverStatus: (ev) => {
       sse.emit("turn.rollover", { ...ev });
     },
   });
   engineRef = engine;
+
+  const hasUnsettledNightBefore = (today: string): boolean => {
+    const oldestPendingMs = events.getOldestPendingWrapupMs();
+    const hasPendingBeforeToday =
+      oldestPendingMs !== null && localDay(oldestPendingMs, config.timezone) < today;
+    const latestChat = events.getLatestChatEvent();
+    const latestChatDay = latestChat ? localDay(latestChat.createdAt, config.timezone) : null;
+    const hasChatSinceLastBedtime =
+      latestChatDay !== null &&
+      latestChatDay < today &&
+      (lastBedtimeNightDate === null || latestChatDay > lastBedtimeNightDate);
+    const hasDailyCardSinceLastBedtime = memoryIndex
+      .listAllRows()
+      .some((r) => {
+        if (r.space !== "episodes") return false;
+        const d = localDay(Math.max(r.created_at, r.updated_at), config.timezone);
+        return d < today && (lastBedtimeNightDate === null || d > lastBedtimeNightDate);
+      });
+    return hasPendingBeforeToday || hasChatSinceLastBedtime || hasDailyCardSinceLastBedtime;
+  };
 
   let heartbeatInFlight = false;
 
@@ -484,16 +717,19 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
     heartbeatInFlight = true;
     try {
+      const nowMs = clock.now();
+      const today = localDay(nowMs, config.timezone);
       const unreadDoorNotesCount = events.countUnreadDoorNotes();
       const oldestUnreadDoorNoteMs =
         unreadDoorNotesCount > 0 ? events.getOldestUnreadDoorNoteMs() : null;
 
       const decision = evaluateHeartbeat({
-        nowMs: clock.now(),
+        nowMs,
         timeZone: config.timezone,
         circadian: config.circadian,
         doorState: config.door.state,
         lastBedtimeNightDate,
+        hasUnsettledPriorNight: hasUnsettledNightBefore(today),
         lastInteractionMs: events.getLastInteractionMs(),
         lastWakeMs,
         consecutiveUnansweredWakes,
@@ -503,7 +739,20 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       });
 
       if (decision.action === "sleep_tidy") {
-        void enqueueTidy("bedtime", decision.nightDate);
+        let cutoffSeq: number | null | undefined;
+        if (decision.cutoffBeforeSleepEnd && typeof decision.sleepEndMs === "number") {
+          const row = db
+            .query(
+              `SELECT MAX(seq) AS max_seq FROM events
+               WHERE status IN ('active', 'retracted')
+                 AND role IN ('user', 'assistant')
+                 AND kind IN ('chat', 'wake', 'door_note')
+                 AND created_at <= ?`,
+            )
+            .get(decision.sleepEndMs) as { max_seq: number | null } | null;
+          cutoffSeq = row?.max_seq ?? null;
+        }
+        void enqueueTidy("bedtime", decision.nightDate, cutoffSeq);
       } else if (decision.action === "proactive") {
         lastWakeMs = clock.now();
 
@@ -595,27 +844,11 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     if (!sleepStatus.inSleepWindow) {
       const today = localDay(clock.now(), config.timezone);
       const yesterdayNight = addCalendarDays(today, -1);
-      if (lastBedtimeNightDate === null || lastBedtimeNightDate < yesterdayNight) {
-        const oldestPendingMs = events.getOldestPendingWrapupMs();
-        const hasPendingBeforeToday =
-          oldestPendingMs !== null && localDay(oldestPendingMs, config.timezone) < today;
-        const latestChat = events.getLatestChatEvent();
-        const latestChatDay = latestChat ? localDay(latestChat.createdAt, config.timezone) : null;
-        const hasChatSinceLastBedtime =
-          latestChatDay !== null &&
-          latestChatDay < today &&
-          (lastBedtimeNightDate === null || latestChatDay > lastBedtimeNightDate);
-        const hasDailyCardSinceLastBedtime = memoryIndex
-          .listAllRows()
-          .some((r) => {
-            if (r.space !== "episodes") return false;
-            const d = localDay(Math.max(r.created_at, r.updated_at), config.timezone);
-            return d < today && (lastBedtimeNightDate === null || d > lastBedtimeNightDate);
-          });
-
-        if (hasPendingBeforeToday || hasChatSinceLastBedtime || hasDailyCardSinceLastBedtime) {
-          void enqueueTidy("bedtime", yesterdayNight);
-        }
+      if (
+        (lastBedtimeNightDate === null || lastBedtimeNightDate < yesterdayNight) &&
+        hasUnsettledNightBefore(today)
+      ) {
+        void enqueueTidy("bedtime", yesterdayNight);
       }
     }
   }

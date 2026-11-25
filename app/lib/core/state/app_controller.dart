@@ -1465,6 +1465,22 @@ class AppController {
           pendingApprovalNotifier.value = null;
         }
         return;
+      case 'turn.tidy':
+        final tidyPhase = frame.data['phase'] as String? ?? '';
+        if (tidyPhase == 'started') {
+          wrappingUpNotifier.value = true;
+        } else {
+          if (!_manualWrapUpInFlight) {
+            wrappingUpNotifier.value = false;
+          }
+          if (tidyPhase == 'error') {
+            final msg = frame.data['message'] as String?;
+            if (msg != null && msg.isNotEmpty) {
+              turnErrorNotifier.value = msg;
+            }
+          }
+        }
+        return;
       case 'turn.rollover':
         final phase = frame.data['phase'] as String? ?? '';
         if (phase == 'wrapping') {

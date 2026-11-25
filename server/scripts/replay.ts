@@ -5,13 +5,16 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { VirtualClock, localDay, localWeekday } from "../src/core/clock.ts";
+import { VirtualClock, addCalendarDays, localDateTime, localDay, localWeekday } from "../src/core/clock.ts";
 import {
+  DEFAULT_CIRCADIAN_CONFIG,
   atomicWriteFile,
   initDataDir,
   loadOrCreateConfig,
   saveConfig,
+  type CircadianConfig,
 } from "../src/core/config.ts";
+import { getLogicalNightDate, localWallClockMs } from "../src/mood/circadian.ts";
 import { loadCredentials } from "../src/core/credentials.ts";
 import { openDatabase, runMigrations } from "../src/core/db.ts";
 import {
@@ -71,6 +74,9 @@ interface DaySummary {
   msgOut: number;
   attachments: number;
   chars: number;
+  firstAtMs: number;
+  lastAtMs: number;
+  bedtimeAtMs: number;
 }
 
 interface ReplayDayResult {
@@ -79,6 +85,7 @@ interface ReplayDayResult {
   importedEvents: number;
   importedAttachments: number;
   tidiedAt?: string;
+  deferredToNext?: boolean;
   processedEvents?: number;
   touchedMemoryPaths?: string[];
   summary?: string;
@@ -114,6 +121,7 @@ interface CliOptions {
   hasExplicitStep: boolean;
   days: number;
   until: string | null;
+  minChars: number;
   help: boolean;
 }
 
@@ -176,6 +184,7 @@ function parseArgs(argv: string[]): CliOptions {
     hasExplicitStep: false,
     days: 1,
     until: null,
+    minChars: 500,
     help: false,
   };
 
@@ -221,6 +230,10 @@ function parseArgs(argv: string[]): CliOptions {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error(`--until 格式须为 YYYY-MM-DD，收到: ${d}`);
       opts.until = d;
       opts.hasExplicitStep = true;
+    } else if (a === "--min-chars") {
+      const n = Number(argv[++i]);
+      if (!Number.isInteger(n) || n < 0) throw new Error(`--min-chars 必须是非负整数，收到: ${argv[i]}`);
+      opts.minChars = n;
     } else {
       throw new Error(`未知参数: ${a}`);
     }
@@ -280,6 +293,7 @@ Psyber 历史对话导入与按天回放脚本（支持标准 JSONL 导入与断
   --days <N>             本次最多推进 N 天（默认 1）
   --until <YYYY-MM-DD>   推进到指定日期为止（含）
   --all                  推进全部剩余日期
+  --min-chars <N>        低量日攒批阈值：累计未整理字数低于 N 时仅导入不整理，并入后续日消化（默认 500，设 0 每天必跑）
   --import-only          仅导入原始对话与附件到 SQLite/media，不跑整理模型
   --tidy-only            仅对「已导入但尚未整理」的日期补跑整理
   --mock                 使用内置 Mock 模型干跑（不请求真实 API、不花额度）
@@ -475,18 +489,74 @@ function loadPsycheMessages(srcDb: Database, sourceUser: string, timeZone: strin
   });
 }
 
-function groupByDay(rows: NormalizedMessage[]): {
+async function readCircadianForReplay(dataDir: string): Promise<CircadianConfig> {
+  try {
+    const raw = await fs.readFile(path.join(dataDir, "config.json"), "utf8");
+    const parsed = JSON.parse(raw) as { circadian?: Partial<CircadianConfig> };
+    return { ...DEFAULT_CIRCADIAN_CONFIG, ...(parsed.circadian ?? {}) };
+  } catch {
+    return { ...DEFAULT_CIRCADIAN_CONFIG };
+  }
+}
+
+/**
+ * 按逻辑作息日（而非自然日 00:00）切分历史对话：
+ * - 凌晨 00:00..sleepEnd（默认 07:30）归属前一晚 nightDate；
+ * - 若通宵聊天跨过 sleepEnd 且相邻消息间隔 < bedtimeIdleMin（默认 30m），连续顺延归入前一晚，
+ *   直到出现真正停顿或达到 sleepEnd + bedtimeForceAfterSleepEndMin（默认 4h）硬上限；
+ * - 每晚的 bedtime 虚拟时钟对齐 max(当日 sleepStart, 该晚末条消息 + bedtimeIdleMin)。
+ */
+function groupByLogicalNight(
+  rows: NormalizedMessage[],
+  timeZone: string,
+  circadian: CircadianConfig,
+): {
   days: string[];
   byDay: Map<string, NormalizedMessage[]>;
   summaries: DaySummary[];
+  bedtimeByDay: Map<string, number>;
 } {
+  const idleMin = Math.max(
+    0,
+    circadian.bedtimeIdleMin ?? DEFAULT_CIRCADIAN_CONFIG.bedtimeIdleMin ?? 30,
+  );
+  const forceAfterMin = Math.max(
+    idleMin,
+    circadian.bedtimeForceAfterSleepEndMin ??
+      DEFAULT_CIRCADIAN_CONFIG.bedtimeForceAfterSleepEndMin ??
+      240,
+  );
+
   const byDay = new Map<string, NormalizedMessage[]>();
+  let prevNight: string | null = null;
+  let prevAt = 0;
+
   for (const row of rows) {
-    const list = byDay.get(row.day) ?? [];
+    const baseNight = getLogicalNightDate(row.at, timeZone, circadian);
+    let assignedNight = baseNight;
+    if (prevNight !== null && baseNight > prevNight) {
+      const prevSleepEndMs = localWallClockMs(
+        addCalendarDays(prevNight, 1),
+        circadian.sleepEnd,
+        7 * 60 + 30,
+        timeZone,
+      );
+      const isContinuous = row.at - prevAt < idleMin * 60_000;
+      const withinForceCap = row.at <= prevSleepEndMs + forceAfterMin * 60_000;
+      if (isContinuous && withinForceCap) {
+        assignedNight = prevNight;
+      }
+    }
+    row.day = assignedNight;
+    const list = byDay.get(assignedNight) ?? [];
     list.push(row);
-    byDay.set(row.day, list);
+    byDay.set(assignedNight, list);
+    prevNight = assignedNight;
+    prevAt = row.at;
   }
+
   const days = Array.from(byDay.keys()).sort();
+  const bedtimeByDay = new Map<string, number>();
   const summaries: DaySummary[] = days.map((day) => {
     const list = byDay.get(day)!;
     let msgIn = 0;
@@ -499,9 +569,14 @@ function groupByDay(rows: NormalizedMessage[]): {
       chars += r.text.length;
       attachments += r.attachments.length;
     }
-    return { day, msgIn, msgOut, attachments, chars };
+    const firstAtMs = list[0]!.at;
+    const lastAtMs = list[list.length - 1]!.at;
+    const sleepStartMs = localWallClockMs(day, circadian.sleepStart, 23 * 60 + 30, timeZone);
+    const bedtimeAtMs = Math.max(sleepStartMs, lastAtMs + idleMin * 60_000);
+    bedtimeByDay.set(day, bedtimeAtMs);
+    return { day, msgIn, msgOut, attachments, chars, firstAtMs, lastAtMs, bedtimeAtMs };
   });
-  return { days, byDay, summaries };
+  return { days, byDay, summaries, bedtimeByDay };
 }
 
 async function loadReplayState(dataDir: string, sourcePath: string): Promise<ReplayState> {
@@ -753,6 +828,31 @@ function countMemoryCards(dataDir: string): number {
   }
 }
 
+function getPendingTidyStats(db: Database, cursorId: string): { count: number; chars: number } {
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(content)), 0) AS chars
+       FROM events
+       WHERE status IN ('active', 'retracted')
+         AND role IN ('user', 'assistant')
+         AND kind IN ('chat', 'wake', 'door_note')
+         AND id > ?`,
+    )
+    .get(cursorId) as { cnt: number; chars: number } | null;
+  return { count: row?.cnt ?? 0, chars: row?.chars ?? 0 };
+}
+
+async function hasEpisodeCardsForDay(dataDir: string, day: string): Promise<boolean> {
+  const [y, m, d] = day.split("-");
+  if (!y || !m || !d) return false;
+  try {
+    const entries = await fs.readdir(path.join(dataDir, "memory", "episodes", y, m, d));
+    return entries.some((name) => name.startsWith("ep-") && name.endsWith(".md"));
+  } catch {
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -776,7 +876,12 @@ async function main(): Promise<void> {
     allRows = await loadJsonlMessages(opts.sourcePath, opts.tz);
   }
 
-  const { days, byDay, summaries } = groupByDay(allRows);
+  const replayCircadian = await readCircadianForReplay(opts.dataDir);
+  const { days, byDay, summaries, bedtimeByDay } = groupByLogicalNight(
+    allRows,
+    opts.tz,
+    replayCircadian,
+  );
   const state = await loadReplayState(opts.dataDir, opts.sourcePath);
 
   if (opts.status) {
@@ -784,17 +889,25 @@ async function main(): Promise<void> {
     const tidiedSet = new Set(state.tidiedDays);
     console.log(`源件: ${opts.sourcePath}（格式: ${fmt}）`);
     console.log(`目标: ${opts.dataDir}`);
-    console.log(`总计有效消息: ${allRows.length} 条（跨越 ${days.length} 个活跃日）`);
+    console.log(
+      `作息切分: 睡眠窗 ${replayCircadian.sleepStart}–${replayCircadian.sleepEnd}，静默 ${replayCircadian.bedtimeIdleMin ?? 30}m 日结（通宵顺延上限 +${replayCircadian.bedtimeForceAfterSleepEndMin ?? 240}m），低量攒批阈值 ${opts.minChars} 字`,
+    );
+    console.log(`总计有效消息: ${allRows.length} 条（跨越 ${days.length} 个作息日）`);
     console.log(`当前目标库卡片数: ${countMemoryCards(opts.dataDir)}\n`);
-    console.log("日期        | 入/出   | 附件 | 字数   | 导入 | 整理 | 摘要");
-    console.log("------------|---------|------|--------|------|------|-----");
+    console.log("作息日      | 入/出   | 附件 | 字数   | 日结时刻          | 导入 | 整理 | 摘要");
+    console.log("------------|---------|------|--------|-------------------|------|------|-----");
     for (const s of summaries) {
       const imp = importedSet.has(s.day) ? "✅" : "⏳";
-      const tidy = tidiedSet.has(s.day) ? "✅" : "⏳";
+      const tidy = !tidiedSet.has(s.day)
+        ? "⏳"
+        : state.results[s.day]?.deferredToNext
+          ? "↪️"
+          : "✅";
       const summary = state.results[s.day]?.summary ?? "";
       const io = `${String(s.msgIn).padStart(3)}/${String(s.msgOut).padEnd(3)}`;
+      const bedClock = localDateTime(s.bedtimeAtMs, opts.tz).slice(0, 16);
       console.log(
-        `${s.day}  | ${io} | ${String(s.attachments).padStart(4)} | ${String(s.chars).padStart(6)} |  ${imp}  |  ${tidy}  | ${summary}`,
+        `${s.day}  | ${io} | ${String(s.attachments).padStart(4)} | ${String(s.chars).padStart(6)} | ${bedClock}  |  ${imp}  |  ${tidy}  | ${summary}`,
       );
     }
     srcDb?.close();
@@ -880,10 +993,11 @@ async function main(): Promise<void> {
 
   for (const day of targetDays) {
     const dayRows = byDay.get(day)!;
-    const [y, m, d] = day.split("-").map(Number);
+    const lastAtMs = dayRows[dayRows.length - 1]!.at;
+    const bedtimeAtMs = bedtimeByDay.get(day)!;
 
     if (!importedSet.has(day) && !opts.tidyOnly) {
-      clock.jumpToWallClock(y, m, d, 23, 30, 0);
+      clock.setTime(lastAtMs);
       const impRes = await importSingleDay({
         day,
         fonds: opts.fonds || "jsonl-import",
@@ -909,9 +1023,41 @@ async function main(): Promise<void> {
     if (opts.importOnly) continue;
 
     if (!tidiedSet.has(day)) {
-      clock.jumpToWallClock(y, m, d, 23, 35, 0);
+      const pendingStats = getPendingTidyStats(db, events.getCursor("daily_wrapup") ?? "");
+      const alreadyHasEpisodes = await hasEpisodeCardsForDay(opts.dataDir, day);
+      // 仅对尚未开始消化的真正低量日攒批顺延；若游标已排空（count===0）或当天已落盘 ep-*.md，说明仅缺 bedtime 收尾，绝不跳过
+      if (
+        opts.minChars > 0 &&
+        pendingStats.count > 0 &&
+        pendingStats.chars < opts.minChars &&
+        !alreadyHasEpisodes
+      ) {
+        tidiedSet.add(day);
+        state.tidiedDays = days.filter((x) => tidiedSet.has(x));
+        state.results[day] = {
+          ...(state.results[day] ?? { day, importedAt: new Date().toISOString(), importedEvents: 0, importedAttachments: 0 }),
+          deferredToNext: true,
+          processedEvents: 0,
+          touchedMemoryPaths: [],
+          summary: `攒批顺延（累计 ${pendingStats.chars} 字 < ${opts.minChars}）`,
+        };
+        await saveReplayState(opts.dataDir, state);
+        console.log(
+          `[${day}] 低量日攒批跳过整理（累计未整理 ${pendingStats.count} 条 / ${pendingStats.chars} 字 < 阈值 ${opts.minChars} 字，并入后续日一并消化）`,
+        );
+        continue;
+      }
+
+      clock.setTime(bedtimeAtMs);
       const weekday = localWeekday(clock.now(), clock.timeZone);
-      console.log(`[${day} ${weekday}] 开始静默整理 (VirtualClock = ${day} 23:35:00)...`);
+      const clockLabel = localDateTime(clock.now(), clock.timeZone);
+      const decisionClient = opts.mock
+        ? undefined
+        : new DynamicDecisionClient({
+            dataDir: opts.dataDir,
+            getConfig: () => config,
+          });
+      console.log(`[${day} ${weekday}] 开始静默整理 (VirtualClock = ${clockLabel})...`);
       const t0 = Date.now();
       const outcome = await runMemoryTidyTask(
         {
@@ -923,6 +1069,7 @@ async function main(): Promise<void> {
           memoryIndex,
           memoryTools,
           chatModel,
+          decisionClient,
           getConfig: () => config,
         },
         { taskType: "bedtime", nightDate: day },
@@ -947,15 +1094,17 @@ async function main(): Promise<void> {
         summary: outcome.summary,
       };
       await saveReplayState(opts.dataDir, state);
+      const dailyRefTag = outcome.dailyReflect
+        ? outcome.dailyReflect.triggered
+          ? ` | 已合并日反思${outcome.dailyReflect.decisionScores ? ` scores=${JSON.stringify(outcome.dailyReflect.decisionScores)}` : ""}`
+          : ` | 日反思跳过(${outcome.dailyReflect.skipReason ?? "无需反思"}${outcome.dailyReflect.decisionScores ? ` scores=${JSON.stringify(outcome.dailyReflect.decisionScores)}` : ""})`
+        : "";
       console.log(
-        `[${day}] 整理成功 (${elapsedSec}s): 消化 ${outcome.processedEvents} 条 | 摘要: ${outcome.summary} | 触碰卡片 (${outcome.touchedMemoryPaths.length}): ${outcome.touchedMemoryPaths.join(", ") || "无"}`,
+        `[${day}] 整理成功 (${elapsedSec}s): 消化 ${outcome.processedEvents} 条 | 摘要: ${outcome.summary}${dailyRefTag} | 触碰卡片 (${outcome.touchedMemoryPaths.length}): ${outcome.touchedMemoryPaths.join(", ") || "无"}`,
       );
 
-      if (!opts.mock) {
-        const decisionClient = new DynamicDecisionClient({
-          dataDir: opts.dataDir,
-          getConfig: () => config,
-        });
+      if (!opts.mock && decisionClient) {
+        // 日反思已合并在 bedtime 中完成，此处在周日或跨过周日时补跑独立周反思（daily 将按游标 0 token 跳过）
         const refRes = await maybeRunReflectAfterBedtime(
           {
             db,
@@ -970,23 +1119,18 @@ async function main(): Promise<void> {
           },
           { targetDay: day },
         );
-        const logRef = (label: string, r: typeof refRes.daily) => {
-          const scores = r.decisionScores
-            ? ` scores=${JSON.stringify(r.decisionScores)}`
-            : "";
+        if (refRes.weekly) {
+          const r = refRes.weekly;
+          const scores = r.decisionScores ? ` scores=${JSON.stringify(r.decisionScores)}` : "";
           if (!r.triggered) {
-            console.log(`  [${day}] ${label}跳过: ${r.skipReason ?? r.summary}${scores}`);
+            console.log(`  [${day}] 周反思跳过: ${r.skipReason ?? r.summary}${scores}`);
           } else if (r.ok) {
             console.log(
-              `  [${day}] ${label}完成: ${r.summary}${scores} | 触碰 (${r.touchedMemoryPaths.length}): ${r.touchedMemoryPaths.join(", ") || "无"}`,
+              `  [${day}] 周反思完成: ${r.summary}${scores} | 触碰 (${r.touchedMemoryPaths.length}): ${r.touchedMemoryPaths.join(", ") || "无"}`,
             );
           } else {
-            console.warn(`  [${day}] ${label}失败: ${r.error}`);
+            console.warn(`  [${day}] 周反思失败: ${r.error}`);
           }
-        };
-        logRef("日反思", refRes.daily);
-        if (refRes.weekly) {
-          logRef("周日反思", refRes.weekly);
         }
       }
     }

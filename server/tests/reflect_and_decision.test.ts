@@ -17,7 +17,9 @@ import {
   evaluateAndRunReflect,
   isSubstantiveReflectPath,
   isSundayDay,
+  isWeeklyReflectDue,
   maybeRunReflectAfterBedtime,
+  mostRecentSundayOnOrBefore,
   type DecisionClient,
   type DecisionRequest,
   type DecisionResponse,
@@ -29,8 +31,10 @@ import {
   isGeminiDecisionModel,
 } from "../src/llm/decision.ts";
 import { discoverProviderModels, resolveByokSlot, testModelConnection } from "../src/llm/router.ts";
+import { runMemoryTidyTask } from "../src/engine/tidy.ts";
 import { MemoryIndex } from "../src/memory/index.ts";
 import { MemoryTools } from "../src/memory/tools.ts";
+import { EventStore } from "../src/store/events.ts";
 
 const PROMPTS_DIR = path.resolve(import.meta.dir, "../../prompts");
 const tempDirs: string[] = [];
@@ -126,6 +130,42 @@ describe("Git helpers & Reflect hard/decision gating", () => {
     expect(isSubstantiveReflectPath("core/state.md")).toBe(false);
     expect(isSundayDay("2026-10-17")).toBe(false);
     expect(isSundayDay("2026-10-18")).toBe(true);
+    expect(mostRecentSundayOnOrBefore("2026-10-18")).toBe("2026-10-18");
+    expect(mostRecentSundayOnOrBefore("2026-10-20")).toBe("2026-10-18");
+    expect(mostRecentSundayOnOrBefore("2026-10-17")).toBe("2026-10-11");
+  });
+
+  test("isWeeklyReflectDue catches up when Sunday was deferred, without firing prematurely on week 1", async () => {
+    const env = await setupMemoryEnv("2026-10-13T23:40:00+08:00");
+    try {
+      const events = new EventStore(env.db, env.clock);
+      // 首条对话在周一 2026-10-12，周二 10-13 不应误触发周反思
+      env.clock.jumpToWallClock(2026, 10, 12, 22, 0, 0);
+      events.append({ sessionId: "s1", turnId: "t1", role: "user", kind: "chat", content: "hello" });
+      expect(isWeeklyReflectDue(env.db, "2026-10-13", "Asia/Shanghai")).toBe(false);
+
+      // 跨过周日 2026-10-18 后，周二 10-20 应补触发周反思
+      expect(isWeeklyReflectDue(env.db, "2026-10-20", "Asia/Shanghai")).toBe(true);
+
+      // 写入 10-20 已检查游标后，周三 10-21 不再重复触发
+      env.db
+        .query(
+          "INSERT INTO task_cursors (task_key, last_event_id, meta_json, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          "reflect_weekly",
+          "abc",
+          JSON.stringify({ last_commit: "abc", last_day: "2026-10-20" }),
+          env.clock.now(),
+        );
+      expect(isWeeklyReflectDue(env.db, "2026-10-21", "Asia/Shanghai")).toBe(false);
+      // 下一个周日 2026-10-25 到来时再次触发
+      expect(isWeeklyReflectDue(env.db, "2026-10-25", "Asia/Shanghai")).toBe(true);
+      // 若 10-25 也顺延到周一 10-26，同样补触发
+      expect(isWeeklyReflectDue(env.db, "2026-10-26", "Asia/Shanghai")).toBe(true);
+    } finally {
+      env.db.close();
+    }
   });
 
   test("daily reflect skips with 0 LLM calls when only index.md or core/state.md changed", async () => {
@@ -373,6 +413,128 @@ describe("Git helpers & Reflect hard/decision gating", () => {
         .then(() => true)
         .catch(() => false);
       expect(exists).toBe(false);
+    } finally {
+      env.db.close();
+    }
+  });
+
+  test("bedtime 合并日反思：过门控时同轮写入 rf-*.md 与 index.md 并推进日反思游标，后续不再重复跑日反思", async () => {
+    const env = await setupMemoryEnv("2026-10-17T23:40:00+08:00");
+    try {
+      const events = new EventStore(env.db, env.clock);
+      events.append({
+        sessionId: "s-merged",
+        turnId: "t-merged",
+        role: "user",
+        kind: "chat",
+        content: "今天认真聊了彼此相处的边界，很有触动。",
+      });
+
+      const highDecision: DecisionClient = {
+        async decide() {
+          return {
+            answers: {
+              has_notable_shift: { noul: 0.91 },
+              touches_open_thread: { noul: 0.72 },
+            },
+          };
+        },
+      };
+
+      let sawReflectGuideInBedtime = false;
+      const chatModel = new ScriptedChatModel((req, idx) => {
+        if (idx === 0) {
+          return [
+            {
+              type: "tool_call",
+              id: "tc-ep",
+              name: "write",
+              args: {
+                path: "episodes/2026/10/17/ep-boundary-chat.md",
+                content:
+                  "---\ntitle: 10-17 边界深聊\nkind: episode\nstatus: active\ncreated: 2026-10-17\nupdated: 2026-10-17\n---\n认真聊了相处边界。\n",
+              },
+            },
+          ];
+        }
+        if (idx === 1) {
+          return [{ type: "text_delta", delta: '{"summary": "归档边界深聊"}' }];
+        }
+        if (idx === 2) {
+          const lastMsg = req.messages[req.messages.length - 1];
+          const userContent = String(lastMsg?.role === "user" ? lastMsg.content : "");
+          sawReflectGuideInBedtime =
+            req.messages.length > 1 &&
+            userContent.includes("<bedtime_phase>") &&
+            userContent.includes("<daily_reflect_guide>") &&
+            userContent.includes("<reflect_context>");
+          return [
+            {
+              type: "tool_call",
+              id: "tc-rf",
+              name: "write",
+              args: {
+                path: "episodes/2026/10/17/rf-boundary-shift.md",
+                content:
+                  "---\ntitle: 10-17 反思·边界共识\nkind: reflection\nstatus: active\ncreated: 2026-10-17\nupdated: 2026-10-17\n---\n今天对相处边界有了更清晰的理解。\n",
+              },
+            },
+            {
+              type: "tool_call",
+              id: "tc-idx",
+              name: "write",
+              args: {
+                path: "episodes/2026/10/17/index.md",
+                content:
+                  "---\ntitle: 2026-10-17 日梗概\nkind: note\nstatus: active\ncreated: 2026-10-17\nupdated: 2026-10-17\n---\n认真聊了相处边界（[[10-17 边界深聊]]）。\n",
+              },
+            },
+          ];
+        }
+        return [{ type: "text_delta", delta: '{"summary": "完成日梗概与边界反思"}' }];
+      });
+
+      const res = await runMemoryTidyTask(
+        {
+          db: env.db,
+          dataDir: env.dataDir,
+          promptsDir: PROMPTS_DIR,
+          clock: env.clock,
+          events,
+          memoryIndex: env.memoryIndex,
+          memoryTools: env.memoryTools,
+          chatModel,
+          decisionClient: highDecision,
+          getConfig: () => env.config,
+          retryDelaysMs: [],
+        },
+        { taskType: "bedtime", nightDate: "2026-10-17" },
+      );
+
+      expect(res.ok).toBe(true);
+      expect(sawReflectGuideInBedtime).toBe(true);
+      expect(res.dailyReflect?.triggered).toBe(true);
+      expect(res.touchedMemoryPaths).toContain("episodes/2026/10/17/rf-boundary-shift.md");
+      expect(res.touchedMemoryPaths).toContain("episodes/2026/10/17/index.md");
+
+      const callsBefore = chatModel.calls;
+      const afterRes = await maybeRunReflectAfterBedtime(
+        {
+          db: env.db,
+          dataDir: env.dataDir,
+          promptsDir: PROMPTS_DIR,
+          clock: env.clock,
+          memoryIndex: env.memoryIndex,
+          memoryTools: env.memoryTools,
+          chatModel,
+          decisionClient: highDecision,
+          getConfig: () => env.config,
+        },
+        { targetDay: "2026-10-17" },
+      );
+      expect(afterRes.daily.triggered).toBe(false);
+      expect(afterRes.daily.skipReason).toBe("already_checked_today");
+      expect(chatModel.calls).toBe(callsBefore);
     } finally {
       env.db.close();
     }

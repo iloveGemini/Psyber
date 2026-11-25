@@ -78,6 +78,8 @@ export interface ReflectTaskDeps {
   chatModel: ChatModelClient;
   decisionClient?: DecisionClient;
   getConfig?: () => PsyberConfig;
+  /** 单步瞬时错误（503/429/网络抖动）退避延迟毫秒数组，默认 [3000, 10000, 25000] */
+  retryDelaysMs?: number[];
 }
 
 export interface ReflectTaskOutcome {
@@ -98,13 +100,42 @@ export interface PostBedtimeReflectResult {
   weekly: ReflectTaskOutcome | null;
 }
 
-const MAX_REFLECT_STEPS = 14;
+const MAX_REFLECT_STEPS = 18;
+const DEFAULT_REFLECT_RETRY_DELAYS_MS = [3_000, 10_000, 25_000];
+
+function isTransientReflectError(code: string, message: string, retryable?: boolean): boolean {
+  if (code === "CONTEXT_OVERFLOW" || code === "AUTH_EXPIRED") return false;
+  if (/usage limit|quota|insufficient_quota|billing|payment required|credit balance/i.test(message)) {
+    return false;
+  }
+  if (code === "RATE_LIMITED") return true;
+  return retryable !== false;
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 const DAILY_SHIFT_THRESHOLD = 0.55;
 const DAILY_OPEN_THRESHOLD = 0.60;
 const WEEKLY_UNABSORBED_THRESHOLD = 0.55;
 const WEEKLY_PATTERN_THRESHOLD = 0.55;
 
-const REFLECT_SCOPE_BLOCKS: Record<ReflectScope, string> = {
+export const REFLECT_SCOPE_BLOCKS: Record<ReflectScope, string> = {
   daily:
     "这是一次【日反思】。结合今日新增或更新的记忆线索，我自主查阅相关的 episodes/、threads/、entities/、lessons/ 与 core/ 文件，思考今天有没有值得沉淀的情绪变化、观念转折、相处边界磨合、自我觉察或未完挂念。若有，先在今日目录写 rf-<slug>.md 记录心路历程，再把清晰成果按作用范围分流到 core/、lessons/、threads/ 或 entities/；若今天只是平淡日常、没有真正值得落笔的洞察，可以不写任何文件直接结束。",
   weekly:
@@ -157,6 +188,61 @@ export function isSundayDay(dayStr: string): boolean {
   if (!m) return false;
   const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0));
   return d.getUTCDay() === 0;
+}
+
+/** 返回不晚于 dayStr 的最近一个周日（YYYY-MM-DD；若 dayStr 本身是周日则返回自身） */
+export function mostRecentSundayOnOrBefore(dayStr: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dayStr);
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const da = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
+}
+
+/**
+ * 判断 targetDay 是否应检查周反思：
+ * 1. 当天本身是周日 -> true；
+ * 2. 若周日因低量攒批顺延或关机错过：
+ *    - 已有 reflect_weekly 游标：cursor.last_day < 最近一个周日 -> true（跨周日补触发）；
+ *    - 尚无 reflect_weekly 游标：首条活跃对话或情景切片早于/等于最近一个周日 -> true（避免首周非周日误触发）。
+ */
+export function isWeeklyReflectDue(db: Database, targetDay: string, timeZone: string): boolean {
+  if (isSundayDay(targetDay)) return true;
+  const lastSunday = mostRecentSundayOnOrBefore(targetDay);
+  if (!lastSunday) return false;
+
+  const cursor = readReflectCursor(db, "weekly");
+  if (cursor.last_day) {
+    return cursor.last_day < lastSunday;
+  }
+
+  const evRow = db
+    .query(
+      `SELECT MIN(created_at) AS min_at FROM events
+       WHERE status IN ('active', 'retracted') AND role IN ('user', 'assistant')`,
+    )
+    .get() as { min_at: number | null } | null;
+  if (evRow?.min_at != null && localDay(evRow.min_at, timeZone) <= lastSunday) {
+    return true;
+  }
+
+  const epRow = db
+    .query(
+      `SELECT MIN(path) AS min_path FROM card_index
+       WHERE space = 'episodes' AND path GLOB 'episodes/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*'`,
+    )
+    .get() as { min_path: string | null } | null;
+  if (epRow?.min_path) {
+    const m = /^episodes\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(epRow.min_path);
+    if (m && `${m[1]}-${m[2]}-${m[3]}` <= lastSunday) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /** 是否为反思卡片（episodes/YYYY/MM/DD/rf-*.md） */
@@ -238,7 +324,7 @@ async function buildFileExcerpts(
   return lines.join("\n");
 }
 
-function buildReflectContextBlock(opts: {
+export function buildReflectContextBlock(opts: {
   scope: ReflectScope;
   targetDay: string;
   changedPaths: string[];
@@ -355,6 +441,7 @@ export async function runMemoryReflectTask(
   const cfg = deps.getConfig?.();
   const effectiveThinkingLevel = cfg ? resolveEffectiveThinkingLevel(cfg) : undefined;
   const effectiveThinkingBudget = cfg?.llm?.thinking?.budgetTokens;
+  const retryDelays = deps.retryDelaysMs ?? DEFAULT_REFLECT_RETRY_DELAYS_MS;
 
   let finalText = "";
   let failedReason: string | null = null;
@@ -367,31 +454,65 @@ export async function runMemoryReflectTask(
       let stepStopReason: ChatStopReason | undefined;
       const stepToolCalls: ChatToolCall[] = [];
 
-      for await (const chunk of chatModel.stream({
-        systemPrompt,
-        messages,
-        tools: MEMORY_5_TOOL_DEFINITIONS,
-        ...(effectiveThinkingLevel ? { thinkingLevel: effectiveThinkingLevel } : {}),
-        ...(effectiveThinkingBudget !== undefined
-          ? { thinkingBudgetTokens: effectiveThinkingBudget }
-          : {}),
-        signal: opts.signal,
-      })) {
-        if (chunk.type === "error") {
-          failedReason = `${chunk.code}: ${chunk.message}`;
+      for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+        stepText = "";
+        stepThinking = "";
+        stepThinkingSig = undefined;
+        stepStopReason = undefined;
+        stepToolCalls.length = 0;
+        let attemptError: { code: string; message: string; retryable?: boolean } | null = null;
+
+        try {
+          for await (const chunk of chatModel.stream({
+            systemPrompt,
+            messages,
+            tools: MEMORY_5_TOOL_DEFINITIONS,
+            ...(effectiveThinkingLevel ? { thinkingLevel: effectiveThinkingLevel } : {}),
+            ...(effectiveThinkingBudget !== undefined
+              ? { thinkingBudgetTokens: effectiveThinkingBudget }
+              : {}),
+            signal: opts.signal,
+          })) {
+            if (chunk.type === "error") {
+              attemptError = { code: chunk.code, message: chunk.message, retryable: chunk.retryable };
+              break;
+            }
+            if (chunk.type === "thinking_delta") {
+              if (chunk.delta.length > 0) stepThinking += chunk.delta;
+              if (chunk.signature) stepThinkingSig = chunk.signature;
+            } else if (chunk.type === "text_delta") {
+              stepText += chunk.delta;
+            } else if (chunk.type === "tool_call") {
+              stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
+            } else if (chunk.type === "usage") {
+              if (chunk.stopReason) stepStopReason = chunk.stopReason;
+            }
+          }
+        } catch (streamErr) {
+          const msg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+          attemptError = { code: "PROVIDER_ERROR", message: msg, retryable: true };
+        }
+
+        if (!attemptError) {
+          finalText += stepText;
           break;
         }
-        if (chunk.type === "thinking_delta") {
-          if (chunk.delta.length > 0) stepThinking += chunk.delta;
-          if (chunk.signature) stepThinkingSig = chunk.signature;
-        } else if (chunk.type === "text_delta") {
-          stepText += chunk.delta;
-          finalText += chunk.delta;
-        } else if (chunk.type === "tool_call") {
-          stepToolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.args });
-        } else if (chunk.type === "usage") {
-          if (chunk.stopReason) stepStopReason = chunk.stopReason;
+
+        const canRetry =
+          attempt < retryDelays.length &&
+          !opts.signal?.aborted &&
+          isTransientReflectError(attemptError.code, attemptError.message, attemptError.retryable);
+        if (canRetry) {
+          const waitMs = retryDelays[attempt]!;
+          console.warn(
+            `[reflect] step ${step + 1} 遇到瞬时错误 (${attemptError.code}: ${attemptError.message})，${Math.round(waitMs / 1000)}s 后重试 (${attempt + 1}/${retryDelays.length})...`,
+          );
+          await sleepWithAbort(waitMs, opts.signal);
+          continue;
         }
+
+        failedReason = `${attemptError.code}: ${attemptError.message}`;
+        break;
       }
 
       if (failedReason) break;
@@ -493,20 +614,29 @@ export async function runMemoryReflectTask(
   };
 }
 
+export interface ReflectGateResult {
+  shouldReflect: boolean;
+  skipReason?: string;
+  summary?: string;
+  headCommit: string | null;
+  changedPaths: string[];
+  dailyRefPaths: string[];
+  decisionScores?: Record<string, number>;
+}
+
 /**
- * 评估单种周期（daily / weekly）是否需要启动深度反思：
- * 1. Git 硬闸：对比上次 reflect 游标 commit 到 HEAD 的实质文件变更，无实质变更直接 0 token 跳过；
- * 2. Decision 软闸：若注入了 DecisionClient，由决策模型判定是否值得启动反思；
- * 3. 启动 runMemoryReflectTask，完成后将游标推进到最新 HEAD commit。
+ * 仅执行反思门控判定（Git 硬闸 + Decision 软闸），供独立反思轮与合并后的 bedtime 复用：
+ * - 若因无实质变更或未达决策阈值跳过，立即推进对应游标；
+ * - 若判定需要反思（shouldReflect=true），游标留待实际写入提交成功后再推进。
  */
-export async function evaluateAndRunReflect(
-  deps: ReflectTaskDeps,
+export async function evaluateReflectGate(
+  deps: Pick<ReflectTaskDeps, "db" | "dataDir" | "clock" | "decisionClient">,
   opts: {
     scope: ReflectScope;
     targetDay?: string;
     signal?: AbortSignal;
   },
-): Promise<ReflectTaskOutcome> {
+): Promise<ReflectGateResult> {
   const { db, dataDir, clock, decisionClient } = deps;
   const targetDay = opts.targetDay ?? localDay(clock.now(), clock.timeZone);
   const memoryDir = path.join(dataDir, "memory");
@@ -514,28 +644,24 @@ export async function evaluateAndRunReflect(
 
   if (cursor.last_day === targetDay) {
     return {
-      ok: true,
-      scope: opts.scope,
-      triggered: false,
+      shouldReflect: false,
       skipReason: "already_checked_today",
-      changedPaths: [],
-      touchedMemoryPaths: [],
-      committed: false,
       summary: "今日已检查过反思门控",
+      headCommit: cursor.last_commit ?? null,
+      changedPaths: [],
+      dailyRefPaths: [],
     };
   }
 
   const headCommit = await getMemoryHeadCommit(dataDir);
   if (!headCommit) {
     return {
-      ok: true,
-      scope: opts.scope,
-      triggered: false,
+      shouldReflect: false,
       skipReason: "no_git_commits",
-      changedPaths: [],
-      touchedMemoryPaths: [],
-      committed: false,
       summary: "尚无记忆提交",
+      headCommit: null,
+      changedPaths: [],
+      dailyRefPaths: [],
     };
   }
 
@@ -551,14 +677,12 @@ export async function evaluateAndRunReflect(
       last_decision: "skipped_no_changes",
     });
     return {
-      ok: true,
-      scope: opts.scope,
-      triggered: false,
+      shouldReflect: false,
       skipReason: "no_substantive_changes",
-      changedPaths: [],
-      touchedMemoryPaths: [],
-      committed: false,
       summary: "无实质变更，跳过反思",
+      headCommit,
+      changedPaths: [],
+      dailyRefPaths,
     };
   }
 
@@ -642,48 +766,103 @@ export async function evaluateAndRunReflect(
           last_decision: "skipped_by_decision",
         });
         return {
-          ok: true,
-          scope: opts.scope,
-          triggered: false,
+          shouldReflect: false,
           skipReason: "decision_below_threshold",
-          changedPaths: substantivePaths,
-          decisionScores,
-          touchedMemoryPaths: [],
-          committed: false,
           summary: "决策模型判定无需反思",
+          headCommit,
+          changedPaths: substantivePaths,
+          dailyRefPaths,
+          decisionScores,
         };
       }
     } catch (err) {
       console.warn(`[psyber] reflect(${opts.scope}) decision gate failed, skipping reflect:`, err);
       return {
-        ok: true,
-        scope: opts.scope,
-        triggered: false,
+        shouldReflect: false,
         skipReason: `decision_error: ${(err as Error).message}`,
-        changedPaths: substantivePaths,
-        touchedMemoryPaths: [],
-        committed: false,
         summary: "决策门控异常，本次跳过反思",
+        headCommit,
+        changedPaths: substantivePaths,
+        dailyRefPaths,
       };
     }
+  }
+
+  return {
+    shouldReflect: true,
+    headCommit,
+    changedPaths: substantivePaths,
+    dailyRefPaths,
+    decisionScores,
+  };
+}
+
+/** 反思（或合并了日反思的 bedtime）成功落盘后推进对应反思游标 */
+export function markReflectCursorCompleted(
+  db: Database,
+  scope: ReflectScope,
+  nowMs: number,
+  opts: { targetDay: string; commitHash: string | null; committed: boolean },
+): void {
+  writeReflectCursor(db, scope, nowMs, {
+    last_commit: opts.commitHash,
+    last_day: opts.targetDay,
+    last_run_at: nowMs,
+    last_decision: opts.committed ? "reflected_committed" : "reflected_noop",
+  });
+}
+
+/**
+ * 评估单种周期（daily / weekly）是否需要启动深度反思：
+ * 1. Git 硬闸：对比上次 reflect 游标 commit 到 HEAD 的实质文件变更，无实质变更直接 0 token 跳过；
+ * 2. Decision 软闸：若注入了 DecisionClient，由决策模型判定是否值得启动反思；
+ * 3. 启动 runMemoryReflectTask，完成后将游标推进到最新 HEAD commit。
+ */
+export async function evaluateAndRunReflect(
+  deps: ReflectTaskDeps,
+  opts: {
+    scope: ReflectScope;
+    targetDay?: string;
+    signal?: AbortSignal;
+  },
+): Promise<ReflectTaskOutcome> {
+  const { db, dataDir, clock } = deps;
+  const targetDay = opts.targetDay ?? localDay(clock.now(), clock.timeZone);
+  const gate = await evaluateReflectGate(deps, {
+    scope: opts.scope,
+    targetDay,
+    signal: opts.signal,
+  });
+
+  if (!gate.shouldReflect) {
+    return {
+      ok: true,
+      scope: opts.scope,
+      triggered: false,
+      skipReason: gate.skipReason,
+      changedPaths: gate.changedPaths,
+      decisionScores: gate.decisionScores,
+      touchedMemoryPaths: [],
+      committed: false,
+      summary: gate.summary ?? "跳过反思",
+    };
   }
 
   const outcome = await runMemoryReflectTask(deps, {
     scope: opts.scope,
     targetDay,
-    changedPaths: substantivePaths,
-    dailyRefPaths,
-    decisionScores,
+    changedPaths: gate.changedPaths,
+    dailyRefPaths: gate.dailyRefPaths,
+    decisionScores: gate.decisionScores,
     signal: opts.signal,
   });
 
   if (outcome.ok) {
-    const newHead = (await getMemoryHeadCommit(dataDir)) ?? headCommit;
-    writeReflectCursor(db, opts.scope, clock.now(), {
-      last_commit: newHead,
-      last_day: targetDay,
-      last_run_at: clock.now(),
-      last_decision: outcome.committed ? "reflected_committed" : "reflected_noop",
+    const newHead = (await getMemoryHeadCommit(dataDir)) ?? gate.headCommit;
+    markReflectCursorCompleted(db, opts.scope, clock.now(), {
+      targetDay,
+      commitHash: newHead,
+      committed: outcome.committed,
     });
   }
 
@@ -693,7 +872,7 @@ export async function evaluateAndRunReflect(
 /**
  * 睡前整理（bedtime）完成后依次执行：
  * 1. 日反思门控（每日 bedtime 后对比上次日反思 commit）
- * 2. 周反思门控（仅周日 bedtime 后对比上周周反思 commit，若新增已被日反思吸收则跳过）
+ * 2. 周反思门控（周日或跨过周日补触发，对比上周周反思 commit，若新增已被日反思吸收则跳过）
  */
 export async function maybeRunReflectAfterBedtime(
   deps: ReflectTaskDeps,
@@ -707,7 +886,7 @@ export async function maybeRunReflectAfterBedtime(
   });
 
   let weekly: ReflectTaskOutcome | null = null;
-  if (isSundayDay(targetDay)) {
+  if (isWeeklyReflectDue(deps.db, targetDay, deps.clock.timeZone)) {
     weekly = await evaluateAndRunReflect(deps, {
       scope: "weekly",
       targetDay,
