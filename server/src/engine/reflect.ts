@@ -27,46 +27,21 @@ import { MEMORY_5_TOOL_DEFINITIONS } from "../tools/core_tools.ts";
 
 export type ReflectScope = "daily" | "weekly";
 
-/**
- * 决策模型单题定义（对齐 Gemini Decisions API `v1beta/decisions`）：
- * - noul: 是/否校准概率（0.01..0.99）
- * - choice: 单选分类（criteria 键值映射各选项说明）
- * - score: 有序量表打分
- */
-export interface DecisionQuestion {
-  type: "noul" | "choice" | "score";
-  instructions: string;
-  criteria?: Record<string, string>;
-}
+import type {
+  DecisionAnswer,
+  DecisionClient,
+  DecisionQuestion,
+  DecisionRequest,
+  DecisionResponse,
+} from "../core/decision.ts";
 
-export interface DecisionAnswer {
-  /** noul 类型返回 0.01..0.99 校准概率 */
-  noul?: number;
-  /** choice 类型返回最高概率选项名 */
-  choice?: string;
-  /** score 类型返回期望分值 */
-  score?: number;
-  /** 置信度（0..1） */
-  confidence?: number;
-  /** choice / score 各选项概率分布 */
-  probabilities?: Record<string, number>;
-}
-
-export interface DecisionRequest {
-  input: string;
-  questions: Record<string, DecisionQuestion>;
-  signal?: AbortSignal;
-}
-
-export interface DecisionResponse {
-  answers: Record<string, DecisionAnswer>;
-  /** 实际使用的后端标识（便于日志与测试观测） */
-  backend?: string;
-}
-
-export interface DecisionClient {
-  decide(req: DecisionRequest): Promise<DecisionResponse>;
-}
+export type {
+  DecisionAnswer,
+  DecisionClient,
+  DecisionQuestion,
+  DecisionRequest,
+  DecisionResponse,
+};
 
 export interface ReflectTaskDeps {
   db: Database;

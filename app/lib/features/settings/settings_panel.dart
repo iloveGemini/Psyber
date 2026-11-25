@@ -2692,6 +2692,7 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
       if (!mounted) return;
       setState(() {
         _saving = false;
+        _discoveredById = const <String, DiscoveredModelView>{};
         _feedbackOk = true;
         _feedback = '服务地址已更新';
       });
@@ -2735,6 +2736,7 @@ class _ModelProvidersSectionState extends State<_ModelProvidersSection> {
       _apiKeyCtrl.clear();
       setState(() {
         _saving = false;
+        _discoveredById = const <String, DiscoveredModelView>{};
         _feedbackOk = true;
         _feedback = 'API 密钥已更新并安全存储';
       });
@@ -3302,9 +3304,7 @@ class _AddModelDialogState extends State<_AddModelDialog> {
   void initState() {
     super.initState();
     _discovered = Map<String, DiscoveredModelView>.from(widget.initialDiscovered);
-    if (_discovered.isEmpty) {
-      unawaited(_fetchModels());
-    }
+    unawaited(_fetchModels());
   }
 
   Future<void> _fetchModels() async {
@@ -3372,9 +3372,24 @@ class _AddModelDialogState extends State<_AddModelDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                '添加模型到 ${p.id}',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '添加模型到 ${p.id}',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: colors.inkDeep),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _loading ? null : () => unawaited(_fetchModels()),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(_loading ? '拉取中…' : '刷新列表', style: const TextStyle(fontSize: 11.5)),
+                  ),
+                ],
               ),
               const SizedBox(height: 10),
               TextField(
@@ -3389,7 +3404,7 @@ class _AddModelDialogState extends State<_AddModelDialog> {
                 onChanged: (_) => setState(() {}),
                 onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
               ),
-              if (_loading) ...[
+              if (_loading && _discovered.isEmpty) ...[
                 const SizedBox(height: 12),
                 Row(
                   children: [

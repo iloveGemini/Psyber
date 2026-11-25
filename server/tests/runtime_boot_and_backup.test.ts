@@ -450,4 +450,76 @@ describe("index.ts 运行时全链路串联（配对、75% 异步整理、作息
     expect(call3.systemPrompt).toContain("<continuity>");
     expect(call3.systemPrompt).toContain("昨晚我们约好周六去看海边日出");
   });
+
+  test("记忆已写完的测试/迁移目录启动绝不误触 bedtime；多日未开机按真实未结算日补跑；无对话日入睡不空跑", async () => {
+    const dataDir = await makeTempDir();
+    const clock = new VirtualClock(0, "Asia/Shanghai");
+
+    // 1. 模拟已完成记忆导入的目录（有 2026-10-31 的 ep 卡与 index.md，但无 task_cursors['bedtime']，且文件 mtime 较新）
+    await fs.mkdir(path.join(dataDir, "memory", "episodes", "2026", "10", "31"), { recursive: true });
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "10", "31", "ep-old.md"),
+      "---\ntitle: 旧日记录\nkind: episode\ncreated: 2026-10-31\n---\n已经整理完的旧记忆（故意不写 updated 字段，测试 mtime 不误伤）。\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(dataDir, "memory", "episodes", "2026", "10", "31", "index.md"),
+      "---\nupdated: 2026-10-31\n---\n十月最后一天已完整日结。\n",
+      "utf8",
+    );
+
+    // 2026-11-25 白天拉起服务：无新对话，不应触发任何 bedtime（绝不误发 2026-11-24 bedtime）
+    clock.jumpToWallClock(2026, 11, 25, 14, 0, 0);
+    const chatIdle = new MockChatModel();
+    const rtIdle = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chatIdle,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rtIdle);
+    await rtIdle.waitForIdle();
+    expect(chatIdle.requests).toHaveLength(0);
+    expect(rtIdle.events.getBedtimeNightDate()).toBeNull();
+
+    // 当晚进入睡眠窗（23:45），一整天没有任何新对话或新卡片 -> 必须返回 idle，绝不空跑 bedtime
+    clock.jumpToWallClock(2026, 11, 25, 23, 45, 0);
+    const quietNight = await rtIdle.tickHeartbeat();
+    expect(quietNight).toEqual({ action: "idle" });
+    await rtIdle.waitForIdle();
+    expect(chatIdle.requests).toHaveLength(0);
+
+    // 2. 在 2026-11-20 聊过一次后关服（未生成 11-20 index.md），直到 2026-11-25 才重新开机：
+    //    必须按真实未结算日 2026-11-20 补跑，而不是硬塞空日期 2026-11-24
+    clock.jumpToWallClock(2026, 11, 20, 20, 0, 0);
+    rtIdle.events.append({
+      sessionId: rtIdle.engine.getActiveSessionId(),
+      role: "user",
+      kind: "chat",
+      content: "今天 11 月 20 日买了新咖啡豆",
+    });
+    await rtIdle.stop();
+    activeRuntimes.pop();
+
+    clock.jumpToWallClock(2026, 11, 25, 14, 0, 0);
+    const chatCatchUp = new MockChatModel();
+    chatCatchUp.queueStream(() => [{ type: "text_delta", delta: '{"summary": "记下新咖啡豆"}' }]);
+    chatCatchUp.queueStream(() => [{ type: "text_delta", delta: '{"summary": "补写 11-20 日梗概"}' }]);
+    const rtCatchUp = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: chatCatchUp,
+      startHeartbeatTimer: false,
+    });
+    activeRuntimes.push(rtCatchUp);
+    await rtCatchUp.waitForIdle();
+
+    expect(rtCatchUp.events.getBedtimeNightDate()).toBe("2026-11-20");
+    const allPrompts = chatCatchUp.requests
+      .flatMap((r) => r.messages)
+      .map((m) => String(m.content))
+      .join("\n");
+    expect(allPrompts).toContain("当前日期：2026-11-20");
+    expect(allPrompts).not.toContain("当前日期：2026-11-24");
+  });
 });

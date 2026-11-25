@@ -411,8 +411,8 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 ## 7. 召回管线（Ring 1 极简 3 步召回；Ring 1.5 按真实标注启用进阶公式）
 
-> **Ring 1 极简实现口径**：先调用 `expireOverdueStateCards(Clock.now())` 过滤到期 `state` 卡，过 §7.1 空档短路后仅执行 3 步：① 命中 `activities/REGISTRY.yaml` 触发词则挂该目录 Top-3 活跃卡；② 其余活跃卡按 `embedding` 余弦相似度（未配置或超时则降级 FTS5 2-gram）取 Top-5，非活动闲聊补近 72h 未过期 `daily/` 最多 2 条；③ 剔除 2h 内本会话已召回卡，按 `3200` 字符截断并写入 `recall_traces`。
-> 下文 §7.2–§7.4 中的全库实时 `MATCH` IDF 公式、单字 `LIKE` 兜底、`access_count` 半衰期延寿与 `Reranker` 二阶段精排**延后至 Ring 1.5**，待攒够 ≥ 100 条真实 `recall_feedback` 标注后按数据评估启用。
+> **Ring 1 极简实现口径**：先调用 `expireOverdueStateCards(Clock.now())` 过滤到期 `state` 卡，过 §7.1 空档短路后执行：① 拼装查询窗口（当前用户消息 + 最近 `queryWindowTurns` 轮对话截断）与常驻核心摘要 `<resident_context>`（`core/{open,state,user,self}.md` 精简 ≤ 1500 字）；② 若 `recall.gate.enabled` 开启且 `decisionClient` 可用：当活跃卡总数 `≤ catalogScanMaxCards`（默认 `250`）时，直接将全部未去重活跃卡的「标题 + `when_to_recall`」连同 `needs_memory` 合成**单次**并行 `DecisionClient.decide` 请求（绕开 FTS5 字面漏召天花板）；超出上限时先宽召回候选池（`threads/REGISTRY.yaml` 触发词 + Embedding/FTS5 + 近 72h `episodes/`，最多 `candidatePool` 张）再单次门控精排。硬超时 `decisionTimeoutMs`（默认 `3000ms`，带 `AbortSignal`）：`needs_memory < gate.threshold`（默认 `0.20`）时跳过本轮召回，否则仅保留 `rerankScore >= rerank.threshold`（默认 `0.25`）的 Top-5 并写入 `recall_traces.rerank_score`；若未开启、未配置或超时报错，平滑降级为现行规则 + FTS 分数门槛（`ftsMinScore`）；③ 按 `3200` 字符截断并写入 `recall_traces`。门控与精排指令统一维护于 [`prompts/recall-gate.md`](../../prompts/recall-gate.md)。
+> 下文 §7.2–§7.4 中的全库实时 `MATCH` IDF 公式、单字 `LIKE` 兜底、`access_count` 半衰期延寿与独立 `Reranker` 二阶段精排**按数据评估按需启用**。
 
 ### 7.1 空档短路检测（Blank-Turn Short-Circuit）
 
@@ -595,6 +595,29 @@ bun run eval:recall --data-dir ~/.psyber/test --offline --top-k 5
     - **Miss Recovery Rate** $= \frac{\text{历史标为 } missed \text{ 且新算法成功召回的条数}}{\text{历史带 } cardPath \text{ 的 } missed \text{ 总数}}$；
     - **分轨道贡献占比**：`same_activity` / `cross_vector` / `daily_recent` 各自的命中量与准确率；
     - 可选 `--baseline <report.json>`（Ring 1.5）：对比基线报告，若 Precision 下降 `> 3%` 或 Noise Rate 上升 `> 3%` 返回非零退出码用于回归守门。
+
+### 9.3 闲聊回放召回评测（`bun run eval:recall-replay`）
+
+针对陪伴型闲聊场景（非问答基准），利用已有 `replay` 生成的历史事件与按日 Git 提交的 `memory/` 仓库进行时间切片回放评测：
+
+```bash
+bun run eval:recall-replay --data-dir ~/.psyber/test-replay <prepare|grade|apply-review|run>
+```
+
+1. **隐私与只读隔离（红线）**：
+   - 对目标 `<dataDir>` 的 `psyber.sqlite` 与 `memory/` 严格只读，绝不写回原库；
+   - 全部评测中间产物、标注集、人工抽查单、决策缓存与报告仅落在 `<dataDir>/eval/`（`moments.jsonl`、`gold.jsonl`、`review.md`、`decision_cache.jsonl`、`reports/*.json`），严禁将真实对话相关数据提交进仓库；仓库内自动化测试仅使用临时目录合成夹具 + Mock 决策客户端。
+2. **防穿越时间切片**：
+   - 按 `replay_state.json` 或 `memory/.git` 每日 `bedtime`/`reflect` 提交建立「回放日期 → 前一日整理完成 commit」映射；
+   - 评测第 `D` 天消息时，仅将 `D-1` 日快照检出至临时目录并重建临时 SQLite 派生索引，杜绝召回尚未发生的未来卡片。
+3. **五类聊天时刻分层标注**：
+   - `callback`（明确回指）、`continuation`（续接既有线索）、`resonance`（话题相关、想起更好）、`quiet`（该安静、翻旧账会出戏）、`fresh`（全新话题）。
+   - 候选池合并多路检索（当前句 FTS、查询窗口 FTS、线索触发词、近期日常）并叠加**全卡目录扫描**（将快照内所有活跃卡的 `title + when_to_recall` 送决策模型挑选），兜住纯字面检索漏召的卡片。
+   - 标注打分使用「当下对话窗口 + 后续 2 轮原文 + 卡片全文」进行 0/1/2 三档相关性判分（只判事实相关性，不判文风），生成 `review.md` 供人工抽查改判后固化至 `gold.jsonl`。
+4. **核心指标与归因**：
+   - 门控维度：`quiet` 误召回率、`callback/continuation` 漏召回率、延迟 p50/p90、超时降级次数；
+   - 质量维度：`callback/continuation` 的 `Hit@5`、`resonance` 的 `nDCG@5`、注入卡 0 分噪声占比、每轮平均注入字符数；
+   - 失败归因：对 `callback/continuation` 中无 2 分卡的时刻区分「整理轮未写卡」与「已写卡但未召回」。
 
 ---
 

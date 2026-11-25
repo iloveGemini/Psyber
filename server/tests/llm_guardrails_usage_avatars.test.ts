@@ -315,4 +315,58 @@ describe("Ring 1.5 模型省钱护栏（主备降级、思考档位、双上下�
       await fs.rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  test("GET /api/v1/llm/models 支持自定义 kind 与无 API Key 的本地兼容网关自动拉取 /models", async () => {
+    const dataDir = await createTempDir("psyber-custom-models-");
+    const clock = new VirtualClock(Date.UTC(2026, 10, 25, 14, 0, 0), "Asia/Shanghai");
+    const fetchedUrls: string[] = [];
+
+    const rt = await bootPsyberRuntime({
+      dataDir,
+      promptsDir: PROMPTS_DIR,
+      clock,
+      startHeartbeatTimer: false,
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        fetchedUrls.push(url);
+        if (url === "http://localhost:7860/v1/models") {
+          return new Response(
+            JSON.stringify({
+              data: [{ id: "gemini-4-neon" }, { id: "gemini-4-pro" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      }) as typeof fetch,
+    });
+
+    try {
+      const token = await pairClient(rt);
+      rt.config.llm = {
+        providers: {
+          "AI Studio": {
+            kind: "AI Studio" as "openai-compat",
+            baseUrl: "http://localhost:7860/v1",
+            authMode: "api_key",
+            models: ["gemini-4-neon"],
+          },
+        },
+        slots: { chat: { provider: "AI Studio", model: "gemini-4-neon" } },
+        thinking: { enabled: true },
+      };
+
+      const res = await rt.app.request(
+        `/api/v1/llm/models?provider=${encodeURIComponent("AI Studio")}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { models: Array<{ id: string }> };
+      expect(fetchedUrls).toContain("http://localhost:7860/v1/models");
+      expect(body.models.map((m) => m.id)).toContain("gemini-4-pro");
+    } finally {
+      await rt.stop();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });

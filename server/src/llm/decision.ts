@@ -1,12 +1,13 @@
 import type { PsyberConfig } from "../core/config.ts";
 import { loadCredentials } from "../core/credentials.ts";
-import type {
-  DecisionAnswer,
-  DecisionClient,
-  DecisionQuestion,
-  DecisionRequest,
-  DecisionResponse,
-} from "../engine/reflect.ts";
+import {
+  sanitizeUnicode,
+  type DecisionAnswer,
+  type DecisionClient,
+  type DecisionQuestion,
+  type DecisionRequest,
+  type DecisionResponse,
+} from "../core/decision.ts";
 import type { ModelCatalogService } from "./catalog.ts";
 import type { ChatModelClient } from "./client.ts";
 import {
@@ -95,9 +96,18 @@ export class GeminiDecisionClient implements DecisionClient {
   }
 
   async decide(req: DecisionRequest): Promise<DecisionResponse> {
-    const url = this.baseUrl.endsWith("/decisions")
-      ? this.baseUrl
-      : `${this.baseUrl}/decisions`;
+    // 兼容 OpenAI 代理常见的 `/v1` 结尾（如 http://localhost:7860/v1 -> .../v1beta/decisions）
+    // 以及官方 `/v1beta` 或根域名（https://.../v1beta -> .../v1beta/decisions）
+    let url: string;
+    if (this.baseUrl.endsWith("/decisions")) {
+      url = this.baseUrl;
+    } else if (this.baseUrl.endsWith("/v1")) {
+      url = `${this.baseUrl.slice(0, -3)}/v1beta/decisions`;
+    } else if (this.baseUrl.endsWith("/v1beta")) {
+      url = `${this.baseUrl}/decisions`;
+    } else {
+      url = `${this.baseUrl}/v1beta/decisions`;
+    }
 
     const questionsPayload: Record<string, Record<string, unknown>> = {};
     for (const [qId, q] of Object.entries(req.questions)) {
@@ -122,7 +132,8 @@ export class GeminiDecisionClient implements DecisionClient {
         },
         body: JSON.stringify({
           model: this.modelId,
-          input: req.input,
+          // 防止 slice 截断 emoji 产生孤立 UTF-16 代理项导致严格 JSON 解析报 HTTP 400
+          input: sanitizeUnicode(req.input),
           questions: questionsPayload,
         }),
         signal: controller.signal,
@@ -253,7 +264,8 @@ export class DynamicDecisionClient implements DecisionClient {
     }
 
     const slot = resolved.slot;
-    if (slot.kind === "google" && isGeminiDecisionModel(slot.modelId)) {
+    // gemini-decision-* 仅支持 /v1beta/decisions 协议（不支持 generateContent），无论挂在官方 google 还是本地代理均走原生客户端
+    if (isGeminiDecisionModel(slot.modelId)) {
       const nativeClient = new GeminiDecisionClient({
         apiKey: slot.apiKey,
         modelId: slot.modelId,

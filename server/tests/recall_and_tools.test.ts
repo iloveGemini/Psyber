@@ -402,4 +402,140 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     });
     expect(recallFts.items.some((i) => i.path === "episodes/2026/11/20/rf-jealousy-and-anchor.md")).toBe(false);
   });
+
+  test("Decision 门控与精排：拦截闲聊噪声、精准过滤候选卡、写入 rerank_score、超时平滑降级与开关回退", async () => {
+    ctx = await createTestContext();
+    await ctx.tools.write(
+      "threads/myth/king.md",
+      "---\ntitle: 吃掉自己的国王\nkind: work\nwhen_to_recall: 提到国王或饥饿故事时\n---\n色萨利国王砍倒圣林的老橡树，受到饥饿惩罚。\n",
+    );
+    await ctx.tools.write(
+      "episodes/2026/11/19/ep-noise.md",
+      "---\ntitle: 买菜清单\nkind: episode\ncreated: 2026-11-19\n---\n昨天买了苹果和牛奶，随便聊聊国王水果。\n",
+    );
+
+    const fakeDecision = {
+      calls: 0,
+      mode: "normal" as "normal" | "block" | "timeout",
+      async decide(req: { input: string; questions: Record<string, unknown>; signal?: AbortSignal }) {
+        this.calls++;
+        if (this.mode === "timeout") {
+          throw new Error("AbortError: The operation timed out");
+        }
+        const answers: Record<string, { noul: number }> = {
+          needs_memory: { noul: this.mode === "block" ? 0.12 : 0.91 },
+        };
+        for (const k of Object.keys(req.questions)) {
+          if (k === "needs_memory") continue;
+          const line = req.input.split("\n").find((l) => l.startsWith(`[${k}] `));
+          answers[k] = {
+            noul: line && (line.includes("king.md") || line.includes("吃掉自己的国王")) ? 0.93 : 0.08,
+          };
+        }
+        return { answers, backend: "mock-gate" };
+      },
+    };
+
+    // 1) 门控拦截（needs_memory < threshold）-> 直接跳过，不写 recall_traces
+    fakeDecision.mode = "block";
+    const blocked = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate",
+      turnId: "t-gate-block",
+      query: "今天好累，随便说点什么",
+      decisionClient: fakeDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(blocked.skipped).toBe(true);
+    expect(blocked.items.length).toBe(0);
+    expect(blocked.gateScore).toBeCloseTo(0.12, 2);
+    expect(blocked.usedDecisionGate).toBe(true);
+
+    // 2) 门控通过 + 精排过滤：只保留 king.md，剔除噪声卡 ep-noise.md，并落库 rerank_score
+    fakeDecision.mode = "normal";
+    const passed = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate",
+      turnId: "t-gate-pass",
+      query: "那个国王后来怎么样了",
+      recentTurns: [{ role: "user", content: "上次你给我讲了个希腊神话" }],
+      decisionClient: fakeDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(passed.skipped).toBe(false);
+    expect(passed.items.map((i) => i.path)).toEqual(["threads/myth/king.md"]);
+    expect(passed.items[0]?.rerankScore).toBeCloseTo(0.93, 2);
+    const traceRow = ctx.db
+      .query("SELECT rerank_score FROM recall_traces WHERE turn_id = ?")
+      .get("t-gate-pass") as { rerank_score: number | null };
+    expect(traceRow.rerank_score).toBeCloseTo(0.93, 2);
+
+    // 3) 超时平滑降级：不抛错，标记 timedOut=true，退回规则召回
+    fakeDecision.mode = "timeout";
+    const fallback = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate-2",
+      turnId: "t-gate-timeout",
+      query: "吃掉自己的国王",
+      decisionClient: fakeDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(fallback.timedOut).toBe(true);
+    expect(fallback.items.some((i) => i.path === "threads/myth/king.md")).toBe(true);
+
+    // 4) gate.enabled = false 一键回退，零调用 decisionClient
+    const callsBeforeOff = fakeDecision.calls;
+    const offRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate-3",
+      turnId: "t-gate-off",
+      query: "吃掉自己的国王",
+      decisionClient: fakeDecision,
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { gate: { enabled: false, threshold: 0.55 } },
+    });
+    expect(fakeDecision.calls).toBe(callsBeforeOff);
+    expect(offRes.usedDecisionGate).toBe(false);
+    // 5) 全卡目录直扫模式：即使查询与卡片零字面重叠（FTS5 完全漏召），单次决策仍能召回，且自动注入 <resident_context>
+    await ctx.tools.write(
+      "core/open.md",
+      "---\ntitle: 未完挂念\n---\n约好周末一起复盘希腊神话积分账本。\n",
+    );
+    let capturedInput = "";
+    const capturingDecision = {
+      async decide(req: { input: string; questions: Record<string, unknown>; signal?: AbortSignal }) {
+        capturedInput = req.input;
+        return fakeDecision.decide(req);
+      },
+    };
+    fakeDecision.mode = "normal";
+    const catalogHit = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate-4",
+      turnId: "t-catalog-zero-overlap",
+      query: "完全不撞词的间接回指",
+      decisionClient: capturingDecision,
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { catalogScanMaxCards: 250 },
+    });
+    expect(catalogHit.usedDecisionGate).toBe(true);
+    expect(capturedInput).toContain("<resident_context>");
+    expect(capturedInput).toContain("希腊神话积分账本");
+    expect(catalogHit.items.map((i) => i.path)).toEqual(["threads/myth/king.md"]);
+  });
 });

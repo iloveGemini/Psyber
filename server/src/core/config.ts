@@ -23,6 +23,18 @@ export interface PairedDevice {
 /**
  * 召回引擎可调参数（集中维护于 <dataDir>/config.json 的 recall 节点）。
  */
+export interface RecallGateConfig {
+  /** 是否启用决策模型门控与候选精排（默认 true；关闭后一键回退至纯规则 + FTS 分数门槛） */
+  enabled: boolean;
+  /** 整轮是否需要召回的概率门槛（0..1，默认 0.20；因注入了 <resident_context> 决策模型偏克制，实测 0.20 可将闲聊误召压至 ~14% 且保住回指命中；调高更安静，调低更易触发） */
+  threshold: number;
+}
+
+export interface RecallRerankConfig {
+  /** 单张候选卡的相关性概率门槛（0..1，默认 0.25；调高进一步压低噪声卡，调低保留更多联想卡） */
+  threshold: number;
+}
+
 export interface RecallConfig {
   /** 单轮注入记忆卡片的字符总预算（单位：字符，默认 3200；调大可塞入更多历史细节但增加单轮上下文开销，调小更精简但可能截断长卡） */
   charBudget: number;
@@ -32,6 +44,20 @@ export interface RecallConfig {
   recentDailyWindowHours: number;
   /** Embedding 向量请求单次超时阈值（单位：毫秒，默认 2500；调小更快降级为本地 FTS5，调大容忍慢网络但增加首字延迟） */
   embedTimeoutMs: number;
+  /** 决策模型整轮门控配置（未配置 decision 槽位或关闭时自动平滑降级） */
+  gate?: RecallGateConfig;
+  /** 决策模型候选卡精排配置 */
+  rerank?: RecallRerankConfig;
+  /** 决策模型门控与精排单次硬超时（单位：毫秒，默认 3000；全卡目录直扫约 1s，3s 兼顾稳定与防卡死，超时自动降级） */
+  decisionTimeoutMs?: number;
+  /** 拼入检索查询与门控上下文的近期历史消息条数（单位：条，默认 4，即最近约 2 轮；调大补足短句上下文但可能引入旧话题词） */
+  queryWindowTurns?: number;
+  /** 精排前宽召回候选池上限（单位：张，默认 10；仅在全卡目录直扫未触发时生效） */
+  candidatePool?: number;
+  /** 活跃卡总数不超过此值且开启决策门控时，直接用单次决策扫描全部活跃卡的「标题 + when_to_recall」，绕开 FTS5 字面漏召（单位：张，默认 250；设为 0 禁用直扫） */
+  catalogScanMaxCards?: number;
+  /** 门控关闭或超时降级时的 FTS 归一化分数门槛（0..1，默认 0.25；调高过滤弱撞词噪声，调低放宽字面命中） */
+  ftsMinScore?: number;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallConfig = {
@@ -39,6 +65,18 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   dedupWindowMin: 120,
   recentDailyWindowHours: 72,
   embedTimeoutMs: 2500,
+  gate: {
+    enabled: true,
+    threshold: 0.2,
+  },
+  rerank: {
+    threshold: 0.25,
+  },
+  decisionTimeoutMs: 3000,
+  queryWindowTurns: 4,
+  candidatePool: 10,
+  catalogScanMaxCards: 250,
+  ftsMinScore: 0.25,
 };
 
 /** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */
@@ -386,6 +424,14 @@ export async function loadOrCreateConfig(
     recall: {
       ...DEFAULT_RECALL_CONFIG,
       ...(cfg.recall ?? {}),
+      gate: {
+        ...DEFAULT_RECALL_CONFIG.gate!,
+        ...(cfg.recall?.gate ?? {}),
+      },
+      rerank: {
+        ...DEFAULT_RECALL_CONFIG.rerank!,
+        ...(cfg.recall?.rerank ?? {}),
+      },
     },
     circadian: {
       ...DEFAULT_CIRCADIAN_CONFIG,

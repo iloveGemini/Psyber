@@ -13,7 +13,7 @@ import {
 import { PairingManager, buildPairQrPayload, isLoopbackIp } from "./api/pairing.ts";
 import { renderTerminalQr } from "./api/qr.ts";
 import { performSqliteBackup } from "./core/backup.ts";
-import { SystemClock, addCalendarDays, localDay, type Clock } from "./core/clock.ts";
+import { SystemClock, localDay, type Clock } from "./core/clock.ts";
 import {
   DEFAULT_CIRCADIAN_CONFIG,
   initDataDir,
@@ -58,10 +58,12 @@ import { DynamicDecisionClient, LlmFallbackDecisionClient } from "./llm/decision
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
 import { readIdentityProfile } from "./memory/genesis.ts";
+import { scanEpisodeIndexes } from "./memory/gist.ts";
 import { MemoryIndex } from "./memory/index.ts";
 import { MemoryTools, isAllowedWritePath } from "./memory/tools.ts";
 import {
   evaluateHeartbeat,
+  getLogicalNightDate,
   getSleepWindowStatus,
   type HeartbeatDecision,
 } from "./mood/circadian.ts";
@@ -682,6 +684,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     chatModel,
     db,
     media,
+    decisionClient: bedtimeDecisionClient,
     onBeforeRollover: (ctx) => runSyncDailyWrapup(ctx),
     onRolloverStatus: (ev) => {
       sse.emit("turn.rollover", { ...ev });
@@ -689,24 +692,81 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   });
   engineRef = engine;
 
-  const hasUnsettledNightBefore = (today: string): boolean => {
+  const episodeCardDay = (relPath: string, createdAt: number): string => {
+    const m = /^episodes\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(relPath);
+    return m ? `${m[1]}-${m[2]}-${m[3]}` : localDay(createdAt, config.timezone);
+  };
+
+  const resolveBedtimeCoverage = async (today: string) => {
+    const { days, months, years } = await scanEpisodeIndexes(path.join(dataDir, "memory"), today);
+    const settledDays = new Set(days.map((d) => d.key));
+    let effectiveLast = lastBedtimeNightDate;
+    const bump = (candidate: string | null | undefined) => {
+      if (candidate && /^\d{4}-\d{2}-\d{2}$/.test(candidate)) {
+        if (effectiveLast === null || candidate > effectiveLast) {
+          effectiveLast = candidate;
+        }
+      }
+    };
+    for (const d of days) bump(d.key);
+    for (const m of months) bump(m.coveredUntil);
+    for (const y of years) {
+      if (y.coveredUntil && /^\d{4}-\d{2}$/.test(y.coveredUntil)) {
+        bump(`${y.coveredUntil}-31`);
+      }
+    }
+    return {
+      effectiveLast,
+      isDaySettled: (day: string) =>
+        settledDays.has(day) || (effectiveLast !== null && day <= effectiveLast),
+    };
+  };
+
+  type BedtimeCoverage = Awaited<ReturnType<typeof resolveBedtimeCoverage>>;
+
+  const findUnsettledNightBefore = (today: string, coverage: BedtimeCoverage): string | null => {
+    let candidate: string | null = null;
+    const consider = (day: string | null) => {
+      if (!day || day >= today || coverage.isDaySettled(day)) return;
+      if (candidate === null || day > candidate) {
+        candidate = day;
+      }
+    };
+
     const oldestPendingMs = events.getOldestPendingWrapupMs();
-    const hasPendingBeforeToday =
-      oldestPendingMs !== null && localDay(oldestPendingMs, config.timezone) < today;
+    if (oldestPendingMs !== null) {
+      consider(getLogicalNightDate(oldestPendingMs, config.timezone, config.circadian));
+    }
     const latestChat = events.getLatestChatEvent();
-    const latestChatDay = latestChat ? localDay(latestChat.createdAt, config.timezone) : null;
-    const hasChatSinceLastBedtime =
-      latestChatDay !== null &&
-      latestChatDay < today &&
-      (lastBedtimeNightDate === null || latestChatDay > lastBedtimeNightDate);
-    const hasDailyCardSinceLastBedtime = memoryIndex
+    if (latestChat !== null) {
+      consider(getLogicalNightDate(latestChat.createdAt, config.timezone, config.circadian));
+    }
+    for (const r of memoryIndex.listAllRows()) {
+      if (r.space !== "episodes") continue;
+      consider(episodeCardDay(r.path, r.created_at));
+    }
+    return candidate;
+  };
+
+  const hasUnsettledActivityForNight = (nightDate: string, coverage: BedtimeCoverage): boolean => {
+    if (coverage.isDaySettled(nightDate)) return false;
+    const oldestPendingMs = events.getOldestPendingWrapupMs();
+    if (
+      oldestPendingMs !== null &&
+      getLogicalNightDate(oldestPendingMs, config.timezone, config.circadian) <= nightDate
+    ) {
+      return true;
+    }
+    const latestChat = events.getLatestChatEvent();
+    if (
+      latestChat !== null &&
+      getLogicalNightDate(latestChat.createdAt, config.timezone, config.circadian) === nightDate
+    ) {
+      return true;
+    }
+    return memoryIndex
       .listAllRows()
-      .some((r) => {
-        if (r.space !== "episodes") return false;
-        const d = localDay(Math.max(r.created_at, r.updated_at), config.timezone);
-        return d < today && (lastBedtimeNightDate === null || d > lastBedtimeNightDate);
-      });
-    return hasPendingBeforeToday || hasChatSinceLastBedtime || hasDailyCardSinceLastBedtime;
+      .some((r) => r.space === "episodes" && episodeCardDay(r.path, r.created_at) === nightDate);
   };
 
   let heartbeatInFlight = false;
@@ -719,6 +779,14 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     try {
       const nowMs = clock.now();
       const today = localDay(nowMs, config.timezone);
+      const sleepStatus = getSleepWindowStatus(nowMs, config.timezone, config.circadian);
+      const coverage = await resolveBedtimeCoverage(today);
+      const unsettledPriorNightDate = sleepStatus.inSleepWindow
+        ? null
+        : findUnsettledNightBefore(today, coverage);
+      const hasUnsettledCurrentNight = sleepStatus.inSleepWindow
+        ? hasUnsettledActivityForNight(sleepStatus.nightDate, coverage)
+        : false;
       const unreadDoorNotesCount = events.countUnreadDoorNotes();
       const oldestUnreadDoorNoteMs =
         unreadDoorNotesCount > 0 ? events.getOldestUnreadDoorNoteMs() : null;
@@ -728,8 +796,10 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
         timeZone: config.timezone,
         circadian: config.circadian,
         doorState: config.door.state,
-        lastBedtimeNightDate,
-        hasUnsettledPriorNight: hasUnsettledNightBefore(today),
+        lastBedtimeNightDate: coverage.effectiveLast,
+        hasUnsettledCurrentNight,
+        hasUnsettledPriorNight: unsettledPriorNightDate !== null,
+        unsettledPriorNightDate,
         lastInteractionMs: events.getLastInteractionMs(),
         lastWakeMs,
         consecutiveUnansweredWakes,
@@ -837,18 +907,15 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   };
   rescheduleHeartbeatTimer();
 
-  // 若昨夜关机错过了睡眠窗 bedtime，白天开机时异步补跑昨夜整理（不阻塞前台第一轮对话）
-  // 对齐 Psyche pendingGists 思路：不仅看未整理对话，也覆盖昨晚手动换段后关机导致缺日梗概的情况
+  // 若此前因关机错过了睡眠窗 bedtime，白天开机时按真实未结算日期异步补跑（不阻塞前台第一轮对话，也不对空日子误跑）
   if (opts.catchUpMissedBedtime !== false) {
     const sleepStatus = getSleepWindowStatus(clock.now(), config.timezone, config.circadian);
     if (!sleepStatus.inSleepWindow) {
       const today = localDay(clock.now(), config.timezone);
-      const yesterdayNight = addCalendarDays(today, -1);
-      if (
-        (lastBedtimeNightDate === null || lastBedtimeNightDate < yesterdayNight) &&
-        hasUnsettledNightBefore(today)
-      ) {
-        void enqueueTidy("bedtime", yesterdayNight);
+      const coverage = await resolveBedtimeCoverage(today);
+      const missedNight = findUnsettledNightBefore(today, coverage);
+      if (missedNight !== null) {
+        void enqueueTidy("bedtime", missedNight);
       }
     }
   }

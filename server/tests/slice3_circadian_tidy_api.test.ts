@@ -141,6 +141,37 @@ describe("Ring 1 切片 3: 作息心跳、异步单轮整理、离线通知与�
       oldestUnreadDoorNoteMs: t1400 - 35 * 60_000,
     });
     expect(noteWake.action).toBe("proactive");
+
+    // 睡眠窗内当夜无新对话/新卡片（hasUnsettledCurrentNight: false）-> idle，不空跑 bedtime
+    const dEmptyNight = evaluateHeartbeat({
+      nowMs: t2345,
+      timeZone: tz,
+      doorState: "open",
+      lastBedtimeNightDate: null,
+      hasUnsettledCurrentNight: false,
+      lastInteractionMs: null,
+      lastWakeMs: null,
+      consecutiveUnansweredWakes: 0,
+      unreadDoorNotesCount: 0,
+      oldestUnreadDoorNoteMs: null,
+    });
+    expect(dEmptyNight).toEqual({ action: "idle" });
+
+    // 白天补跑指定真实未结算历史日期（unsettledPriorNightDate）-> 使用真实日期而非硬塞昨天
+    const dSpecificPrior = evaluateHeartbeat({
+      nowMs: Date.UTC(2026, 10, 25, 6, 0, 0), // 2026-11-25 14:00 Asia/Shanghai
+      timeZone: tz,
+      doorState: "open",
+      lastBedtimeNightDate: "2026-11-19",
+      hasUnsettledPriorNight: true,
+      unsettledPriorNightDate: "2026-11-20",
+      lastInteractionMs: Date.UTC(2026, 10, 20, 12, 0, 0),
+      lastWakeMs: null,
+      consecutiveUnansweredWakes: 0,
+      unreadDoorNotesCount: 0,
+      oldestUnreadDoorNoteMs: null,
+    });
+    expect(dSpecificPrior).toEqual({ action: "sleep_tidy", nightDate: "2026-11-20" });
   });
 
   test("NotificationHub: 前台活跃抑制、睡眠窗回调拦截 wake、离线 desktop + webhook（含 headers/credentialKey）扇出", async () => {

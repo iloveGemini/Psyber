@@ -27,6 +27,7 @@ import {
 } from "../memory/genesis.ts";
 import { buildContinuityBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
+import type { DecisionClient } from "../core/decision.ts";
 import { recallMemories, type EmbeddingClient } from "../memory/recall.ts";
 import { renderCircadianState } from "../mood/circadian.ts";
 import type { ActiveSessionRecord, EventStore, StoredEvent } from "../store/events.ts";
@@ -245,6 +246,8 @@ export interface DirectEngineDeps {
   media?: MediaStore;
   /** 可选 Embedding 客户端（缺省或超时自动降级 FTS5 2-gram） */
   embedding?: EmbeddingClient;
+  /** 可选决策模型客户端（用于每轮召回门控与候选精排；缺省或超时平滑降级） */
+  decisionClient?: DecisionClient;
   /** 429/5xx 指数退避延迟（默认 [1000, 3000] ms，离线测试可传 [0, 0]） */
   retryDelaysMs?: number[];
   /**
@@ -767,6 +770,7 @@ export class DirectEngine {
     turnId: string;
     userText: string;
     userLabel: string;
+    recentTurns?: Array<{ role: "user" | "assistant"; content: string }>;
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
@@ -893,8 +897,11 @@ export class DirectEngine {
           sessionId: this.activeState.sessionId,
           turnId: opts.turnId,
           query: recallQuery,
+          recentTurns: opts.recentTurns,
           activityHint: opts.activityHint,
           embedding: this.deps.embedding,
+          decisionClient: this.deps.decisionClient,
+          promptsDir: this.deps.promptsDir,
           recallConfig: cfg.recall,
         });
         recallCount = recalled.items.length;
@@ -1167,11 +1174,21 @@ export class DirectEngine {
         opts.historyBeforeSeq,
       );
       initialHistoryCount = history.length;
+      const recentTurns = history
+        .filter(
+          (m): m is { role: "user" | "assistant"; content: string; timestamp: number } =>
+            (m.role === "user" || m.role === "assistant") &&
+            typeof m.content === "string" &&
+            m.content.trim().length > 0,
+        )
+        .slice(-(this.deps.getConfig().recall?.queryWindowTurns ?? 4))
+        .map((m) => ({ role: m.role, content: m.content }));
       const dynamic = await this.buildDynamicUserMessage({
         mode: opts.mode,
         turnId,
         userText: opts.userText ?? "",
         userLabel,
+        recentTurns,
         stickerId: opts.stickerId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,

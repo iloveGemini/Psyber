@@ -24,8 +24,12 @@ export interface HeartbeatSnapshot {
   doorState: DoorState;
   /** 上次完成 bedtime 睡前整理对应的夜晚日期（YYYY-MM-DD） */
   lastBedtimeNightDate: string | null;
+  /** 当夜（睡眠窗内）是否存在尚未日结的对话/卡片；未传时默认 true 以兼容旧调用方 */
+  hasUnsettledCurrentNight?: boolean;
   /** 是否存在尚未完成日结的前一夜对话/卡片（用于通宵聊穿睡眠窗后的白天补跑） */
   hasUnsettledPriorNight?: boolean;
+  /** 尚未完成日结的具体历史夜晚日期（YYYY-MM-DD）；提供时优先于 yesterdayNight，避免对空日子误跑 bedtime */
+  unsettledPriorNightDate?: string | null;
   /** 上次任意有效对话/唤醒时间戳（Unix 毫秒） */
   lastInteractionMs: number | null;
   /** 上次主动唤醒时间戳（Unix 毫秒） */
@@ -159,27 +163,38 @@ export function evaluateHeartbeat(snap: HeartbeatSnapshot): HeartbeatDecision {
   const { inSleepWindow, nightDate } = getSleepWindowStatus(snap.nowMs, snap.timeZone, cfg);
 
   if (inSleepWindow) {
-    if (snap.lastBedtimeNightDate !== nightDate && isQuietEnoughForBedtime) {
+    if (
+      snap.lastBedtimeNightDate !== nightDate &&
+      snap.hasUnsettledCurrentNight !== false &&
+      isQuietEnoughForBedtime
+    ) {
       return { action: "sleep_tidy", nightDate };
     }
     return { action: "idle" };
   }
 
-  // 白天补跑：昨晚因通宵聊天或关机错过了 bedtime
+  // 白天补跑：此前因通宵聊天或关机错过了 bedtime（优先按真实未结算日期补跑，不对空日子误发）
   const today = localDay(snap.nowMs, snap.timeZone);
   const yesterdayNight = addCalendarDays(today, -1);
+  const priorTargetNight =
+    snap.unsettledPriorNightDate !== undefined
+      ? snap.unsettledPriorNightDate
+      : snap.hasUnsettledPriorNight
+        ? yesterdayNight
+        : null;
   if (
-    snap.hasUnsettledPriorNight &&
-    (snap.lastBedtimeNightDate === null || snap.lastBedtimeNightDate < yesterdayNight)
+    priorTargetNight !== null &&
+    priorTargetNight < today &&
+    (snap.lastBedtimeNightDate === null || snap.lastBedtimeNightDate < priorTargetNight)
   ) {
     if (isQuietEnoughForBedtime) {
-      return { action: "sleep_tidy", nightDate: yesterdayNight };
+      return { action: "sleep_tidy", nightDate: priorTargetNight };
     }
     const sleepEndMs = localWallClockMs(today, cfg.sleepEnd, 7 * 60 + 30, snap.timeZone);
     if (snap.nowMs >= sleepEndMs + forceAfterMin * 60_000) {
       return {
         action: "sleep_tidy",
-        nightDate: yesterdayNight,
+        nightDate: priorTargetNight,
         cutoffBeforeSleepEnd: true,
         sleepEndMs,
       };

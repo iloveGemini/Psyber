@@ -509,28 +509,55 @@ export async function discoverProviderModels(
           thinkingLevels: ["off"],
         });
       }
-    } else if (p.kind === "openai-compat" && p.baseUrl) {
+    } else if (p.baseUrl) {
       const apiKey = creds.apiKeys[providerId]?.trim() ?? "";
-      if (apiKey) {
-        try {
-          const url = `${p.baseUrl.replace(/\/+$/, "")}/models`;
-          const res = await fetchImpl(url, {
-            headers: { authorization: `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(5000),
-          });
-          if (res.ok) {
-            const json = (await res.json()) as { data?: Array<{ id?: string }> };
-            if (Array.isArray(json.data)) {
-              for (const item of json.data.slice(0, 80)) {
-                if (typeof item?.id === "string" && item.id.trim()) {
-                  addUnique(enrich(providerId, item.id.trim()));
-                }
+      try {
+        const url = `${p.baseUrl.replace(/\/+$/, "")}/models`;
+        const headers: Record<string, string> = {};
+        if (apiKey) {
+          headers.authorization = `Bearer ${apiKey}`;
+        }
+        const res = await fetchImpl(url, {
+          headers,
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as {
+            data?: Array<{ id?: string; name?: string }>;
+            models?: Array<{ id?: string; name?: string; displayName?: string }>;
+          };
+          if (Array.isArray(json.data)) {
+            for (const item of json.data.slice(0, 200)) {
+              if (typeof item?.id === "string" && item.id.trim()) {
+                addUnique(
+                  enrich(providerId, item.id.trim(), {
+                    ...(typeof item.name === "string" && item.name.trim()
+                      ? { name: item.name.trim() }
+                      : {}),
+                  }),
+                );
+              }
+            }
+          } else if (Array.isArray(json.models)) {
+            for (const item of json.models.slice(0, 200)) {
+              const rawId =
+                (typeof item?.id === "string" && item.id.trim()) ||
+                (typeof item?.name === "string" && item.name.trim().replace(/^models\//, "")) ||
+                "";
+              if (rawId) {
+                addUnique(
+                  enrich(providerId, rawId, {
+                    ...(typeof item.displayName === "string" && item.displayName.trim()
+                      ? { name: item.displayName.trim() }
+                      : {}),
+                  }),
+                );
               }
             }
           }
-        } catch {
-          // 兼容网关不支持 /models 时静默降级至已配置模型
         }
+      } catch {
+        // 兼容网关不支持 /models 时静默降级至已配置模型
       }
     }
   }
@@ -577,7 +604,7 @@ export async function testModelConnection(opts: {
   if (!resolved.ok) {
     return { ok: false, latencyMs: Date.now() - start, error: resolved.reason };
   }
-  if (resolved.slot.kind === "google" && isGeminiDecisionModel(resolved.slot.modelId)) {
+  if (isGeminiDecisionModel(resolved.slot.modelId)) {
     const decisionClient = new GeminiDecisionClient({
       apiKey: resolved.slot.apiKey,
       modelId: resolved.slot.modelId,
