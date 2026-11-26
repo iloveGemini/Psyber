@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/media/voice_bridge.dart';
 import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
@@ -15,6 +16,7 @@ import 'recall_feedback_bar.dart';
 import 'share_card.dart';
 import 'turn_journal_card.dart';
 import 'video_tile.dart';
+import 'voice_tile.dart';
 
 export 'turn_journal_card.dart' show ModelSwitchDivider, ScreenToolCard, TurnJournalCard;
 
@@ -256,6 +258,7 @@ class MessageBubbleRow extends StatefulWidget {
     required this.isLatestUserMessage,
     this.isLatestAssistantMessage = false,
     required this.doorState,
+    this.voiceBridge,
   });
 
   final TimelineItem item;
@@ -264,6 +267,7 @@ class MessageBubbleRow extends StatefulWidget {
   final bool isLatestUserMessage;
   final bool isLatestAssistantMessage;
   final DoorState doorState;
+  final VoiceBridge? voiceBridge;
 
   @override
   State<MessageBubbleRow> createState() => _MessageBubbleRowState();
@@ -506,11 +510,13 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
         ((item.thinking?.isNotEmpty ?? false) ||
             item.toolSummary.any((t) => !t.isScreen) ||
             item.journalSteps.isNotEmpty);
+    final hasVoice = item.voiceClip != null;
     final hasMedia =
-        item.sticker != null || item.attachments.isNotEmpty || item.videoClip != null;
+        item.sticker != null || item.attachments.isNotEmpty || item.videoClip != null || hasVoice;
     final hasText = item.content.trim().isNotEmpty;
     final separateUserMedia = isUser && !item.isDoorNote;
-    final showBubbleBox = item.isDoorNote || (separateUserMedia && (hasText || item.urgent));
+    final showBubbleBox =
+        item.isDoorNote || (separateUserMedia && (hasText || item.urgent || hasVoice));
     final bool isUrgentCard = item.urgent && isUser;
     final bool isFoldedResidentNote =
         item.isDoorNote && !isUser && !item.isOpened;
@@ -654,15 +660,16 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                   bottomGap: (item.videoClip != null ||
                           item.attachments.isNotEmpty ||
                           hasText ||
-                          item.urgent)
+                          item.urgent ||
+                          hasVoice)
                       ? 6
                       : 0,
                 ),
               if (item.videoClip != null || item.attachments.isNotEmpty)
                 buildAttachmentsWidget(
-                  bottomGap: (hasText || item.urgent) ? 6 : 0,
+                  bottomGap: (hasText || item.urgent || hasVoice) ? 6 : 0,
                 ),
-              if (hasText || item.urgent)
+              if (hasText || item.urgent || hasVoice)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(isUrgentCard ? 12 : (colors.useReadingChrome ? 8 : 10)),
                   child: Stack(
@@ -693,13 +700,41 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                                   ),
                                 ],
                               ),
-                              if (hasText) ...[
+                              if (hasText || hasVoice) ...[
                                 const SizedBox(height: 8),
                                 Container(
                                   height: 1,
                                   color: urgentCardInk.withValues(alpha: 0.22),
                                 ),
                                 const SizedBox(height: 8),
+                              ],
+                            ],
+                            if (hasVoice && profile != null) ...[
+                              VoiceTile(
+                                voiceClip: item.voiceClip!,
+                                profile: profile,
+                                foregroundColor:
+                                    isUrgentCard ? urgentCardInk : colors.userText,
+                                bridge: widget.voiceBridge,
+                              ),
+                              if (hasText) ...[
+                                const SizedBox(height: 7),
+                                Container(
+                                  height: 1,
+                                  color: (isUrgentCard ? urgentCardInk : colors.userText)
+                                      .withValues(alpha: 0.16),
+                                ),
+                                const SizedBox(height: 7),
+                              ] else ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  '语音消息 · 未识别出文字',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: (isUrgentCard ? urgentCardInk : colors.userText)
+                                        .withValues(alpha: 0.72),
+                                  ),
+                                ),
                               ],
                             ],
                             if (hasText)
@@ -792,11 +827,24 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
                     profile: profile,
                   ),
                 if (item.sticker != null)
-                  buildStickerWidget(bottomGap: item.content.isNotEmpty ? 6 : 0),
+                  buildStickerWidget(bottomGap: (item.content.isNotEmpty || hasVoice) ? 6 : 0),
                 if (item.videoClip != null || item.attachments.isNotEmpty)
                   buildAttachmentsWidget(
-                    bottomGap: item.content.isNotEmpty ? 6 : 0,
+                    bottomGap: (item.content.isNotEmpty || hasVoice) ? 6 : 0,
                   ),
+                if (hasVoice && profile != null) ...[
+                  VoiceTile(
+                    voiceClip: item.voiceClip!,
+                    profile: profile,
+                    foregroundColor: item.isDoorNote
+                        ? paperCardInk
+                        : isUrgentCard
+                            ? urgentCardInk
+                            : colors.inkDeep,
+                    bridge: widget.voiceBridge,
+                  ),
+                  if (item.content.isNotEmpty) const SizedBox(height: 6),
+                ],
                 if (item.content.isNotEmpty)
                   RichMessageText(
                     text: item.content,

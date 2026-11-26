@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（落地快脑只读体检雷达 `memory/radar.ts` 并完成 15 项代码审查问题全量修复与回归单测）。
+> 最后更新：2026-11-26（落地 iOS + macOS 双端 Apple 原生异步语音条与免提实时识别，后端接入 `voiceClip` 与音频媒体仓）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与向量+Decision 召回/体检管线已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思、向量+Decision 召回/体检与双端异步语音条已落地
 
 ### 已完成
+- **异步语音条与 Apple 原生实时识别（适配不方便打字场景，`docs/` + `server/` + `app/`，2026-11-26）**：
+  - 契约与后端：更新 `docs/API.md`；`core/media.ts` 新增 `m4a`/`aac`/`wav` 音频映射；`api/app.ts` 与 `engine/direct.ts` 支持 `voiceClip: { mediaHash, durationSec, mimeType }` 校验、落盘、历史透出、重试/编辑/重摇透传及 `[语音 X秒]` 上下文标注（无转写文本亦允许发纯语音条）；新增 `tests/voice_clip.test.ts`。
+  - iOS & macOS 原生桥接：`AppDelegate.swift` 与 `MainFlutterWindow.swift` 新增 `psyber/voice` 通道（`AVAudioEngine` 同步录 AAC `.m4a` + `SFSpeechRecognizer` 实时流式识别与长停顿无缝续接 + `AVAudioPlayer` 本地缓存回放）；补齐双端 `Info.plist` 麦克风/语音识别权限说明与 macOS `com.apple.security.device.audio-input` 沙盒权限。
+  - 客户端交互：`core/media/voice_bridge.dart`、`voice_tile.dart`、`adaptive_composer.dart`、`timeline_items.dart` 与 `chat_page.dart` 落地「按住说松手直发（左滑取消 / 上滑锁定免提）」「轻点进入免提录音（可停顿思考、实时看转写、一键转文字编辑或直发）」「macOS `⌘⇧M` 快捷切换 + `Enter` 发 / `Esc` 取消」及气泡内原声语音条回放；补充 `psyber_app_test.dart` 语音条单测。
 - **快脑只读体检雷达（Memory Radar · 严守 NG-2 只读不代写，`docs/` + `prompts/` + `server/`，2026-11-26）**：
   - 契约与提示词：更新 `docs/MEMORY.md`、`docs/API.md`、`docs/spec/01-engine-tools-prompts.md`、`docs/spec/02-memory-execution.md` §6.1 与 `docs/spec/04-api-and-flutter.md`；新增 `prompts/memory-radar.md`（v2，`slot: decision`，`contradiction`/独立 `promote`/`obsolete`/`link`/`redundant`/`representation` + `core/{state,open}.md` 看板巡检双边判据），同步更新 `prompts/tidy.md`（v11）、`prompts/reflect.md`（v3）与 `prompts/README.md`。
   - 共享向量与只读引擎：抽出 `memory/embeddings.ts`（单次批量加载 `card_embeddings` 缓存、对齐解码与分块保留部分向量）；新增 `memory/radar.ts`（两路扫描：双看板各保底 6 条配额巡检 + 向量/FTS5 配对受控并发体检，`card_links` 内存邻接表短路 `link` 且跳过「新持久专卡 ↔ 已互链旧 `ep-*`」溯源对，历史 `ep-*.md` 屏蔽 `obsolete`/`merge`、仅持久专卡互比问 `redundant`/`representation`，`weekly` 支持同周跨日新卡互配，修复占位词正则误伤、FTS 跳过预算计数、`ob_b0`/`ct_b0` 模板去重与 `AbortSignal` 即时中止）。
@@ -52,8 +56,9 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
+- 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 及 `scripts/dryrun_radar.ts` / `scripts/replay.ts` 严格检查零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（23 文件 / 101 用例 / 1388 断言）全部通过。
-- **`app/`**：`2026-11-23` `AppDelegate.swift` 已通过 `swiftc -parse`；`1104b64` 与 `392d5c0` 前端改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（24 文件 / 102 用例 / 1411 断言，含 `tests/voice_clip.test.ts`）全部通过。
+- **`app/`（2026-11-26）**：iOS `AppDelegate.swift` 与 macOS `MainFlutterWindow.swift` 均通过 `swiftc -parse`；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

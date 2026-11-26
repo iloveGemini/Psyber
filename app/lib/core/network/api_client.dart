@@ -152,6 +152,7 @@ abstract class PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    VoiceClipInfo? voiceClip,
     bool urgent = false,
   });
 
@@ -723,6 +724,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    VoiceClipInfo? voiceClip,
     bool urgent = false,
   }) async {
     final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages');
@@ -738,6 +740,9 @@ class HttpPsyberApiClient implements PsyberApiClient {
     }
     if (videoClip != null) {
       payload['videoClip'] = videoClip.toJson();
+    }
+    if (voiceClip != null) {
+      payload['voiceClip'] = voiceClip.toJson();
     }
     if (urgent) {
       payload['urgent'] = true;

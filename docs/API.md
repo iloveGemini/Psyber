@@ -35,7 +35,7 @@
 | 方法与路径 | 分期 | 说明 |
 | :--- | :--- | :--- |
 | `GET /api/v1/chat/history?before=<id>&limit=50` | **Ring 1** | 分页拉取时间线（含对话、门缝留言、具身表达元数据、可折叠 `✦ 整理记忆` 静默任务卡；媒体仅返回 URL，**严禁内联 base64**；断线重连可直接拉取补齐） |
-| `POST /api/v1/chat/messages` | **Ring 1** | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `attachments`、`stickerId`、Ring 1.5 可选 `urgent: true` 仅于 `closed` 态一次性紧急直达）；门为 `closed` 且非紧急时自动作为「门缝纸条」落盘不唤醒回复；上下文达阈值时先同步整理旧会话再切新会话（期间新消息仍 `202` 排队落盘，切段后自动归属新段） |
+| `POST /api/v1/chat/messages` | **Ring 1** | 发送用户消息（携带 `clientMessageId` 幂等键防重发，可附 `attachments`、`stickerId`、`videoClip`、`voiceClip: { mediaHash, durationSec, mimeType? }`、Ring 1.5 可选 `urgent: true` 仅于 `closed` 态一次性紧急直达）；门为 `closed` 且非紧急时自动作为「门缝纸条」落盘不唤醒回复；上下文达阈值时先同步整理旧会话再切新会话（期间新消息仍 `202` 排队落盘，切段后自动归属新段） |
 | `DELETE /api/v1/chat/messages/:id` | **Ring 1** | 静默软删消息（修对话，标记 `deleted`，绝不告知Psyber，不污染后续记忆整理） |
 | `POST /api/v1/turns/:turnId/abort` | **Ring 1** | 主动中止正在生成的对话轮或工具循环（保留已落盘的部分内容） |
 | `POST /api/v1/turns/:turnId/retry` | Ring 1.5 | 失败轮次原地无痕重试（不重复插入用户消息，避免聊天流出现重复气泡） |
@@ -83,7 +83,7 @@
 
 | 方法与路径 | 分期 | 说明 |
 | :--- | :--- | :--- |
-| `POST /api/v1/media` | **Ring 1** | 上传用户图片/多模态附件（SHA-256 去重落盘 `media/`，返回 `{ hash, url, mimeType, size }`） |
+| `POST /api/v1/media` | **Ring 1** | 上传用户图片/音频/多模态附件（含 `audio/mp4` / `audio/m4a` 等异步语音条音频，SHA-256 去重落盘 `media/`，返回 `{ hash, url, mimeType, size }`） |
 | `GET /api/v1/media/:hash` | **Ring 1** | 按 SHA-256 哈希拉取图片、头像与贴纸（带 `ETag` + `Cache-Control: immutable`） |
 | `GET /api/v1/settings` | **Ring 1** | 读取脱敏配置快照（模型槽位、召回与只读体检雷达 `recall`/`radar`、作息窗、通知与设备概览，严禁返回明文密钥） |
 | `PATCH /api/v1/settings` | **Ring 1** | 更新模型槽位/新 BYOK `apiKey`（落 `credentials.json`）、`recall`/`radar` 召回与体检参数、作息窗与通知配置（Ring 1.5 补 `digest`/主备降级链/思考档位/双上下文上限/`bash`/MCP 与设备吊销） |

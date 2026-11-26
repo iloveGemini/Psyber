@@ -7,6 +7,7 @@ import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
 import '../../../core/media/desktop_media.dart';
 import '../../../core/media/image_picker.dart';
+import '../../../core/media/voice_bridge.dart';
 import '../../../core/models/models.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/state/app_controller.dart';
@@ -33,10 +34,12 @@ class ChatPage extends StatefulWidget {
     super.key,
     required this.controller,
     this.imagePicker,
+    this.voiceBridge,
   });
 
   final AppController controller;
   final ImageFilePicker? imagePicker;
+  final VoiceBridge? voiceBridge;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -47,6 +50,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _rightActivityAnchorKey = GlobalKey();
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
+  final _voiceToggleTrigger = ValueNotifier<int>(0);
   final List<PendingAttachment> _pendingAttachments = <PendingAttachment>[];
   PendingVideoClip? _pendingVideoClip;
   StickerView? _pendingSticker;
@@ -179,6 +183,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     DesktopMediaBridge.clearDropEvents();
     _inputController.dispose();
     _scrollController.dispose();
+    _voiceToggleTrigger.dispose();
     super.dispose();
   }
 
@@ -226,6 +231,47 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       widget.controller.turnErrorNotifier.value = e.message;
     } catch (_) {
       widget.controller.turnErrorNotifier.value = '发送失败，请检查网络连接后重试';
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _sendVoiceClip(
+    VoiceRecordingResult result, {
+    bool urgent = false,
+  }) async {
+    if (_sending) return;
+    setState(() => _sending = true);
+    try {
+      VoiceClipInfo? voiceClip;
+      if (result.bytes.isNotEmpty) {
+        final uploaded = await widget.controller.uploadImage(
+          bytes: result.bytes,
+          filename: 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+          mimeType: result.mimeType,
+        );
+        if (uploaded != null && uploaded.hash.isNotEmpty) {
+          voiceClip = VoiceClipInfo(
+            mediaHash: uploaded.hash,
+            durationSec: result.durationSec,
+            mimeType: uploaded.mimeType,
+          );
+        }
+      }
+      if (voiceClip == null && result.transcript.trim().isEmpty) {
+        widget.controller.turnErrorNotifier.value = '语音录制为空，未能发送';
+        return;
+      }
+      await widget.controller.sendMessage(
+        result.transcript,
+        voiceClip: voiceClip,
+        urgent: urgent,
+      );
+      _scrollToBottom();
+    } on ApiException catch (e) {
+      widget.controller.turnErrorNotifier.value = e.message;
+    } catch (_) {
+      widget.controller.turnErrorNotifier.value = '语音发送失败，请检查网络连接后重试';
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -504,7 +550,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
             setState(() => _showDesktopSidebar = !_showDesktopSidebar);
           }
         },
-
+        SingleActivator(
+          LogicalKeyboardKey.keyM,
+          meta: isMacOs,
+          control: !isMacOs,
+          shift: true,
+        ): () {
+          _voiceToggleTrigger.value += 1;
+        },
       },
       child: Focus(
         autofocus: true,
@@ -890,6 +943,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                   isLatestUserMessage: item.id == latestUserId,
                                                   isLatestAssistantMessage: item.id == latestAssistantId,
                                                   doorState: door.state,
+                                                  voiceBridge: widget.voiceBridge,
                                                 );
                                               }
 
@@ -1208,70 +1262,76 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                       }
                                     }
                                   }
-                                  return AdaptiveComposer(
-                                    door: door,
-                                    residentName: identity.residentName,
-                                  controller: _inputController,
-                                  pendingAttachments: _pendingAttachments,
-                                  pendingVideoClip: _pendingVideoClip,
-                                  pendingSticker: _pendingSticker,
-                                  profile: widget.controller.profileNotifier.value,
-                                  uploadingImage: _uploadingImage,
-                                  sending: _sending,
-                                  isReplying: activeTurn != null,
-                                  isDraggingFiles: _isDraggingFiles,
-                                  thinkingLevel: settingsSnap?.thinkingLevel ?? 'auto',
-                                  currentModelLabel: modelLabel,
-                                  currentChatSlot: slot,
-                                  availableModelSlots: availableSlots,
-                                  onSelectChatSlot: (nextSlot) => unawaited(
-                                    widget.controller.patchSettings({
-                                      'llm': {
-                                        'slots': {'chat': nextSlot.toJson()},
+                                  return ValueListenableBuilder<String>(
+                                    valueListenable:
+                                        widget.controller.voiceLocaleNotifier,
+                                    builder: (context, voiceLocale, _) =>
+                                        AdaptiveComposer(
+                                      door: door,
+                                      residentName: identity.residentName,
+                                      controller: _inputController,
+                                      pendingAttachments: _pendingAttachments,
+                                      pendingVideoClip: _pendingVideoClip,
+                                      pendingSticker: _pendingSticker,
+                                      profile:
+                                          widget.controller.profileNotifier.value,
+                                      uploadingImage: _uploadingImage,
+                                      sending: _sending,
+                                      isReplying: activeTurn != null,
+                                      isDraggingFiles: _isDraggingFiles,
+                                      thinkingLevel:
+                                          settingsSnap?.thinkingLevel ?? 'auto',
+                                      currentModelLabel: modelLabel,
+                                      currentChatSlot: slot,
+                                      availableModelSlots: availableSlots,
+                                      onSelectChatSlot: (nextSlot) => unawaited(
+                                        widget.controller.patchSettings({
+                                          'llm': {
+                                            'slots': {'chat': nextSlot.toJson()},
+                                          },
+                                        }),
+                                      ),
+                                      onSelectThinkingLevel: (level) => unawaited(
+                                        widget.controller.patchSettings({
+                                          'llm': {
+                                            'thinking': {
+                                              'enabled': level != 'off',
+                                              'level': level,
+                                            },
+                                          },
+                                        }),
+                                      ),
+                                      onOpenModelSettings: () => _openSettings(
+                                        initialSection: SettingsSection.modelUsage,
+                                      ),
+                                      onPickImage: _pickAndUploadImage,
+                                      onOpenStickers: _openStickerSheet,
+                                      onRemoveAttachment: (idx) {
+                                        setState(
+                                            () => _pendingAttachments.removeAt(idx));
                                       },
-                                    }),
-                                  ),
-                                  onSelectThinkingLevel: (level) => unawaited(
-                                    widget.controller.patchSettings({
-                                      'llm': {
-                                        'thinking': {
-                                          'enabled': level != 'off',
-                                          'level': level,
-                                        },
+                                      onRemoveVideoClip: () {
+                                        setState(() => _pendingVideoClip = null);
                                       },
-                                    }),
-                                  ),
-                                  onOpenModelSettings: () => _openSettings(
-                                    initialSection: SettingsSection.modelUsage,
-                                  ),
-                                  onPickImage: _pickAndUploadImage,
-                                  onOpenStickers: _openStickerSheet,
-                                  onRemoveAttachment: (idx) {
-                                    setState(() => _pendingAttachments.removeAt(idx));
-                                  },
-                                  onRemoveVideoClip: () {
-                                    setState(() => _pendingVideoClip = null);
-                                  },
-                                  onClearSticker: () {
-                                    setState(() => _pendingSticker = null);
-                                  },
-                                  onPasteClipboard: DesktopMediaBridge.isSupported
-                                      ? _handleDesktopPaste
-                                      : null,
-                                  onVoiceInput: () {
-                                    ScaffoldMessenger.of(context)
-                                      ..hideCurrentSnackBar()
-                                      ..showSnackBar(
-                                        const SnackBar(
-                                          content: Text('语音输入即将支持'),
-                                          duration: Duration(seconds: 2),
-                                        ),
-                                      );
-                                  },
-                                  onAbort: () =>
-                                      unawaited(widget.controller.abortActiveTurn()),
-                                    onSend: ({bool urgent = false}) =>
-                                        unawaited(_send(urgent: urgent)),
+                                      onClearSticker: () {
+                                        setState(() => _pendingSticker = null);
+                                      },
+                                      onPasteClipboard:
+                                          DesktopMediaBridge.isSupported
+                                              ? _handleDesktopPaste
+                                              : null,
+                                      voiceBridge: widget.voiceBridge,
+                                      voiceLocale: voiceLocale,
+                                      onChangeVoiceLocale:
+                                          widget.controller.setVoiceLocale,
+                                      voiceToggleTrigger: _voiceToggleTrigger,
+                                      onSendVoiceClip: (result, {required urgent}) =>
+                                          _sendVoiceClip(result, urgent: urgent),
+                                      onAbort: () => unawaited(
+                                          widget.controller.abortActiveTurn()),
+                                      onSend: ({bool urgent = false}) =>
+                                          unawaited(_send(urgent: urgent)),
+                                    ),
                                   );
                                 },
                               ),

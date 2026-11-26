@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:phosphoricons_flutter/phosphoricons_flutter.dart';
 
+import '../../../core/media/voice_bridge.dart';
 import '../../../core/models/models.dart';
 import '../../../shared/rich_message_text.dart';
 import '../../../shared/theme.dart';
@@ -65,6 +66,11 @@ class AdaptiveComposer extends StatefulWidget {
     this.onClearSticker,
     this.onPasteClipboard,
     this.onVoiceInput,
+    this.voiceBridge,
+    this.voiceLocale = 'zh-CN',
+    this.onChangeVoiceLocale,
+    this.onSendVoiceClip,
+    this.voiceToggleTrigger,
     this.onAbort,
     this.thinkingLevel = 'medium',
     this.currentModelLabel,
@@ -94,6 +100,12 @@ class AdaptiveComposer extends StatefulWidget {
   final VoidCallback? onClearSticker;
   final Future<bool> Function()? onPasteClipboard;
   final VoidCallback? onVoiceInput;
+  final VoiceBridge? voiceBridge;
+  final String voiceLocale;
+  final ValueChanged<String>? onChangeVoiceLocale;
+  final Future<void> Function(VoiceRecordingResult result, {required bool urgent})?
+      onSendVoiceClip;
+  final ValueListenable<int>? voiceToggleTrigger;
   final VoidCallback? onAbort;
   final String thinkingLevel;
   final String? currentModelLabel;
@@ -108,12 +120,29 @@ class AdaptiveComposer extends StatefulWidget {
   State<AdaptiveComposer> createState() => _AdaptiveComposerState();
 }
 
+enum _VoiceCaptureMode { idle, holding, canceling, locked, finishing }
+
 class _AdaptiveComposerState extends State<AdaptiveComposer> {
   late final FocusNode _inputFocusNode;
+  late final FocusNode _voiceFocusNode;
   final GlobalKey _thinkingAnchorKey = GlobalKey();
   final GlobalKey _inputFieldSubtreeKey = GlobalKey();
+  final GlobalKey _composerCardKey = GlobalKey();
   bool _urgentOpen = false;
   bool _inputFocused = false;
+
+  _VoiceCaptureMode _voiceMode = _VoiceCaptureMode.idle;
+  StreamSubscription<VoiceRecordingUpdate>? _voiceSub;
+  Timer? _voiceClockTimer;
+  DateTime? _voiceStartedAt;
+  double? _lockedMinCardHeight;
+  String _liveTranscript = '';
+  double _voiceDurationSec = 0.0;
+  bool _speechPermissionMissing = false;
+  final List<double> _voiceLevels = List<double>.filled(14, 0.12, growable: true);
+
+  VoiceBridge get _voiceBridge => widget.voiceBridge ?? NativeVoiceBridge.instance;
+  bool get _isVoiceActive => _voiceMode != _VoiceCaptureMode.idle;
 
   static const _thinkingOptions = <(String, String)>[
     ('auto', '自动'),
@@ -208,14 +237,251 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
       },
     );
     _inputFocusNode.addListener(_onFocusChanged);
+    _voiceFocusNode = FocusNode(
+      onKeyEvent: (node, event) {
+        if (!_isDesktopOrWeb || _voiceMode != _VoiceCaptureMode.locked) {
+          return KeyEventResult.ignored;
+        }
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        if (event.logicalKey == LogicalKeyboardKey.escape) {
+          unawaited(_cancelVoiceCapture());
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+          unawaited(_finishVoiceCaptureAndSend());
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+    );
+    widget.voiceToggleTrigger?.addListener(_onExternalVoiceToggle);
   }
 
   @override
   void didUpdateWidget(covariant AdaptiveComposer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.voiceToggleTrigger != widget.voiceToggleTrigger) {
+      oldWidget.voiceToggleTrigger?.removeListener(_onExternalVoiceToggle);
+      widget.voiceToggleTrigger?.addListener(_onExternalVoiceToggle);
+    }
     if (widget.door.state != DoorState.closed && _urgentOpen) {
       _urgentOpen = false;
     }
+  }
+
+  void _onExternalVoiceToggle() {
+    if (!mounted || widget.sending || widget.isReplying) return;
+    if (_voiceMode == _VoiceCaptureMode.idle) {
+      unawaited(_startVoiceCapture(locked: true));
+    } else if (_voiceMode == _VoiceCaptureMode.locked) {
+      unawaited(_finishVoiceCaptureAndSend());
+    }
+  }
+
+  void _showVoiceToast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+  }
+
+  Future<void> _startVoiceCapture({required bool locked}) async {
+    if (_isVoiceActive || widget.sending) return;
+    if (widget.onSendVoiceClip == null) {
+      widget.onVoiceInput?.call();
+      return;
+    }
+    if (!_voiceBridge.isSupported) {
+      _showVoiceToast('当前平台暂不支持原生语音条录制');
+      return;
+    }
+
+    var perm = await _voiceBridge.checkPermission();
+    if (!perm.micGranted || !perm.speechGranted) {
+      perm = await _voiceBridge.requestPermission();
+    }
+    if (!mounted) return;
+    if (!perm.micGranted) {
+      _showVoiceToast('请先在系统设置中允许 Psyber 使用麦克风');
+      return;
+    }
+
+    final cardBox = _composerCardKey.currentContext?.findRenderObject() as RenderBox?;
+    final isDesktopNow =
+        _isDesktopOrWeb || MediaQuery.sizeOf(context).width >= 720;
+    final measuredCardHeight =
+        (isDesktopNow && cardBox != null && cardBox.hasSize) ? cardBox.size.height : null;
+
+    _inputFocusNode.unfocus();
+    setState(() {
+      _lockedMinCardHeight = measuredCardHeight;
+      _voiceMode = locked ? _VoiceCaptureMode.locked : _VoiceCaptureMode.holding;
+      _liveTranscript = '';
+      _voiceDurationSec = 0.0;
+      _voiceStartedAt = DateTime.now();
+      _speechPermissionMissing = !perm.speechGranted;
+      for (var i = 0; i < _voiceLevels.length; i++) {
+        _voiceLevels[i] = 0.14;
+      }
+    });
+
+    if (locked && _isDesktopOrWeb) {
+      _voiceFocusNode.requestFocus();
+    }
+
+    await _voiceSub?.cancel();
+    _voiceSub = _voiceBridge.updates.listen((update) {
+      if (!mounted || !_isVoiceActive) return;
+      setState(() {
+        if (update.transcript.isNotEmpty) {
+          _liveTranscript = update.transcript;
+        }
+        if (update.durationSec > _voiceDurationSec) {
+          _voiceDurationSec = update.durationSec;
+        }
+        if (update.level != null) {
+          _voiceLevels.removeAt(0);
+          _voiceLevels.add(update.level!.clamp(0.1, 1.0));
+        }
+      });
+    });
+
+    _voiceClockTimer?.cancel();
+    _voiceClockTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (!mounted || !_isVoiceActive || _voiceStartedAt == null) return;
+      final elapsed = DateTime.now().difference(_voiceStartedAt!).inMilliseconds / 1000.0;
+      if (elapsed > _voiceDurationSec) {
+        setState(() => _voiceDurationSec = elapsed);
+      }
+    });
+
+    try {
+      await _voiceBridge.startRecording(locale: widget.voiceLocale);
+      if (!mounted) {
+        unawaited(_voiceBridge.cancelRecording());
+        return;
+      }
+      if (!locked) {
+        unawaited(HapticFeedback.mediumImpact());
+      } else {
+        unawaited(HapticFeedback.selectionClick());
+      }
+    } catch (err) {
+      _resetVoiceState();
+      _showVoiceToast('无法启动录音：$err');
+    }
+  }
+
+  void _stopVoiceListeners() {
+    _voiceClockTimer?.cancel();
+    _voiceClockTimer = null;
+    final sub = _voiceSub;
+    _voiceSub = null;
+    if (sub != null) {
+      unawaited(sub.cancel());
+    }
+  }
+
+  void _resetVoiceState() {
+    _stopVoiceListeners();
+    _voiceStartedAt = null;
+    if (mounted) {
+      setState(() {
+        _voiceMode = _VoiceCaptureMode.idle;
+        _lockedMinCardHeight = null;
+        _liveTranscript = '';
+        _voiceDurationSec = 0.0;
+        _speechPermissionMissing = false;
+      });
+    }
+  }
+
+  Future<void> _cancelVoiceCapture() async {
+    if (!_isVoiceActive) return;
+    _stopVoiceListeners();
+    unawaited(HapticFeedback.lightImpact());
+    await _voiceBridge.cancelRecording();
+    _resetVoiceState();
+  }
+
+  Future<void> _finishVoiceCaptureToText() async {
+    if (!_isVoiceActive || _voiceMode == _VoiceCaptureMode.finishing) return;
+    final fallbackTranscript = _liveTranscript;
+    _stopVoiceListeners();
+    setState(() => _voiceMode = _VoiceCaptureMode.finishing);
+    VoiceRecordingResult? result;
+    try {
+      result = await _voiceBridge.stopRecording();
+    } catch (_) {
+      result = null;
+    }
+    final text = (result?.transcript.trim().isNotEmpty == true)
+        ? result!.transcript.trim()
+        : fallbackTranscript.trim();
+    _resetVoiceState();
+    if (!mounted || text.isEmpty) return;
+    final existing = widget.controller.text;
+    final merged = existing.trim().isEmpty ? text : '$existing $text';
+    widget.controller.value = TextEditingValue(
+      text: merged,
+      selection: TextSelection.collapsed(offset: merged.length),
+    );
+    _inputFocusNode.requestFocus();
+  }
+
+  Future<void> _finishVoiceCaptureAndSend() async {
+    if (!_isVoiceActive || _voiceMode == _VoiceCaptureMode.finishing) return;
+    final fallbackTranscript = _liveTranscript;
+    final elapsedSec = _voiceDurationSec;
+    _stopVoiceListeners();
+    setState(() => _voiceMode = _VoiceCaptureMode.finishing);
+    VoiceRecordingResult? result;
+    try {
+      result = await _voiceBridge.stopRecording();
+    } catch (err) {
+      _resetVoiceState();
+      _showVoiceToast('录音结束失败：$err');
+      return;
+    }
+
+    if (result == null || (result.durationSec < 0.35 && elapsedSec < 0.35)) {
+      _resetVoiceState();
+      _showVoiceToast('说话时间太短，已取消');
+      return;
+    }
+
+    final finalResult = VoiceRecordingResult(
+      bytes: result.bytes,
+      durationSec: result.durationSec > 0 ? result.durationSec : elapsedSec,
+      transcript: result.transcript.trim().isNotEmpty
+          ? result.transcript.trim()
+          : fallbackTranscript.trim(),
+      mimeType: result.mimeType,
+    );
+
+    final useUrgent = widget.door.state == DoorState.closed && _urgentOpen;
+    if (_urgentOpen && mounted) {
+      setState(() => _urgentOpen = false);
+    }
+
+    try {
+      await widget.onSendVoiceClip?.call(finalResult, urgent: useUrgent);
+    } finally {
+      _resetVoiceState();
+    }
+  }
+
+  String _formatVoiceTimer(double sec) {
+    final s = sec.floor().clamp(0, 3599);
+    final mm = s ~/ 60;
+    final ss = (s % 60).toString().padLeft(2, '0');
+    return '$mm:$ss';
   }
 
   void _triggerSend() {
@@ -770,8 +1036,15 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
 
   @override
   void dispose() {
+    widget.voiceToggleTrigger?.removeListener(_onExternalVoiceToggle);
+    _voiceClockTimer?.cancel();
+    unawaited(_voiceSub?.cancel());
+    if (_isVoiceActive) {
+      unawaited(_voiceBridge.cancelRecording());
+    }
     _inputFocusNode.removeListener(_onFocusChanged);
     _inputFocusNode.dispose();
+    _voiceFocusNode.dispose();
     super.dispose();
   }
 
@@ -1010,27 +1283,291 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
       );
     }
 
+    final Color bg = isUrgentActive
+        ? colors.dangerInk
+        : (isDoorNote ? colors.thresholdAmberSoft : colors.accent);
+    final Color fg = isUrgentActive
+        ? Colors.white
+        : (isDoorNote ? colors.thresholdAmber : colors.onAccent);
     return Tooltip(
-      message: '语音输入',
-      child: IconButton(
+      message: isDesktop ? '点按免提说 / 按住松手发（⌘⇧M）' : '按住说松手发 · 轻点免提说',
+      child: GestureDetector(
         key: const Key('chat_voice_button'),
-        padding: EdgeInsets.zero,
-        constraints: BoxConstraints.tightFor(width: size, height: size),
-        style: IconButton.styleFrom(
-          minimumSize: Size(size, size),
-          fixedSize: Size(size, size),
-          backgroundColor: isDesktop ? Colors.transparent : colors.celadonWash,
-          foregroundColor: isDoorNote ? colors.thresholdAmber : colors.inkQuiet,
-          side: isDesktop
-              ? BorderSide(
-                  color: isDoorNote ? colors.hairlineWarm : colors.hairline,
-                )
-              : null,
-          shape: const CircleBorder(),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.sending ? null : () => unawaited(_startVoiceCapture(locked: true)),
+        onLongPressStart: widget.sending
+            ? null
+            : (_) => unawaited(_startVoiceCapture(locked: false)),
+        onLongPressMoveUpdate: (details) {
+          if (_voiceMode != _VoiceCaptureMode.holding &&
+              _voiceMode != _VoiceCaptureMode.canceling) {
+            return;
+          }
+          final offset = details.localOffsetFromOrigin;
+          if (offset.dy < -52) {
+            unawaited(HapticFeedback.heavyImpact());
+            setState(() => _voiceMode = _VoiceCaptureMode.locked);
+            if (_isDesktopOrWeb) _voiceFocusNode.requestFocus();
+          } else if (offset.dx < -56) {
+            if (_voiceMode != _VoiceCaptureMode.canceling) {
+              unawaited(HapticFeedback.selectionClick());
+              setState(() => _voiceMode = _VoiceCaptureMode.canceling);
+            }
+          } else if (_voiceMode != _VoiceCaptureMode.holding) {
+            setState(() => _voiceMode = _VoiceCaptureMode.holding);
+          }
+        },
+        onLongPressEnd: (_) {
+          if (_voiceMode == _VoiceCaptureMode.canceling) {
+            unawaited(_cancelVoiceCapture());
+          } else if (_voiceMode == _VoiceCaptureMode.holding) {
+            unawaited(_finishVoiceCaptureAndSend());
+          }
+        },
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: widget.sending ? bg.withValues(alpha: 0.45) : bg,
+            shape: BoxShape.circle,
+            border: isDoorNote ? Border.all(color: colors.thresholdAmber) : null,
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            PhosphorIconsLight.microphone,
+            size: 16,
+            color: fg,
+          ),
         ),
-        onPressed: widget.sending ? null : widget.onVoiceInput,
-        icon: const Icon(PhosphorIconsLight.microphone, size: 16.5),
+      ),
+    );
+  }
+
+  Widget _buildVoiceRecordingCard(
+    PsyberColors colors, {
+    required bool isDesktop,
+    required bool isDoorNote,
+  }) {
+    final isCanceling = _voiceMode == _VoiceCaptureMode.canceling;
+    final isLocked = _voiceMode == _VoiceCaptureMode.locked;
+    final isFinishing = _voiceMode == _VoiceCaptureMode.finishing;
+    final accentColor = isCanceling
+        ? colors.dangerInk
+        : (isDoorNote ? colors.thresholdAmber : colors.accent);
+    final btnSize = isDesktop ? 32.0 : 34.0;
+    final visibleLevels = _voiceLevels.length > 10
+        ? _voiceLevels.sublist(_voiceLevels.length - 10)
+        : _voiceLevels;
+
+    final placeholderText = isCanceling
+        ? '松开手指以取消发送'
+        : (_speechPermissionMissing
+            ? '正在录制原声语音条…'
+            : '正在听你说话…');
+
+    // 与默认双层输入台保持同高：按切换前实测卡片高度对齐上层最小高度，避免跳动
+    final double toolbarHeight = btnSize + 11.0;
+    final double topMinHeight = _lockedMinCardHeight != null
+        ? (_lockedMinCardHeight! - 2.0 - toolbarHeight - 25.0).clamp(40.0, 200.0)
+        : 44.4;
+    return Focus(
+      focusNode: _voiceFocusNode,
+      child: Column(
+        key: const Key('voice_recording_card'),
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 15, 12, 10),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: topMinHeight,
+                maxHeight: math.max(topMinHeight, 120.0),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      reverse: true,
+                      child: Text(
+                        _liveTranscript.isNotEmpty
+                            ? _liveTranscript
+                            : placeholderText,
+                        key: const Key('voice_live_transcript'),
+                        style: TextStyle(
+                          fontSize: 15,
+                          height: 1.48,
+                          color: _liveTranscript.isNotEmpty
+                              ? colors.inkDeep
+                              : (isCanceling
+                                  ? colors.dangerInk
+                                  : colors.inkFaint),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (!_speechPermissionMissing) ...[
+                    const SizedBox(width: 8),
+                    Tooltip(
+                      message: widget.voiceLocale == 'en-US'
+                          ? '当前英文识别，点击切换中文'
+                          : '当前中文识别，点击切换英文',
+                      child: InkWell(
+                        key: const Key('voice_locale_toggle'),
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: (isLocked && !isFinishing)
+                            ? () {
+                                final next = widget.voiceLocale == 'en-US'
+                                    ? 'zh-CN'
+                                    : 'en-US';
+                                widget.onChangeVoiceLocale?.call(next);
+                                unawaited(_voiceBridge.switchLocale(next));
+                                unawaited(HapticFeedback.selectionClick());
+                              }
+                            : null,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 2.5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colors.mineralCanvas,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: colors.hairline),
+                          ),
+                          child: Text(
+                            widget.voiceLocale == 'en-US' ? 'EN' : '中文',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: isLocked ? colors.inkDeep : colors.inkQuiet,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 2, 10, 9),
+            child: SizedBox(
+              height: btnSize,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: accentColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 7),
+                  Text(
+                    _formatVoiceTimer(_voiceDurationSec),
+                    style: PsyberTheme.monoStyle.copyWith(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: accentColor,
+                    ),
+                  ),
+                  const SizedBox(width: 9),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      for (final lv in visibleLevels)
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 70),
+                          width: 2.5,
+                          height: 4 + lv * 12,
+                          margin: const EdgeInsets.symmetric(horizontal: 1.3),
+                          decoration: BoxDecoration(
+                            color: accentColor.withValues(alpha: 0.72),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const Spacer(),
+                  if (isLocked || isFinishing) ...[
+                    Tooltip(
+                      message: '停止录音并转入输入框编辑',
+                      child: IconButton(
+                        key: const Key('voice_to_text_button'),
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints.tightFor(
+                          width: btnSize,
+                          height: btnSize,
+                        ),
+                        style: IconButton.styleFrom(
+                          minimumSize: Size(btnSize, btnSize),
+                          fixedSize: Size(btnSize, btnSize),
+                          backgroundColor: colors.mineralCanvas,
+                          foregroundColor: colors.inkDeep,
+                          side: BorderSide(color: colors.hairline),
+                          shape: const CircleBorder(),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: isFinishing
+                            ? null
+                            : () => unawaited(_finishVoiceCaptureToText()),
+                        icon: const Icon(PhosphorIconsFill.stop, size: 11.5),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Tooltip(
+                      message: isDesktop ? '发送语音 (Enter)' : '发送语音',
+                      child: IconButton(
+                        key: const Key('voice_send_button'),
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints.tightFor(
+                          width: btnSize,
+                          height: btnSize,
+                        ),
+                        style: IconButton.styleFrom(
+                          minimumSize: Size(btnSize, btnSize),
+                          fixedSize: Size(btnSize, btnSize),
+                          backgroundColor: isDoorNote
+                              ? colors.thresholdAmber
+                              : colors.accent,
+                          foregroundColor: colors.onAccent,
+                          shape: const CircleBorder(),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: isFinishing
+                            ? null
+                            : () => unawaited(_finishVoiceCaptureAndSend()),
+                        icon: isFinishing
+                            ? SizedBox(
+                                width: 13,
+                                height: 13,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: colors.onAccent,
+                                ),
+                              )
+                            : const Icon(PhosphorIconsLight.arrowUp, size: 16),
+                      ),
+                    ),
+                  ] else
+                    Text(
+                      isCanceling ? '松手取消' : '← 取消 · ↑ 锁定 · 松手发',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isCanceling ? colors.dangerInk : colors.inkQuiet,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1163,6 +1700,7 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                       !hasDraft &&
                       !widget.isReplying &&
                       !widget.isDraggingFiles &&
+                      !_isVoiceActive &&
                       !door.state.isDoorNoteMode;
 
                   final borderRadius = BorderRadius.circular(
@@ -1170,23 +1708,34 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                         ? 28
                         : (isDoorNote ? 14 : (isDesktopLayout ? 18 : 20)),
                   );
-                  final borderColor = widget.isDraggingFiles
-                      ? colors.accentBorder
-                      : (isUrgentActive
-                          ? colors.dangerInk
-                          : (isDoorNote ? colors.hairlineWarm : colors.hairline));
+                  final borderColor = _voiceMode == _VoiceCaptureMode.canceling
+                      ? colors.dangerInk
+                      : (_isVoiceActive
+                          ? colors.accentBorder
+                          : (widget.isDraggingFiles
+                              ? colors.accentBorder
+                              : (isUrgentActive
+                                  ? colors.dangerInk
+                                  : (isDoorNote
+                                      ? colors.hairlineWarm
+                                      : colors.hairline))));
 
                   return AnimatedSize(
                     duration: const Duration(milliseconds: 180),
                     curve: Curves.easeOutCubic,
                     alignment: Alignment.bottomCenter,
                     child: Container(
+                      key: _composerCardKey,
                       decoration: BoxDecoration(
                         color: isDoorNote ? colors.slipPaper : colors.letterSurface,
                         borderRadius: borderRadius,
                         border: Border.all(
                           color: borderColor,
-                          width: (widget.isDraggingFiles || isUrgentActive) ? 1.5 : 1,
+                          width: (widget.isDraggingFiles ||
+                                  isUrgentActive ||
+                                  _voiceMode == _VoiceCaptureMode.canceling)
+                              ? 1.5
+                              : 1,
                         ),
                         boxShadow: [
                           BoxShadow(
@@ -1198,7 +1747,13 @@ class _AdaptiveComposerState extends State<AdaptiveComposer> {
                           ),
                         ],
                       ),
-                      child: showSingleLineMobilePill
+                      child: _isVoiceActive
+                          ? _buildVoiceRecordingCard(
+                              colors,
+                              isDesktop: isDesktopLayout,
+                              isDoorNote: isDoorNote,
+                            )
+                          : showSingleLineMobilePill
                           ? Padding(
                               padding: const EdgeInsets.fromLTRB(8, 7, 8, 7),
                                 child: Row(

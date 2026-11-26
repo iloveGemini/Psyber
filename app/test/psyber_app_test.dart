@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:psyber_app/core/media/image_picker.dart';
+import 'package:psyber_app/core/media/voice_bridge.dart';
 import 'package:psyber_app/core/models/models.dart';
 import 'package:psyber_app/core/network/api_client.dart';
 import 'package:psyber_app/core/network/lan_discovery.dart';
@@ -389,6 +390,7 @@ class FakePsyberApiClient implements PsyberApiClient {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    VoiceClipInfo? voiceClip,
     bool urgent = false,
   }) async {
     sentPayloads.add({
@@ -396,6 +398,7 @@ class FakePsyberApiClient implements PsyberApiClient {
       'attachments': attachments,
       'stickerId': stickerId,
       'videoClip': videoClip?.toJson(),
+      'voiceClip': voiceClip?.toJson(),
       'urgent': urgent,
     });
     final isUrgentBypass = door.state == DoorState.closed && urgent;
@@ -422,6 +425,7 @@ class FakePsyberApiClient implements PsyberApiClient {
       attachments: attachments ?? const <String>[],
       sticker: matchedSticker,
       videoClip: videoClip,
+      voiceClip: voiceClip,
       urgent: isUrgentBypass,
       createdAt: 1795046400000 + nextSeq * 1000,
     );
@@ -2856,6 +2860,166 @@ void main() {
     expect(await storage2.loadOrCreateClientId(), cid1);
     expect((await storage2.loadForInstance('inst-a'))?.token, 'demo-session-a');
   });
+
+  testWidgets('语音条免提录音发送、转文字编辑与时间线 VoiceTile 渲染', (tester) async {
+    final api = FakePsyberApiClient();
+    final voice = _FakeVoiceBridge();
+    final storage = MemorySessionStorage(
+      const ConnectionProfile(
+        baseUrl: 'http://localhost:3721',
+        token: 'demo-session-value',
+        deviceId: 'dev-1',
+        instanceId: 'inst-test-001',
+        deviceName: 'Mac',
+      ),
+    );
+    final controller = AppController(api: api, storage: storage);
+    addTearDown(() async {
+      await api.closeStream();
+      voice.dispose();
+      controller.dispose();
+    });
+
+    await controller.initialize();
+    await tester.pumpWidget(
+      PsyberApp(controller: controller, voiceBridge: voice),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. 轻点麦克风进入免提录音态，实时显示转写预览，点发送直接上传并落入时间线语音气泡
+    await tester.tap(find.byKey(const Key('chat_voice_button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 220));
+    expect(find.byKey(const Key('voice_recording_card')), findsOneWidget);
+    expect(voice.startCount, 1);
+    expect(voice.lastLocale, 'zh-CN');
+    expect(find.text('中文'), findsOneWidget);
+
+    // 录音卡片支持一键切换中 / 英识别语言并记忆偏好
+    await tester.tap(find.byKey(const Key('voice_locale_toggle')));
+    await tester.pump();
+    expect(voice.lastLocale, 'en-US');
+    expect(controller.voiceLocaleNotifier.value, 'en-US');
+    expect(find.text('EN'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('voice_locale_toggle')));
+    await tester.pump();
+    expect(voice.lastLocale, 'zh-CN');
+
+    voice.emitUpdate(
+      const VoiceRecordingUpdate(
+        transcript: '路上不方便打字，先发条语音',
+        durationSec: 4.2,
+        level: 0.7,
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('路上不方便打字，先发条语音'), findsOneWidget);
+
+    voice.nextResult = VoiceRecordingResult(
+      bytes: Uint8List.fromList([1, 2, 3, 4]),
+      durationSec: 4.5,
+      transcript: '路上不方便打字，先发条语音',
+    );
+    await tester.tap(find.byKey(const Key('voice_send_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('voice_recording_card')), findsNothing);
+    expect(api.mediaUploadCount, 1);
+    expect(api.sentPayloads.length, 1);
+    expect(api.sentPayloads.first['content'], '路上不方便打字，先发条语音');
+    expect(api.sentPayloads.first['voiceClip'], isNotNull);
+    expect(find.byKey(Key('voice_tile_${'a' * 64}')), findsOneWidget);
+    expect(find.text('路上不方便打字，先发条语音'), findsOneWidget);
+
+    // 2. 免提态点「转文字编辑」将转写内容填入输入框而不直接发出
+    await tester.tap(find.byKey(const Key('chat_voice_button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 220));
+    voice.nextResult = VoiceRecordingResult(
+      bytes: Uint8List.fromList([5, 6, 7]),
+      durationSec: 2.0,
+      transcript: '顺便买杯热拿铁',
+    );
+    await tester.tap(find.byKey(const Key('voice_to_text_button')));
+    await tester.pumpAndSettle();
+
+    expect(api.sentPayloads.length, 1);
+    final field = tester.widget<TextField>(find.byKey(const Key('chat_input_field')));
+    expect(field.controller?.text, '顺便买杯热拿铁');
+  });
+}
+
+class _FakeVoiceBridge implements VoiceBridge {
+  final StreamController<VoiceRecordingUpdate> _updates =
+      StreamController<VoiceRecordingUpdate>.broadcast();
+  @override
+  final ValueNotifier<VoicePlaybackState?> playbackNotifier =
+      ValueNotifier<VoicePlaybackState?>(null);
+
+  int startCount = 0;
+  int cancelCount = 0;
+  String? lastLocale;
+  VoiceRecordingResult? nextResult;
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  Stream<VoiceRecordingUpdate> get updates => _updates.stream;
+
+  void emitUpdate(VoiceRecordingUpdate update) => _updates.add(update);
+
+  @override
+  Future<VoicePermissionStatus> checkPermission() async =>
+      const VoicePermissionStatus(micGranted: true, speechGranted: true);
+
+  @override
+  Future<VoicePermissionStatus> requestPermission() async =>
+      const VoicePermissionStatus(micGranted: true, speechGranted: true);
+
+  @override
+  Future<void> startRecording({String? locale}) async {
+    startCount += 1;
+    lastLocale = locale;
+  }
+
+  @override
+  Future<void> switchLocale(String locale) async {
+    lastLocale = locale;
+  }
+
+  @override
+  Future<VoiceRecordingResult?> stopRecording() async => nextResult;
+
+  @override
+  Future<void> cancelRecording() async {
+    cancelCount += 1;
+  }
+
+  @override
+  Future<void> playAudio({
+    required String id,
+    required String url,
+    required String token,
+  }) async {
+    playbackNotifier.value = VoicePlaybackState(
+      id: id,
+      playing: true,
+      positionSec: 0,
+      durationSec: 4.5,
+    );
+  }
+
+  @override
+  Future<void> stopAudio() async {
+    playbackNotifier.value = null;
+  }
+
+  void dispose() {
+    unawaited(_updates.close());
+    playbackNotifier.dispose();
+  }
 }
 
 class _FakeLanDiscoveryService implements LanDiscoveryService {

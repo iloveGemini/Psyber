@@ -698,11 +698,32 @@ export class DirectEngine {
     return trimmed ? `${marker}\n${text}` : marker;
   }
 
-  /** 渲染历史事件中的用户消息（含贴纸与既往图片数量标记，避免重复塞入历史 base64） */
+  /** 将用户语音条元数据与转写正文格式化为自然语义标记 */
+  private formatUserTextWithVoice(
+    text: string,
+    voiceClip?: { mediaHash: string; durationSec: number; mimeType?: string } | null,
+  ): string {
+    if (!voiceClip) return text;
+    const sec = Math.max(1, Math.round(voiceClip.durationSec));
+    const trimmed = text.trim();
+    return trimmed ? `[语音 ${sec}秒] ${text}` : `[发来一条约 ${sec} 秒的语音，未能识别出文字]`;
+  }
+
+  /** 渲染历史事件中的用户消息（含贴纸、语音条与既往图片数量标记，避免重复塞入历史 base64） */
   private formatHistoryUserContent(ev: StoredEvent): string {
     const stickerId =
       ev.metadata && typeof ev.metadata.stickerId === "string" ? ev.metadata.stickerId : null;
-    const base = this.formatUserTextWithSticker(ev.content, stickerId);
+    const rawVoice = ev.metadata?.voiceClip;
+    const voiceClip =
+      rawVoice &&
+      typeof rawVoice === "object" &&
+      !Array.isArray(rawVoice) &&
+      typeof (rawVoice as { mediaHash?: unknown }).mediaHash === "string" &&
+      typeof (rawVoice as { durationSec?: unknown }).durationSec === "number"
+        ? (rawVoice as { mediaHash: string; durationSec: number; mimeType?: string })
+        : null;
+    const withVoice = this.formatUserTextWithVoice(ev.content, voiceClip);
+    const base = this.formatUserTextWithSticker(withVoice, stickerId);
     const attachments =
       ev.metadata && Array.isArray(ev.metadata.attachments) ? ev.metadata.attachments : [];
     if (attachments.length === 0) return base;
@@ -777,6 +798,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    voiceClip?: { mediaHash: string; durationSec: number; mimeType?: string };
     urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
@@ -959,7 +981,8 @@ export class DirectEngine {
       }
     }
 
-    const displayUserText = this.formatUserTextWithSticker(opts.userText, opts.stickerId);
+    const textWithVoice = this.formatUserTextWithVoice(opts.userText, opts.voiceClip);
+    const displayUserText = this.formatUserTextWithSticker(textWithVoice, opts.stickerId);
     const videoNote = opts.videoClip
       ? `[附带了一段约 ${Math.max(1, Math.round(opts.videoClip.durationSec))} 秒的短视频，以下是按时间提取的画面帧]`
       : "";
@@ -1086,6 +1109,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    voiceClip?: { mediaHash: string; durationSec: number; mimeType?: string };
     urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
@@ -1119,6 +1143,7 @@ export class DirectEngine {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    voiceClip?: { mediaHash: string; durationSec: number; mimeType?: string };
     urgent?: boolean;
     wakeReason?: string;
     activityHint?: string;
@@ -1196,6 +1221,7 @@ export class DirectEngine {
         stickerId: opts.stickerId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,
+        voiceClip: opts.voiceClip,
         urgent: opts.urgent,
         wakeReason: opts.wakeReason,
         activityHint: opts.activityHint,

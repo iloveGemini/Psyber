@@ -526,6 +526,33 @@ class VideoClipInfo {
 }
 
 @immutable
+class VoiceClipInfo {
+  const VoiceClipInfo({
+    required this.mediaHash,
+    required this.durationSec,
+    this.mimeType = 'audio/mp4',
+  });
+
+  final String mediaHash;
+  final double durationSec;
+  final String mimeType;
+
+  factory VoiceClipInfo.fromJson(Map<String, dynamic> json) {
+    return VoiceClipInfo(
+      mediaHash: (json['mediaHash'] as String? ?? '').trim(),
+      durationSec: (json['durationSec'] as num?)?.toDouble() ?? 0.0,
+      mimeType: (json['mimeType'] as String? ?? 'audio/mp4').trim(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'mediaHash': mediaHash,
+        'durationSec': durationSec,
+        'mimeType': mimeType,
+      };
+}
+
+@immutable
 class ContextUsageInfo {
   const ContextUsageInfo({
     required this.usedTokens,
@@ -699,6 +726,7 @@ class TimelineItem {
     this.journalSteps = const <TurnJournalStep>[],
     this.model,
     this.videoClip,
+    this.voiceClip,
     this.recallCount,
     this.aborted = false,
     this.retracted = false,
@@ -729,6 +757,7 @@ class TimelineItem {
   final List<TurnJournalStep> journalSteps;
   final String? model;
   final VideoClipInfo? videoClip;
+  final VoiceClipInfo? voiceClip;
   final int? recallCount;
   final bool aborted;
   final bool retracted;
@@ -806,6 +835,7 @@ class TimelineItem {
     final rawRecall = json['recallCount'] ?? metaMap['recallCount'];
     final rawModel = json['model'] ?? metaMap['model'];
     final rawVideoClip = json['videoClip'] ?? metaMap['videoClip'];
+    final rawVoiceClip = json['voiceClip'] ?? metaMap['voiceClip'];
     final retracted = json['retracted'] == true || json['status'] == 'retracted';
     final retractedBy = (json['retractedBy'] ?? metaMap['retractedBy']) as String?;
     final urgent = json['urgent'] == true || metaMap['urgent'] == true;
@@ -844,6 +874,11 @@ class TimelineItem {
           ? null
           : (rawVideoClip is Map<String, dynamic>
               ? VideoClipInfo.fromJson(rawVideoClip)
+              : null),
+      voiceClip: retracted
+          ? null
+          : (rawVoiceClip is Map<String, dynamic>
+              ? VoiceClipInfo.fromJson(rawVoiceClip)
               : null),
       recallCount: rawRecall is num ? rawRecall.toInt() : null,
       aborted: json['aborted'] == true || metaMap['aborted'] == true,
@@ -884,6 +919,7 @@ class TimelineItem {
       journalSteps: journalSteps,
       model: model,
       videoClip: videoClip,
+      voiceClip: voiceClip,
       recallCount: recallCount,
       aborted: aborted,
       retracted: retracted,

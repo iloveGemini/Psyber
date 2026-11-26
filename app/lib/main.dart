@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'core/media/image_picker.dart';
+import 'core/media/voice_bridge.dart';
 import 'core/models/models.dart';
 import 'core/network/api_client.dart';
 import 'core/state/app_controller.dart';
@@ -29,10 +30,12 @@ class PsyberApp extends StatelessWidget {
     super.key,
     required this.controller,
     this.imagePicker,
+    this.voiceBridge,
   });
 
   final AppController controller;
   final ImageFilePicker? imagePicker;
+  final VoiceBridge? voiceBridge;
 
   @override
   Widget build(BuildContext context) {
@@ -66,6 +69,7 @@ class PsyberApp extends StatelessWidget {
                           return ChatPage(
                             controller: controller,
                             imagePicker: imagePicker,
+                            voiceBridge: voiceBridge,
                           );
                         },
                       );

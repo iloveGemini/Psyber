@@ -155,6 +155,9 @@ class AppController {
 
   final ValueNotifier<bool> isAppForegroundNotifier = ValueNotifier<bool>(true);
 
+  /// 语音条实时转写语言偏好（默认简体中文，可一键切换英文并持久化）。
+  final ValueNotifier<String> voiceLocaleNotifier = ValueNotifier<String>('zh-CN');
+
   final Map<String, String> _liveTurnMotions = <String, String>{};
   final Map<String, DateTime> _liveMotionStartedAt = <String, DateTime>{};
   final Set<String> _consumedMotionTurnIds = <String>{};
@@ -164,6 +167,13 @@ class AppController {
   void setAppForeground(bool foreground) {
     if (isAppForegroundNotifier.value == foreground) return;
     isAppForegroundNotifier.value = foreground;
+  }
+
+  void setVoiceLocale(String locale) {
+    final normalized = (locale == 'en-US') ? 'en-US' : 'zh-CN';
+    if (voiceLocaleNotifier.value == normalized) return;
+    voiceLocaleNotifier.value = normalized;
+    unawaited(_storage.saveVoiceLocale(normalized));
   }
 
   void setThemeMode(ThemeMode mode) {
@@ -251,7 +261,9 @@ class AppController {
       unawaited(LocalNotificationService.requestPermission());
     }
     final themePrefs = await _storage.loadThemePreferences();
+    final savedVoiceLocale = await _storage.loadVoiceLocale();
     if (_disposed) return;
+    voiceLocaleNotifier.value = savedVoiceLocale;
     lightPaletteNotifier.value = themePrefs.lightPalette;
     darkPaletteNotifier.value = themePrefs.darkPalette;
     themeModeNotifier.value = themePrefs.themeMode;
@@ -836,6 +848,7 @@ class AppController {
     List<String>? attachments,
     String? stickerId,
     VideoClipInfo? videoClip,
+    VoiceClipInfo? voiceClip,
     bool urgent = false,
   }) async {
     final profile = profileNotifier.value;
@@ -843,8 +856,9 @@ class AppController {
     final hasAttachments = attachments != null && attachments.isNotEmpty;
     final hasSticker = stickerId != null && stickerId.trim().isNotEmpty;
     final hasVideo = videoClip != null && videoClip.frameHashes.isNotEmpty;
+    final hasVoice = voiceClip != null && voiceClip.mediaHash.isNotEmpty;
     if (profile == null ||
-        (text.isEmpty && !hasAttachments && !hasSticker && !hasVideo)) {
+        (text.isEmpty && !hasAttachments && !hasSticker && !hasVideo && !hasVoice)) {
       return null;
     }
 
@@ -859,6 +873,7 @@ class AppController {
       attachments: attachments,
       stickerId: hasSticker ? stickerId.trim() : null,
       videoClip: videoClip,
+      voiceClip: voiceClip,
       urgent: urgent,
     );
     if (_disposed) return res;
@@ -1650,9 +1665,11 @@ class AppController {
     final raw = item.content.replaceAll(RegExp(r'\s+'), ' ').trim();
     final body = raw.isNotEmpty
         ? (raw.length > 80 ? '${raw.substring(0, 80)}…' : raw)
-        : (item.sticker != null
-            ? '[贴纸：${item.sticker!.label}]'
-            : (item.attachments.isNotEmpty ? '[发来一张图片]' : '发来一条新消息'));
+        : (item.voiceClip != null
+            ? '[发来一条语音]'
+            : (item.sticker != null
+                ? '[贴纸：${item.sticker!.label}]'
+                : (item.attachments.isNotEmpty ? '[发来一张图片]' : '发来一条新消息')));
     _dispatchBackgroundLocalNotification(
       id: 'msg_${item.id}',
       title: item.urgent
@@ -1751,5 +1768,6 @@ class AppController {
     paletteNotifier.dispose();
     pendingApprovalNotifier.dispose();
     isAppForegroundNotifier.dispose();
+    voiceLocaleNotifier.dispose();
   }
 }

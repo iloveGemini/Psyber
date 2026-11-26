@@ -12,8 +12,14 @@ const MIME_TO_EXT: Record<string, string> = {
   "image/webp": "webp",
   "image/gif": "gif",
   "video/mp4": "mp4",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "aac",
   "audio/mpeg": "mp3",
   "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
   "application/octet-stream": "bin",
 };
 

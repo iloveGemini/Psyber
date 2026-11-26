@@ -76,6 +76,8 @@ abstract class SessionStorage {
   Future<void> saveDraft(String draft);
   Future<ThemePreferences> loadThemePreferences() async => const ThemePreferences();
   Future<void> saveThemePreferences(ThemePreferences prefs) async {}
+  Future<String> loadVoiceLocale() async => 'zh-CN';
+  Future<void> saveVoiceLocale(String locale) async {}
 }
 
 class MemorySessionStorage implements SessionStorage {
@@ -84,6 +86,7 @@ class MemorySessionStorage implements SessionStorage {
   final String _clientId;
   String _draft = '';
   ThemePreferences _themePrefs = const ThemePreferences();
+  String _voiceLocale = 'zh-CN';
 
   MemorySessionStorage([ConnectionProfile? initial, String? clientId])
       : _clientId = clientId ?? _generateStableClientId() {
@@ -150,6 +153,14 @@ class MemorySessionStorage implements SessionStorage {
   @override
   Future<void> saveThemePreferences(ThemePreferences prefs) async {
     _themePrefs = prefs;
+  }
+
+  @override
+  Future<String> loadVoiceLocale() async => _voiceLocale;
+
+  @override
+  Future<void> saveVoiceLocale(String locale) async {
+    _voiceLocale = locale;
   }
 }
 
@@ -467,6 +478,42 @@ class FileSessionStorage implements SessionStorage {
       }
     } catch (_) {
       // 主题偏好写入失败静默忽略，不阻塞切换体验
+    }
+  }
+
+  File _voiceLocaleFile(File sessionFile) =>
+      File('${sessionFile.parent.path}/client_voice_locale.txt');
+
+  @override
+  Future<String> loadVoiceLocale() async {
+    try {
+      final f = _voiceLocaleFile(await _getFile());
+      if (!await f.exists()) return 'zh-CN';
+      final raw = (await f.readAsString()).trim();
+      if (raw == 'zh-CN' || raw == 'en-US') return raw;
+      return 'zh-CN';
+    } catch (_) {
+      return 'zh-CN';
+    }
+  }
+
+  @override
+  Future<void> saveVoiceLocale(String locale) async {
+    try {
+      final f = _voiceLocaleFile(await _getFile());
+      await f.parent.create(recursive: true);
+      _tmpSeq += 1;
+      final tmp = File('${f.path}.tmp.${DateTime.now().microsecondsSinceEpoch}.$_tmpSeq');
+      try {
+        await tmp.writeAsString('$locale\n', flush: true);
+        await tmp.rename(f.path);
+      } finally {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      }
+    } catch (_) {
+      // 语音语言偏好写入失败静默忽略
     }
   }
 }

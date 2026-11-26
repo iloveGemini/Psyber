@@ -23,6 +23,33 @@ import type { PairingManager } from "./pairing.ts";
 
 const VALID_ULID_OR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+export interface VoiceClipMeta {
+  mediaHash: string;
+  durationSec: number;
+  mimeType?: string;
+}
+
+function parseVoiceClip(raw: unknown): VoiceClipMeta | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const vc = raw as { mediaHash?: unknown; durationSec?: unknown; mimeType?: unknown };
+  if (
+    typeof vc.mediaHash !== "string" ||
+    !vc.mediaHash.trim() ||
+    typeof vc.durationSec !== "number" ||
+    !Number.isFinite(vc.durationSec) ||
+    vc.durationSec < 0
+  ) {
+    return undefined;
+  }
+  const mimeType =
+    typeof vc.mimeType === "string" && vc.mimeType.trim() ? vc.mimeType.trim() : undefined;
+  return {
+    mediaHash: vc.mediaHash.trim(),
+    durationSec: vc.durationSec,
+    ...(mimeType ? { mimeType } : {}),
+  };
+}
+
 /** 对 Bearer Token 做 SHA-256 哈希，确保 config.json 绝不存明文令牌 */
 export function hashBearerToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -86,6 +113,7 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const usage = meta.usage && typeof meta.usage === "object" ? meta.usage : undefined;
   const videoClip =
     meta.videoClip && typeof meta.videoClip === "object" ? meta.videoClip : undefined;
+  const voiceClip = parseVoiceClip(meta.voiceClip);
   const urgent = meta.urgent === true ? true : undefined;
   const shares = Array.isArray(meta.shares) ? meta.shares : undefined;
   const openedAt = typeof meta.openedAt === "number" ? meta.openedAt : undefined;
@@ -106,6 +134,7 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     ...(model !== undefined ? { model } : {}),
     ...(usage !== undefined ? { usage } : {}),
     ...(videoClip !== undefined ? { videoClip } : {}),
+    ...(voiceClip !== undefined ? { voiceClip } : {}),
     ...(urgent ? { urgent: true } : {}),
     ...(shares !== undefined ? { shares } : {}),
     ...(openedAt !== undefined ? { openedAt } : {}),
@@ -193,6 +222,7 @@ export function createApp(deps: AppDeps): Hono {
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
+    voiceClip?: VoiceClipMeta;
     urgent?: boolean;
     activityHint?: string;
     groupId?: string;
@@ -214,6 +244,7 @@ export function createApp(deps: AppDeps): Hono {
         stickerId: opts.stickerId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,
+        voiceClip: opts.voiceClip,
         urgent: opts.urgent,
         activityHint: opts.activityHint,
         turnId: activeTurnId,
@@ -495,6 +526,7 @@ export function createApp(deps: AppDeps): Hono {
       attachments?: unknown;
       stickerId?: string;
       videoClip?: unknown;
+      voiceClip?: unknown;
       urgent?: boolean;
     };
     try {
@@ -535,10 +567,12 @@ export function createApp(deps: AppDeps): Hono {
         };
       }
     }
+    const voiceClip = parseVoiceClip(body.voiceClip);
+    const hasVoiceClip = voiceClip !== undefined;
 
-    if (!content.trim() && !hasAttachments && !hasSticker) {
+    if (!content.trim() && !hasAttachments && !hasSticker && !hasVoiceClip) {
       return c.json(
-        { error: { code: "EMPTY_MESSAGE", message: "消息内容、图片或贴纸不能同时为空" } },
+        { error: { code: "EMPTY_MESSAGE", message: "消息内容、图片、语音或贴纸不能同时为空" } },
         400,
       );
     }
@@ -576,6 +610,7 @@ export function createApp(deps: AppDeps): Hono {
     if (hasAttachments) metadata.attachments = attachments;
     if (hasSticker) metadata.stickerId = stickerId;
     if (videoClip) metadata.videoClip = videoClip;
+    if (voiceClip) metadata.voiceClip = voiceClip;
     if (isUrgentBypass) metadata.urgent = true;
 
     const { event, deduplicated } = deps.events.append({
@@ -606,6 +641,7 @@ export function createApp(deps: AppDeps): Hono {
           stickerId: hasSticker ? stickerId : undefined,
           attachments: hasAttachments ? attachments : undefined,
           videoClip,
+          voiceClip,
           urgent: isUrgentBypass || undefined,
           activityHint,
         });
@@ -719,6 +755,7 @@ export function createApp(deps: AppDeps): Hono {
           }
         : undefined;
 
+    const voiceClip = parseVoiceClip(meta.voiceClip);
     const latestItems = deps.events.listHistory({ limit: 1 }).items;
     const isLatestTimelineEvent =
       latestItems.length > 0 && latestItems[latestItems.length - 1]!.id === origUser.id;
@@ -736,6 +773,7 @@ export function createApp(deps: AppDeps): Hono {
       stickerId,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       videoClip,
+      voiceClip,
       activityHint: mapped?.activityHint ?? origUser.activity ?? undefined,
       resumeCheckpoint,
     });
@@ -852,6 +890,7 @@ export function createApp(deps: AppDeps): Hono {
         ? meta.attachments.filter((x): x is string => typeof x === "string")
         : undefined;
       const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : undefined;
+      const voiceClip = parseVoiceClip(meta.voiceClip);
       retryOrigins.set(res.event.turnId, {
         userEventId: res.event.id,
         activityHint: res.event.activity ?? undefined,
@@ -861,6 +900,7 @@ export function createApp(deps: AppDeps): Hono {
         userEvent: res.event,
         stickerId,
         attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        voiceClip,
         urgent: meta.urgent === true ? true : undefined,
         activityHint: res.event.activity ?? undefined,
       });
@@ -903,6 +943,7 @@ export function createApp(deps: AppDeps): Hono {
       ? meta.attachments.filter((x): x is string => typeof x === "string")
       : undefined;
     const stickerId = typeof meta.stickerId === "string" ? meta.stickerId : undefined;
+    const voiceClip = parseVoiceClip(meta.voiceClip);
     retryOrigins.set(newTurnId, {
       userEventId: prep.userEvent.id,
       activityHint: prep.userEvent.activity ?? undefined,
@@ -913,6 +954,7 @@ export function createApp(deps: AppDeps): Hono {
       userEvent: prep.userEvent,
       stickerId,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      voiceClip,
       activityHint: prep.userEvent.activity ?? undefined,
       groupId: prep.groupId,
       version: prep.nextVersion,
