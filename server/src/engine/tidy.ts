@@ -3,7 +3,8 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { Clock } from "../core/clock.ts";
 import { localDateStartMs, localDateTime, localDay, weekdayOfDay } from "../core/clock.ts";
-import type { PsyberConfig } from "../core/config.ts";
+import { mergeRadarConfig, type PsyberConfig } from "../core/config.ts";
+import type { EmbeddingClient } from "../core/embedding.ts";
 import { commitMemoryPaths, getMemoryHeadCommit } from "../core/git.ts";
 import { readPrompt, stripFrontmatter } from "../core/prompts.ts";
 import type {
@@ -21,6 +22,11 @@ import {
   selectActiveGistLayers,
 } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
+import {
+  renderMemoryRadarBlock,
+  runMemoryRadar,
+  type MemoryRadarResult,
+} from "../memory/radar.ts";
 import {
   isAllowedWritePath,
   normalizeRelPath,
@@ -59,8 +65,10 @@ export interface TidyTaskDeps {
   memoryIndex: MemoryIndex;
   memoryTools: MemoryTools;
   chatModel: ChatModelClient;
-  /** 可选决策客户端：bedtime 排空对话后用于日反思门控，通过时直接合并进本轮 bedtime */
+  /** 可选决策客户端：bedtime 排空对话后用于只读体检雷达与日反思门控，通过时直接合并进本轮 bedtime */
   decisionClient?: DecisionClient;
+  /** 可选向量客户端：供 bedtime 前置只读体检雷达按余弦相似度匹配历史旧卡（缺失时平滑降级 FTS5） */
+  embedding?: EmbeddingClient;
   getConfig?: () => PsyberConfig;
   /** 单步瞬时错误（503/429/网络抖动）退避延迟毫秒数组，默认 [3000, 10000, 25000] */
   retryDelaysMs?: number[];
@@ -84,6 +92,13 @@ export interface TidyTaskOutcome {
     triggered: boolean;
     skipReason?: string;
     decisionScores?: Record<string, number>;
+  };
+  /** bedtime 前置只读体检雷达执行摘要（仅传入 decisionClient 且存在今日卡片时填充） */
+  radar?: {
+    executed: boolean;
+    boardItemsChecked: number;
+    pairsEvaluated: number;
+    findingsCount: number;
   };
   error?: string;
 }
@@ -994,11 +1009,52 @@ export async function runMemoryTidyTask(
   );
   const extraMaterials: string[] = [];
 
-  // 仅当传入 decisionClient 时在 bedtime 前跑日反思门控，通过则同轮合并写 rf-*.md 与日梗概
+  const recentCards = deps.memoryIndex
+    .listAllRows()
+    .filter(
+      (r) =>
+        r.kind !== "reflection" &&
+        (r.updated_at >= sinceMs || allTouched.has(r.path)) &&
+        (r.space === "episodes" ||
+          r.space.startsWith("thread:") ||
+          r.space.startsWith("entity:") ||
+          r.space === "favorite" ||
+          r.space === "lessons"),
+    );
+
+  // 仅当传入 decisionClient 时在 bedtime 前跑只读体检雷达 + 日反思门控，通过则同轮合并写 rf-*.md 与日梗概
+  let radarRes: MemoryRadarResult | null = null;
+  let radarMeta: TidyTaskOutcome["radar"];
+  if (deps.decisionClient && recentCards.length > 0 && !opts.signal?.aborted) {
+    radarRes = await runMemoryRadar({
+      db: deps.db,
+      dataDir: deps.dataDir,
+      promptsDir: deps.promptsDir,
+      clock: deps.clock,
+      memoryIndex: deps.memoryIndex,
+      decisionClient: deps.decisionClient,
+      embedding: deps.embedding,
+      scope: "bedtime",
+      targetDay,
+      newCardPaths: recentCards.map((c) => c.path),
+      radarConfig: deps.getConfig?.()?.radar,
+      includeOpenBoardInBlock: false,
+      signal: opts.signal,
+    });
+    radarMeta = {
+      executed: radarRes.executed,
+      boardItemsChecked: radarRes.boardItemsChecked,
+      pairsEvaluated: radarRes.pairsEvaluated,
+      findingsCount: radarRes.findings.filter(
+        (f) => !(f.source === "board" && f.targetPath === "core/open.md"),
+      ).length,
+    };
+  }
+
   let dailyReflectMeta: TidyTaskOutcome["dailyReflect"];
   let mergedDailyReflect = false;
   let dailyReflectHeadBefore: string | null = null;
-  if (deps.decisionClient) {
+  if (deps.decisionClient && !opts.signal?.aborted) {
     const gate = await evaluateReflectGate(
       {
         db: deps.db,
@@ -1006,7 +1062,12 @@ export async function runMemoryTidyTask(
         clock: deps.clock,
         decisionClient: deps.decisionClient,
       },
-      { scope: "daily", targetDay, signal: opts.signal },
+      {
+        scope: "daily",
+        targetDay,
+        radarHint: radarRes?.reflectGateHint ?? null,
+        signal: opts.signal,
+      },
     );
     dailyReflectHeadBefore = gate.headCommit;
     dailyReflectMeta = {
@@ -1016,6 +1077,9 @@ export async function runMemoryTidyTask(
     };
     if (gate.shouldReflect) {
       mergedDailyReflect = true;
+      if (radarRes && radarMeta) {
+        radarMeta.findingsCount = radarRes.findings.length;
+      }
       const [reflectPrompt, openMd] = await Promise.all([
         readPrompt(deps.promptsDir, "reflect.md", {
           REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.daily,
@@ -1040,16 +1104,19 @@ export async function runMemoryTidyTask(
     }
   }
 
-  const recentCards = deps.memoryIndex
-    .listAllRows()
-    .filter(
-      (r) =>
-        (r.updated_at >= sinceMs || allTouched.has(r.path)) &&
-        (r.space === "episodes" ||
-          r.space.startsWith("thread:") ||
-          r.space.startsWith("entity:") ||
-          r.space === "favorite"),
-    );
+  if (radarRes && radarRes.findings.length > 0 && !opts.signal?.aborted) {
+    const radarBlock = mergedDailyReflect
+      ? renderMemoryRadarBlock(radarRes.findings, {
+          scope: "bedtime",
+          includeOpenBoard: true,
+          maxItems: mergeRadarConfig(deps.getConfig?.()?.radar).maxFindingsDaily,
+        })
+      : radarRes.renderedBlock;
+    if (radarBlock) {
+      extraMaterials.push(radarBlock);
+    }
+  }
+
   if (recentCards.length > 0) {
     const cardLines: string[] = [];
     let excerptBudget = 2400;
@@ -1137,7 +1204,14 @@ export async function runMemoryTidyTask(
     });
   }
 
-  if (!bedtimeRes.ok) return { ...bedtimeRes, mode: usedMode, ...(dailyReflectMeta ? { dailyReflect: dailyReflectMeta } : {}) };
+  if (!bedtimeRes.ok) {
+    return {
+      ...bedtimeRes,
+      mode: usedMode,
+      ...(dailyReflectMeta ? { dailyReflect: dailyReflectMeta } : {}),
+      ...(radarMeta ? { radar: radarMeta } : {}),
+    };
+  }
   for (const p of bedtimeRes.touchedMemoryPaths) allTouched.add(p);
 
   if (mergedDailyReflect) {
@@ -1156,5 +1230,6 @@ export async function runMemoryTidyTask(
     touchedMemoryPaths: Array.from(allTouched),
     committed: anyCommitted || bedtimeRes.committed,
     ...(dailyReflectMeta ? { dailyReflect: dailyReflectMeta } : {}),
+    ...(radarMeta ? { radar: radarMeta } : {}),
   };
 }

@@ -373,17 +373,27 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 > **Ring 1 极简边界**：Ring 1 整理轮默认注入全部未关闭的 `daily/` `state` 卡清单供Psyber第一人称改 `resolved`，**暂不启用写时 tag 重叠拦截与 B/C 复核修订轮**；Ring 1.5 若启用复核，复核异常仅记告警日志，**绝不回滚阶段 A 已落盘的合法卡片**。
 
-### 6.1 `daily/` `state` 冲突对账算法（Ring 1.5）
+### 6.1 快脑只读体检雷达（Memory Radar · 升级版 C2.7 冲突对账与跨天提炼前置）
 
-1. **Tag 归一化**：对每个 tag 执行 `NFKC → trim() → toLowerCase() → 剥离中英文标点与空白`；过滤低区分度泛词停用表（`日常`、`状态`、`今天`、`最近`、`临时`、`提醒`）。
-2. **两处机械检测（只报客观重叠，绝不下真伪/心理判断）**：
-   - **整理轮启动扫描**：先执行 `expireOverdueStateCards(Clock.now())`，再查询 `card_index WHERE space = 'daily' AND kind = 'state' AND status = 'active' AND (expires_at IS NULL OR expires_at > Clock.now())`，计算所有卡片对 `(A, B)` 的 `overlap = intersect(normTagsA, normTagsB)`；凡 `overlap.length >= 1` 的配对作为「疑似同一件事的新旧状态」清单，与全部未关闭（`status IN ('active', 'disputed')` 且未过期）的 `daily/` `state` 卡摘要一并注入整理轮材料。
-   - **写时即时提醒**：无论在整理轮阶段 A/C 还是主对话中，只要 `write`/`edit` 落盘了一张 `daily/` `kind: state` 且 `status === 'active'` 的卡片，沙箱立刻与其余未过期 `active` `state` 卡比对 `tags`；若有重叠，在 `tool_result` 末尾追加客观提示：
-     ```text
-     [状态标签重叠提示] 与既有未关闭状态卡存在相同标签：
-     - daily/2026-11-12-ankle.md（标题：右脚踝扭伤，状态：active，重叠标签：脚踝、扭伤）
-     如属同一件事的状态更新，可自行将旧卡改为 resolved；如存在分歧暂难判定，可标 disputed 并记入 shelf/threads.md。
-     ```
+> **NG-2 与第一人称主权红线**：体检雷达位于记忆层 `server/src/memory/radar.ts`，**对 `memory/` Markdown 卡片仓库 100% 只读、绝不修改任何 Markdown 记忆文件**（仅按需复用/补算 SQLite `card_embeddings` 派生向量缓存与读取 `card_index`/`card_links`），仅产出客观的 `<memory_radar>` 线索清单交由 Psyber 本人在 `bedtime` 或 `reflect_weekly` 轮通过原生 5 工具自主查阅核实与处置；任何超时、模型异常或未配 `decision` 槽位均静默记录告警并跳过，**绝不阻塞或回滚整理与反思**。
+
+1. **两个触发时机与职责分工**：
+   - **每日睡前 `bedtime` Step 2 之前（`scope: "bedtime"`）**：取当日新增/修改的实质卡片（排除 `index.md` 与 `rf-*.md`），重点扫出 `core/state.md` / `core/open.md` 过时项、前后矛盾、重复专卡、跨天重复苗头以及尚未互链的 `[[短标题]]` 补链建议（`link`）；高置信 `contradiction` / `promote` 摘要同步作为参考上下文送入当日日反思门控 `evaluateReflectGate("daily")` 综合判断，完整线索清单注入 `bedtime` Step 2 尾部 `extraMaterials`（不破坏 Step 1 KV Cache）。
+   - **每周日 `reflect_weekly` 之前（`scope: "weekly"`）**：取自上次周反思 commit 以来变动的实质卡片，聚焦 `promote`、`contradiction`、`redundant`、`obsolete`（不展示 `link`，因 `reflect` 不回改历史 `ep-*.md`），高置信 `contradiction` / `promote` 摘要同样送入周反思门控，完整线索清单注入周反思 `<memory_radar>`。
+2. **两路低成本扫描算法（提示词外置 [`prompts/memory-radar.md`](../../prompts/memory-radar.md)，`slot: decision`）**：
+   - **路 1 · 看板条目巡检**：解析 `core/state.md` 与 `core/open.md` 的有效列表条目，将近期新卡摘要作输入，单次并行 `DecisionClient.decide` 评估每条的 `board_obsolete` 与 `board_contradiction`（`noul` 双边判据）。
+   - **路 2 · 新旧卡片 5 问并行扫描**：
+     - **相似旧卡配对**：复用 `card_embeddings`（共享模块 `server/src/memory/embeddings.ts`，未配 `embedding` 时自动降级 `card_fts`）为每张新卡挑 Top-`topKPerCard`（默认 `3`）活跃旧卡，过滤 `index.md`、`rf-*.md`、同日兄弟卡、已建立双向链接的「新持久专卡 ↔ 旧 `ep-*.md`」溯源对，以及余弦相似度 `< minSimilarity`（默认 `0.45`）的无关卡，按无序对去重并截断至 `maxPairsDaily`（默认 `12`）或 `maxPairsWeekly`（默认 `20`）。
+     - **已有双链短路**：查询 `card_links`（双向 `[[短标题]]` 与相对路径），若两卡已存在链接则跳过 `link` 提问。
+     - **受控并发结构化体检**：按 `concurrency`（默认 `4`）与整轮硬超时 `timeoutMs`（默认 `20000ms`），每对发起 1 次 `DecisionClient.decide` 并行评估：`contradiction`（`noul`）、独立 `promote`（`noul`，与保留原卡不互斥）、`obsolete`（`noul`，旧卡为 `ep-*.md` 时跳过）、`link`（`noul`，仅 `bedtime` 且未互链时提问），以及仅在两张持久专卡互比时才问的 `redundant`（`noul`）与 `representation`（`choice`：`keep_separate` | `merge` | `promote` | `uncertain`）。
+3. **空间硬护栏与高置信截断**：
+   - 旧卡属于 `episodes/.../ep-*.md` 历史情景切片时，**屏蔽 `obsolete` 与 `merge`**（历史日记切片不回改、不合并删除），仅保留 `contradiction`、`promote` 与（`bedtime` 下的）`link`；
+   - 仅保留达到 `radar.thresholds` 高置信门槛的结果（默认：`contradiction >= 0.55`、`obsolete >= 0.70`、`redundant >= 0.75`、`link >= 0.75`、`promote >= 0.65`、`merge >= 0.65`），并按优先级截断至 `maxFindingsDaily`（默认 `5`）或 `maxFindingsWeekly`（默认 `8`）；**无命中时零注入**；
+   - 渲染遵循 `prompts/README.md`「判断禁用我」铁律：以系统客观提示语气说明可能存在误报、系统未改任何文件，处置权完全归 Psyber。
+
+#### 6.1.1 兼容保留：旧版 `daily/` `state` 标签重叠说明（历史基线）
+
+- 旧版基于 `daily/ kind: state` 的 tag 归一化与写时标签重叠提醒已演进为上述基于 `core/state.md` + `DecisionClient` 的只读体检雷达；若后续实测仍需写时轻量提示，再按需在 `memory/tools.ts` 补齐。
 
 ### 6.2 写后独立复核 Diff 构建与出处过滤算法
 

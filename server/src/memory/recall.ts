@@ -9,6 +9,7 @@ import { sanitizeUnicode, type DecisionClient, type DecisionQuestion } from "../
 import type { EmbeddingClient } from "../core/embedding.ts";
 import type { RerankerClient } from "../core/reranker.ts";
 import { readPrompt, stripFrontmatter } from "../core/prompts.ts";
+import { cosineSimilarity, ensureCardEmbeddings } from "./embeddings.ts";
 import { effectiveStatus } from "./frontmatter.ts";
 import type { CardIndexRow, MemoryIndex } from "./index.ts";
 
@@ -167,20 +168,6 @@ export function isBlankTurn(query: string): boolean {
     .toLowerCase();
   if (!cleaned) return true;
   return cleaned.length <= 4 && FILLER_EXACT.has(cleaned);
-}
-
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  if (na === 0 || nb === 0) return 0;
-  return Math.max(0, dot / (Math.sqrt(na) * Math.sqrt(nb)));
 }
 
 function loadActivityTriggers(
@@ -641,97 +628,17 @@ export async function recallMemories(opts: {
         const vecByPath = new Map<string, Float32Array>();
         hopQueryVec = qVec;
         hopCardVecs = vecByPath;
-        const missing: Array<{ row: CardIndexRow; text: string }> = [];
-        const modelKey = opts.embedding.modelKey;
 
-        for (const row of remaining) {
-          const cached = db
-            .query(
-              `SELECT vec, content_hash FROM card_embeddings
-               WHERE path = ? AND model_key = ?`,
-            )
-            .get(row.path, modelKey) as { vec: Uint8Array; content_hash: string } | null;
-
-          if (cached && cached.content_hash === row.content_hash) {
-            vecByPath.set(
-              row.path,
-              new Float32Array(
-                cached.vec.buffer,
-                cached.vec.byteOffset,
-                cached.vec.byteLength / 4,
-              ),
-            );
-          } else {
-            const body = await readCardBody(row.path);
-            if (body === null) continue;
-            const embedText = sanitizeUnicode(`${row.title}\n${row.when_to_recall ?? ""}\n${body.slice(0, 1200)}`);
-            missing.push({ row, text: embedText });
-          }
-        }
-
-        if (missing.length > 0) {
-          const batchTimeout = Math.max(
-            embedTimeoutMs,
-            Math.min(60_000, embedTimeoutMs * Math.ceil(missing.length / 8)),
-          );
-          const deadline = Date.now() + batchTimeout;
-          const chunkSize = 16;
-          const upsert = db.query(
-            `INSERT INTO card_embeddings (path, model_key, content_hash, dim, vec, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(path, model_key) DO UPDATE SET
-               content_hash = excluded.content_hash,
-               dim = excluded.dim,
-               vec = excluded.vec,
-               updated_at = excluded.updated_at`,
-          );
-
-          // 分块计算并逐块落库检查点：即使后续批次超时/限流，已算出的向量不再白费
-          for (let offset = 0; offset < missing.length; offset += chunkSize) {
-            const chunk = missing.slice(offset, offset + chunkSize);
-            const remainingMs = deadline - Date.now();
-            if (remainingMs <= 0) {
-              throw new Error(`Embedding batch deadline exceeded after ${offset}/${missing.length} cards`);
-            }
-            const chunkTimeout = Math.max(200, Math.min(embedTimeoutMs * 2, remainingMs));
-            let chunkVecs: Float32Array[];
-            if (opts.embedding.embedBatch) {
-              chunkVecs = await opts.embedding.embedBatch(
-                chunk.map((m) => m.text),
-                { signal: AbortSignal.timeout(chunkTimeout), taskType: "document" },
-              );
-            } else {
-              chunkVecs = [];
-              for (const m of chunk) {
-                const itemRemaining = deadline - Date.now();
-                if (itemRemaining <= 0) {
-                  throw new Error("Embedding batch deadline exceeded");
-                }
-                chunkVecs.push(
-                  await opts.embedding.embed(m.text, {
-                    signal: AbortSignal.timeout(Math.min(embedTimeoutMs, itemRemaining)),
-                    taskType: "document",
-                  }),
-                );
-              }
-            }
-            if (chunkVecs.length !== chunk.length) {
-              throw new Error(
-                `Embedding client returned ${chunkVecs.length} vectors for ${chunk.length} cards`,
-              );
-            }
-            const tx = db.transaction(() => {
-              for (let j = 0; j < chunk.length; j++) {
-                const cVec = chunkVecs[j];
-                const row = chunk[j].row;
-                vecByPath.set(row.path, cVec);
-                const blob = new Uint8Array(cVec.buffer, cVec.byteOffset, cVec.byteLength);
-                upsert.run(row.path, modelKey, row.content_hash, cVec.length, blob, nowMs);
-              }
-            });
-            tx();
-          }
-        }
+        await ensureCardEmbeddings({
+          db,
+          memoryDir,
+          rows: remaining,
+          embedding: opts.embedding,
+          nowMs,
+          embedTimeoutMs,
+          readCardBody,
+          outMap: vecByPath,
+        });
 
         const semScored: Array<{ row: CardIndexRow; score: number }> = [];
         for (const row of remaining) {

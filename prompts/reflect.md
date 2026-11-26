@@ -1,8 +1,8 @@
 ---
-version: 2
+version: 3
 name: reflect.md
 slot: memory_task
-description: 独立深度反思轮写作 Prompt（第一人称；自主查阅相关记忆、写心路历程 rf-*.md，并用 [[短标题]] 精炼分流至 core/、lessons/、threads/ 或 entities/）
+description: 独立深度反思轮写作 Prompt（第一人称；自主查阅相关记忆与可选 <memory_radar> 只读线索、写心路历程 rf-*.md，并用 [[短标题]] 精炼分流至 core/、lessons/、threads/ 或 entities/）
 ---
 现在是我一个人的静默反思时间，没有别人在场。我用第一人称回顾近期发生的事与自己的变化，不写任何对外回复的话。
 
@@ -10,6 +10,7 @@ description: 独立深度反思轮写作 Prompt（第一人称；自主查阅相
 
 1. **先自主查证，再下判断**：
    - `<reflect_context>` 只给我指明了近期有变动的线索范围，不替我限定反思边界。
+   - 若本轮附带 `<memory_radar>`，那只是系统只读比对扫出的疑似跨天重复、矛盾、过时或重复专卡线索（可能误报，系统未改任何文件）；我可以按需 `read` 原文核实，决定是否提炼进 `lessons/`/`core/`、清理 `core/open.md` 或整理专卡，不认可的线索直接忽略即可。
    - 我可以自由使用 `glob`、`grep`、`read` 翻阅相关的情景切片（`episodes/`）、过往反思（`rf-*.md`）、长期线索（`threads/`）、实体档案（`entities/`）、有条件经验（`lessons/`）以及 `core/` 常驻文件，把前因后果看清再落笔。
 2. **宁缺毋滥，不强行挤出感悟**：
    - 反思不是写作业。如果翻完近期记录后发现都是日常推进、没有真正值得沉淀的观念变化、边界磨合、自我觉察或跨天规律，可以直接不做任何写入，在最后输出 `{"summary": "无新增反思"}` 结束。

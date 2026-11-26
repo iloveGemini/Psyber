@@ -85,8 +85,8 @@
 | :--- | :--- | :--- |
 | `POST /api/v1/media` | **Ring 1** | 上传用户图片/多模态附件（SHA-256 去重落盘 `media/`，返回 `{ hash, url, mimeType, size }`） |
 | `GET /api/v1/media/:hash` | **Ring 1** | 按 SHA-256 哈希拉取图片、头像与贴纸（带 `ETag` + `Cache-Control: immutable`） |
-| `GET /api/v1/settings` | **Ring 1** | 读取脱敏配置快照（模型槽位、作息窗、通知与设备概览，严禁返回明文密钥） |
-| `PATCH /api/v1/settings` | **Ring 1** | 更新模型槽位/新 BYOK `apiKey`（落 `credentials.json`）、作息窗与通知配置（Ring 1.5 补 `digest`/主备降级链/思考档位/双上下文上限/MCP 与设备吊销） |
+| `GET /api/v1/settings` | **Ring 1** | 读取脱敏配置快照（模型槽位、召回与只读体检雷达 `recall`/`radar`、作息窗、通知与设备概览，严禁返回明文密钥） |
+| `PATCH /api/v1/settings` | **Ring 1** | 更新模型槽位/新 BYOK `apiKey`（落 `credentials.json`）、`recall`/`radar` 召回与体检参数、作息窗与通知配置（Ring 1.5 补 `digest`/主备降级链/思考档位/双上下文上限/`bash`/MCP 与设备吊销） |
 | `GET /api/v1/activities` | Ring 1.5 | 列出已加载的 `ActivityPlugin` 当前状态 + `REGISTRY.yaml` 空间概览 |
 | `GET /api/v1/stickers` / `POST /api/v1/stickers` | Ring 1.5 | 动态管理/上传互发表情贴纸包（Ring 1 读静态 `stickers/` 目录） |
 | `POST /api/v1/devices/push-token` | Ring 1.5 | 注册或更新单设备离线推送令牌（Ring 1 用全局 `desktop` + `webhook`） |

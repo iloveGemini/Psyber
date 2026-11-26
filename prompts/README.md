@@ -30,7 +30,9 @@
 | [`revision.md`](revision.md) | `memory_task` | Psyber 复核修订轮（Ring 1.5 可选） | C2.7 Psyber 复核修订 Prompt（Ring 1.5 启用）：原写作 Psyber 根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
 | [`genesis.md`](genesis.md) | `dynamic_tail` | Dynamic Tail（`self.md` `name` 为空时） | 创世中性开局：第一次正式相遇，不带刻板标签，中性打招呼并在互动中慢慢认识；定名后由 Psyber `edit` 填上 `name`（自定代词可写 `pronoun`）退出 |
 | [`wake.md`](wake.md) | `dynamic_tail` | Dynamic Tail（`wake` 模式） | 主动唤醒：由定时心跳/边际感知驱动主动破冰开口，自主掌握开口节奏与边界；选择保持安静时仅输出 `[SILENT]` |
+| [`reflect.md`](reflect.md) | `memory_task` | 每日睡前合流反思与周日独立反思 | 记忆深度反思 Prompt（v3）：指导 Psyber 结合 `<memory_radar>` 只读线索清单写 `rf-*.md` 反思卡片，并将长期认识分流至 `core/`、`lessons/`、`threads/`、`entities/` |
 | [`recall-gate.md`](recall-gate.md) | `decision` | 召回管线门控、精排与 1 跳早停 | 系统分类器指令（v3 含 `## true` / `## false` 双边判据）：首跳并行判定 `needs_memory` 与候选卡相关性；存在双链邻卡时按 `evidence_sufficient` 早停并筛查 `hop_neighbor_relevance`，不进入 Psyber 对话上下文 |
+| [`memory-radar.md`](memory-radar.md) | `decision` | 睡前整理与周反思前置只读体检雷达 | 系统只读分类器指令（v2 含 `noul` 双边判据与 `choice` 选项说明）：对比新卡与相似旧卡并行判定 `redundant`/`contradiction`/`obsolete`/`link`/`promote`/`representation`，并巡检 `core/state.md` 与 `core/open.md` 过时/冲突条目；绝不代写，仅输出 `<memory_radar>` 只读线索清单 |
 
 ---
 

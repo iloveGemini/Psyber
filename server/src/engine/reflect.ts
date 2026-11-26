@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import type { Clock } from "../core/clock.ts";
 import { localDay, weekdayOfDay } from "../core/clock.ts";
 import type { PsyberConfig } from "../core/config.ts";
+import type { EmbeddingClient } from "../core/embedding.ts";
 import {
   commitMemoryPaths,
   getMemoryHeadCommit,
@@ -18,6 +19,7 @@ import type {
 } from "../llm/client.ts";
 import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
 import type { MemoryIndex } from "../memory/index.ts";
+import { runMemoryRadar, type MemoryRadarResult } from "../memory/radar.ts";
 import {
   isAllowedWritePath,
   normalizeRelPath,
@@ -52,6 +54,7 @@ export interface ReflectTaskDeps {
   memoryTools: MemoryTools;
   chatModel: ChatModelClient;
   decisionClient?: DecisionClient;
+  embedding?: EmbeddingClient;
   getConfig?: () => PsyberConfig;
   /** 单步瞬时错误（503/429/网络抖动）退避延迟毫秒数组，默认 [3000, 10000, 25000] */
   retryDelaysMs?: number[];
@@ -64,6 +67,13 @@ export interface ReflectTaskOutcome {
   skipReason?: string;
   changedPaths: string[];
   decisionScores?: Record<string, number>;
+  /** 可选前置只读体检雷达摘要（仅当周反思启用雷达并执行时填充） */
+  radar?: {
+    executed: boolean;
+    boardItemsChecked: number;
+    pairsEvaluated: number;
+    findingsCount: number;
+  };
   touchedMemoryPaths: string[];
   committed: boolean;
   summary: string;
@@ -337,6 +347,7 @@ export async function runMemoryReflectTask(
     changedPaths: string[];
     dailyRefPaths?: string[];
     decisionScores?: Record<string, number>;
+    radarBlock?: string | null;
     signal?: AbortSignal;
   },
 ): Promise<ReflectTaskOutcome> {
@@ -372,6 +383,9 @@ export async function runMemoryReflectTask(
     if (body) {
       materialParts.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${clipExcerpt(body, 1500)}`);
     }
+  }
+  if (opts.radarBlock) {
+    materialParts.push(opts.radarBlock);
   }
 
   const messages: ChatMessage[] = [
@@ -609,6 +623,10 @@ export async function evaluateReflectGate(
   opts: {
     scope: ReflectScope;
     targetDay?: string;
+    /** 可选只读体检雷达高置信摘要（仅作门控综合参考，不强制触发反思） */
+    radarHint?: string | null;
+    /** 若未直接传 radarHint，可在确认存在实质变更后懒执行只读体检雷达以提供门控参考 */
+    prepareRadarHint?: (changedPaths: string[]) => Promise<string | null>;
     signal?: AbortSignal;
   },
 ): Promise<ReflectGateResult> {
@@ -643,6 +661,17 @@ export async function evaluateReflectGate(
   const allChanged = await listChangedMemoryPathsSince(dataDir, cursor.last_commit ?? null);
   const substantivePaths = allChanged.filter(isSubstantiveReflectPath);
   const dailyRefPaths = allChanged.filter(isReflectionCardPath);
+
+  if (opts.signal?.aborted) {
+    return {
+      shouldReflect: false,
+      skipReason: "aborted",
+      summary: "反思门控已中止",
+      headCommit,
+      changedPaths: [],
+      dailyRefPaths,
+    };
+  }
 
   if (substantivePaths.length === 0) {
     writeReflectCursor(db, opts.scope, clock.now(), {
@@ -683,6 +712,19 @@ export async function evaluateReflectGate(
       );
     } else {
       sections.push("本周尚未写过任何日反思卡片（rf-*.md）。");
+    }
+
+    const effectiveRadarHint =
+      opts.radarHint !== undefined
+        ? opts.radarHint
+        : opts.prepareRadarHint
+          ? await opts.prepareRadarHint(substantivePaths).catch((err) => {
+              console.warn(`[psyber] reflect(${opts.scope}) radar pre-scan failed, continuing gate:`, err);
+              return null;
+            })
+          : null;
+    if (effectiveRadarHint) {
+      sections.push(effectiveRadarHint);
     }
 
     const questions: Record<string, DecisionQuestion> =
@@ -803,11 +845,43 @@ export async function evaluateAndRunReflect(
 ): Promise<ReflectTaskOutcome> {
   const { db, dataDir, clock } = deps;
   const targetDay = opts.targetDay ?? localDay(clock.now(), clock.timeZone);
+  let weeklyRadarRes: MemoryRadarResult | null = null;
   const gate = await evaluateReflectGate(deps, {
     scope: opts.scope,
     targetDay,
+    ...(opts.scope === "weekly" && deps.decisionClient
+      ? {
+          prepareRadarHint: async (changedPaths: string[]) => {
+            weeklyRadarRes = await runMemoryRadar({
+              db,
+              dataDir,
+              promptsDir: deps.promptsDir,
+              clock,
+              memoryIndex: deps.memoryIndex,
+              decisionClient: deps.decisionClient,
+              embedding: deps.embedding,
+              scope: "weekly",
+              targetDay,
+              newCardPaths: changedPaths,
+              radarConfig: deps.getConfig?.()?.radar,
+              includeOpenBoardInBlock: true,
+              signal: opts.signal,
+            });
+            return weeklyRadarRes.reflectGateHint;
+          },
+        }
+      : {}),
     signal: opts.signal,
   });
+
+  const radarSummary = weeklyRadarRes
+    ? {
+        executed: (weeklyRadarRes as MemoryRadarResult).executed,
+        boardItemsChecked: (weeklyRadarRes as MemoryRadarResult).boardItemsChecked,
+        pairsEvaluated: (weeklyRadarRes as MemoryRadarResult).pairsEvaluated,
+        findingsCount: (weeklyRadarRes as MemoryRadarResult).findings.length,
+      }
+    : undefined;
 
   if (!gate.shouldReflect) {
     return {
@@ -817,6 +891,7 @@ export async function evaluateAndRunReflect(
       skipReason: gate.skipReason,
       changedPaths: gate.changedPaths,
       decisionScores: gate.decisionScores,
+      ...(radarSummary ? { radar: radarSummary } : {}),
       touchedMemoryPaths: [],
       committed: false,
       summary: gate.summary ?? "跳过反思",
@@ -829,6 +904,7 @@ export async function evaluateAndRunReflect(
     changedPaths: gate.changedPaths,
     dailyRefPaths: gate.dailyRefPaths,
     decisionScores: gate.decisionScores,
+    radarBlock: (weeklyRadarRes as MemoryRadarResult | null)?.renderedBlock ?? null,
     signal: opts.signal,
   });
 
@@ -841,7 +917,10 @@ export async function evaluateAndRunReflect(
     });
   }
 
-  return outcome;
+  return {
+    ...outcome,
+    ...(radarSummary ? { radar: radarSummary } : {}),
+  };
 }
 
 /**

@@ -108,29 +108,219 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   },
 };
 
-/** 深度合并召回配置（防止部分更新 gate / rerank / multiHop 时覆盖默认子字段） */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return Boolean(v) && typeof v === "object" && !Array.isArray(v);
+}
+
+function pickFinite(a: unknown, b: unknown, fallback: number): number {
+  if (typeof b === "number" && Number.isFinite(b)) return b;
+  if (typeof a === "number" && Number.isFinite(a)) return a;
+  return fallback;
+}
+
+function pickOptFinite(a: unknown, b: unknown, fallback?: number): number | undefined {
+  if (typeof b === "number" && Number.isFinite(b)) return b;
+  if (typeof a === "number" && Number.isFinite(a)) return a;
+  return fallback;
+}
+
+function pickBool(a: unknown, b: unknown, fallback: boolean): boolean {
+  if (typeof b === "boolean") return b;
+  if (typeof a === "boolean") return a;
+  return fallback;
+}
+
+/** 深度合并召回配置（防止部分更新 gate / rerank / multiHop 时覆盖默认子字段或被 undefined/null 污染） */
 export function mergeRecallConfig(
   base?: Partial<RecallConfig>,
   patch?: Partial<RecallConfig>,
 ): RecallConfig {
+  const b = isPlainRecord(base) ? (base as Partial<RecallConfig>) : undefined;
+  const p = isPlainRecord(patch) ? (patch as Partial<RecallConfig>) : undefined;
+  const bGate = isPlainRecord(b?.gate) ? b!.gate : undefined;
+  const pGate = isPlainRecord(p?.gate) ? p!.gate : undefined;
+  const bRerank = isPlainRecord(b?.rerank) ? b!.rerank : undefined;
+  const pRerank = isPlainRecord(p?.rerank) ? p!.rerank : undefined;
+  const bHop = isPlainRecord(b?.multiHop) ? b!.multiHop : undefined;
+  const pHop = isPlainRecord(p?.multiHop) ? p!.multiHop : undefined;
+  const neighborThreshold = pickOptFinite(
+    bHop?.neighborThreshold,
+    pHop?.neighborThreshold,
+    DEFAULT_RECALL_CONFIG.multiHop?.neighborThreshold,
+  );
+  const embedMinScore = pickOptFinite(
+    b?.embedMinScore,
+    p?.embedMinScore,
+    DEFAULT_RECALL_CONFIG.embedMinScore,
+  );
   return {
-    ...DEFAULT_RECALL_CONFIG,
-    ...(base ?? {}),
-    ...(patch ?? {}),
+    charBudget: pickFinite(b?.charBudget, p?.charBudget, DEFAULT_RECALL_CONFIG.charBudget),
+    dedupWindowMin: pickFinite(b?.dedupWindowMin, p?.dedupWindowMin, DEFAULT_RECALL_CONFIG.dedupWindowMin),
+    recentDailyWindowHours: pickFinite(
+      b?.recentDailyWindowHours,
+      p?.recentDailyWindowHours,
+      DEFAULT_RECALL_CONFIG.recentDailyWindowHours,
+    ),
+    embedTimeoutMs: pickFinite(b?.embedTimeoutMs, p?.embedTimeoutMs, DEFAULT_RECALL_CONFIG.embedTimeoutMs),
+    decisionTimeoutMs: pickFinite(
+      b?.decisionTimeoutMs,
+      p?.decisionTimeoutMs,
+      DEFAULT_RECALL_CONFIG.decisionTimeoutMs!,
+    ),
+    rerankTimeoutMs: pickFinite(
+      b?.rerankTimeoutMs,
+      p?.rerankTimeoutMs,
+      DEFAULT_RECALL_CONFIG.rerankTimeoutMs!,
+    ),
+    queryWindowTurns: pickFinite(
+      b?.queryWindowTurns,
+      p?.queryWindowTurns,
+      DEFAULT_RECALL_CONFIG.queryWindowTurns!,
+    ),
+    candidatePool: pickFinite(b?.candidatePool, p?.candidatePool, DEFAULT_RECALL_CONFIG.candidatePool!),
+    catalogScanMaxCards: pickFinite(
+      b?.catalogScanMaxCards,
+      p?.catalogScanMaxCards,
+      DEFAULT_RECALL_CONFIG.catalogScanMaxCards!,
+    ),
+    ftsMinScore: pickFinite(b?.ftsMinScore, p?.ftsMinScore, DEFAULT_RECALL_CONFIG.ftsMinScore!),
+    ...(embedMinScore !== undefined ? { embedMinScore } : {}),
+    hybridFtsWithEmbedding: pickBool(
+      b?.hybridFtsWithEmbedding,
+      p?.hybridFtsWithEmbedding,
+      DEFAULT_RECALL_CONFIG.hybridFtsWithEmbedding!,
+    ),
     gate: {
-      ...DEFAULT_RECALL_CONFIG.gate!,
-      ...(base?.gate ?? {}),
-      ...(patch?.gate ?? {}),
+      enabled: pickBool(bGate?.enabled, pGate?.enabled, DEFAULT_RECALL_CONFIG.gate!.enabled),
+      threshold: pickFinite(bGate?.threshold, pGate?.threshold, DEFAULT_RECALL_CONFIG.gate!.threshold),
     },
     rerank: {
-      ...DEFAULT_RECALL_CONFIG.rerank!,
-      ...(base?.rerank ?? {}),
-      ...(patch?.rerank ?? {}),
+      threshold: pickFinite(bRerank?.threshold, pRerank?.threshold, DEFAULT_RECALL_CONFIG.rerank!.threshold),
     },
     multiHop: {
-      ...DEFAULT_RECALL_CONFIG.multiHop!,
-      ...(base?.multiHop ?? {}),
-      ...(patch?.multiHop ?? {}),
+      enabled: pickBool(bHop?.enabled, pHop?.enabled, DEFAULT_RECALL_CONFIG.multiHop!.enabled),
+      maxNeighbors: pickFinite(
+        bHop?.maxNeighbors,
+        pHop?.maxNeighbors,
+        DEFAULT_RECALL_CONFIG.multiHop!.maxNeighbors,
+      ),
+      sufficientThreshold: pickFinite(
+        bHop?.sufficientThreshold,
+        pHop?.sufficientThreshold,
+        DEFAULT_RECALL_CONFIG.multiHop!.sufficientThreshold,
+      ),
+      ...(neighborThreshold !== undefined ? { neighborThreshold } : {}),
+      timeoutMs: pickFinite(bHop?.timeoutMs, pHop?.timeoutMs, DEFAULT_RECALL_CONFIG.multiHop!.timeoutMs!),
+    },
+  };
+}
+
+/**
+ * 快脑只读体检雷达（Memory Radar）各维度高置信门槛（0..1）。
+ * 调高可压低误报噪声，调低会放宽疑似线索进入 <memory_radar> 清单。
+ */
+export interface RadarThresholdsConfig {
+  /** 疑似纯重复（无实质新信息）的最低概率（默认 0.75；调高仅报极高重合专卡，调低更容易提示疑似重复） */
+  redundant: number;
+  /** 疑似前后矛盾或立场反转的最低概率（默认 0.55；实测真实反转/版本冲突落在 0.54+，正常推进 ≤ 0.29；调高减少争议提示，调低更敏感捕获说法冲突） */
+  contradiction: number;
+  /** 疑似旧状态/旧卡过时的最低概率（默认 0.70；调高仅提示明确完结项，调低更积极提醒核对旧状态） */
+  obsolete: number;
+  /** 建议补 [[短标题]] 双向链接的最低概率（默认 0.75，仅 bedtime 展示；调高只推强因果/同线索双链，调低增加补链建议） */
+  link: number;
+  /** 独立 promote 跨天提炼判据（或 representation=promote）的最低概率（默认 0.65；调高仅在规律极明显时提示提炼，调低更容易浮现跨天共性线索） */
+  promote: number;
+  /** representation 选中 merge 时该选项的最低概率（默认 0.65，仅对非 ep-* 持久专卡生效；调高更保守合并，调低更容易建议专卡收拢） */
+  merge: number;
+}
+
+/**
+ * 快脑只读体检雷达配置（集中维护于 <dataDir>/config.json 的 radar 节点）。
+ * 严守 NG-2：仅做只读扫描并向 bedtime / reflect_weekly 递交线索，绝不代写卡片；异常自动静默跳过。
+ */
+export interface RadarConfig {
+  /** 是否启用快脑只读体检雷达（默认 true；关闭后立即停用；未配 decision 槽位时自动静默跳过） */
+  enabled: boolean;
+  /** 每日 bedtime 最多评估的新旧卡片对数（单位：对，默认 12；调大覆盖更宽但增加决策调用次数，调小更省额度但可能漏检低排位相似卡） */
+  maxPairsDaily: number;
+  /** 每周 reflect_weekly 最多评估的新旧卡片对数（单位：对，默认 20；调大能覆盖整周更多跨日卡片组合但耗时更长，调小更快更省额度） */
+  maxPairsWeekly: number;
+  /** 每张新卡最多配对的相似旧卡数（单位：张，默认 3；调大能为单张新卡拉入更多历史对照但更容易占满总配对预算，调小聚焦最相近旧卡） */
+  topKPerCard: number;
+  /** 向量粗筛配对的最低余弦相似度（单位：0..1 余弦分，默认 0.45；调高仅扫高度相关旧卡，调低扩大扫描范围但增加无关配对） */
+  minSimilarity: number;
+  /** 并行发起的决策请求并发上限（单位：并发请求数，默认 4；调大可缩短整轮体检耗时但更容易触发接口限流，调小更平稳但耗时增加） */
+  concurrency: number;
+  /** 整轮雷达体检总超时（单位：毫秒，默认 20000；调大允许慢速模型扫完更多卡片对，调小更快截断返回已扫线索、绝不阻塞整理） */
+  timeoutMs: number;
+  /** 每日 bedtime 注入 <memory_radar> 的最多线索条数（单位：条，默认 5；调大提供更多线索但增加整理轮上下文阅读负担，调小仅聚焦最高优先级线索） */
+  maxFindingsDaily: number;
+  /** 每周 reflect_weekly 注入 <memory_radar> 的最多线索条数（单位：条，默认 8；调大展示更多周度跨天线索，调小保持反思输入精简） */
+  maxFindingsWeekly: number;
+  /** 各维度高置信门槛 */
+  thresholds?: Partial<RadarThresholdsConfig>;
+}
+
+export const DEFAULT_RADAR_THRESHOLDS: RadarThresholdsConfig = {
+  redundant: 0.75,
+  contradiction: 0.55,
+  obsolete: 0.70,
+  link: 0.75,
+  promote: 0.65,
+  merge: 0.65,
+};
+
+export const DEFAULT_RADAR_CONFIG: RadarConfig & { thresholds: RadarThresholdsConfig } = {
+  enabled: true,
+  maxPairsDaily: 12,
+  maxPairsWeekly: 20,
+  topKPerCard: 3,
+  minSimilarity: 0.45,
+  concurrency: 4,
+  timeoutMs: 20_000,
+  maxFindingsDaily: 5,
+  maxFindingsWeekly: 8,
+  thresholds: { ...DEFAULT_RADAR_THRESHOLDS },
+};
+
+/** 深度合并雷达配置（防止部分更新 thresholds 时覆盖默认子字段或被 undefined/null/NaN 污染） */
+export function mergeRadarConfig(
+  base?: Partial<RadarConfig>,
+  patch?: Partial<RadarConfig>,
+): RadarConfig & { thresholds: RadarThresholdsConfig } {
+  const b = isPlainRecord(base) ? (base as Partial<RadarConfig>) : undefined;
+  const p = isPlainRecord(patch) ? (patch as Partial<RadarConfig>) : undefined;
+  const bt = isPlainRecord(b?.thresholds) ? b!.thresholds : undefined;
+  const pt = isPlainRecord(p?.thresholds) ? p!.thresholds : undefined;
+  return {
+    enabled: pickBool(b?.enabled, p?.enabled, DEFAULT_RADAR_CONFIG.enabled),
+    maxPairsDaily: pickFinite(b?.maxPairsDaily, p?.maxPairsDaily, DEFAULT_RADAR_CONFIG.maxPairsDaily),
+    maxPairsWeekly: pickFinite(b?.maxPairsWeekly, p?.maxPairsWeekly, DEFAULT_RADAR_CONFIG.maxPairsWeekly),
+    topKPerCard: pickFinite(b?.topKPerCard, p?.topKPerCard, DEFAULT_RADAR_CONFIG.topKPerCard),
+    minSimilarity: pickFinite(b?.minSimilarity, p?.minSimilarity, DEFAULT_RADAR_CONFIG.minSimilarity),
+    concurrency: pickFinite(b?.concurrency, p?.concurrency, DEFAULT_RADAR_CONFIG.concurrency),
+    timeoutMs: pickFinite(b?.timeoutMs, p?.timeoutMs, DEFAULT_RADAR_CONFIG.timeoutMs),
+    maxFindingsDaily: pickFinite(
+      b?.maxFindingsDaily,
+      p?.maxFindingsDaily,
+      DEFAULT_RADAR_CONFIG.maxFindingsDaily,
+    ),
+    maxFindingsWeekly: pickFinite(
+      b?.maxFindingsWeekly,
+      p?.maxFindingsWeekly,
+      DEFAULT_RADAR_CONFIG.maxFindingsWeekly,
+    ),
+    thresholds: {
+      redundant: pickFinite(bt?.redundant, pt?.redundant, DEFAULT_RADAR_THRESHOLDS.redundant),
+      contradiction: pickFinite(
+        bt?.contradiction,
+        pt?.contradiction,
+        DEFAULT_RADAR_THRESHOLDS.contradiction,
+      ),
+      obsolete: pickFinite(bt?.obsolete, pt?.obsolete, DEFAULT_RADAR_THRESHOLDS.obsolete),
+      link: pickFinite(bt?.link, pt?.link, DEFAULT_RADAR_THRESHOLDS.link),
+      promote: pickFinite(bt?.promote, pt?.promote, DEFAULT_RADAR_THRESHOLDS.promote),
+      merge: pickFinite(bt?.merge, pt?.merge, DEFAULT_RADAR_THRESHOLDS.merge),
     },
   };
 }
@@ -335,6 +525,8 @@ export interface PsyberConfig {
   };
   /** 召回可调参数（缺失字段自动回落 DEFAULT_RECALL_CONFIG） */
   recall?: RecallConfig;
+  /** 快脑只读体检雷达可调参数（缺失字段自动回落 DEFAULT_RADAR_CONFIG） */
+  radar?: RadarConfig;
   /** 作息静默窗与心跳参数 */
   circadian?: CircadianConfig;
   /** 离线通知通道配置 */
@@ -447,7 +639,8 @@ export async function loadOrCreateConfig(
       auth: {
         devices: [],
       },
-      recall: { ...DEFAULT_RECALL_CONFIG },
+      recall: mergeRecallConfig(),
+      radar: mergeRadarConfig(),
       circadian: { ...DEFAULT_CIRCADIAN_CONFIG },
       notifications: { ...DEFAULT_NOTIFICATIONS_CONFIG },
       genesisCompleted: false,
@@ -478,6 +671,7 @@ export async function loadOrCreateConfig(
       devices: Array.isArray(cfg.auth?.devices) ? cfg.auth.devices : [],
     },
     recall: mergeRecallConfig(cfg.recall),
+    radar: mergeRadarConfig(cfg.radar),
     circadian: {
       ...DEFAULT_CIRCADIAN_CONFIG,
       ...(cfg.circadian ?? {}),

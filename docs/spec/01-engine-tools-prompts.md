@@ -412,12 +412,14 @@ export interface RegisteredTool {
 | 文件 | 版本 | 内容 | 载入位置 |
 | :--- | :--- | :--- | :--- |
 | `prompts/main.md` | v7 | 主对话 Static System Prompt | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
-| `prompts/tidy.md` | v7 | 静默整理轮（含目录分工、路径/Frontmatter 规范与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/tidy.md` | v11 | 静默整理轮（含目录分工、路径/Frontmatter 规范、`<memory_radar>` 线索核实与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/reflect.md` | v3 | 每日睡前合流反思与周日独立反思（含 `<memory_radar>` 线索核实与 `rf-*.md`/四区沉淀） | memory_task 反思轮（或合流进 `bedtime` Step 2） |
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（Ring 1.5 可选非阻塞） | memory_task 复核轮（无历史只读，Ring 1 不调用） |
 | `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
 | `prompts/genesis.md` | v5 | 创世中性开局 | Dynamic Tail（`self.md` `name` 为空时拼入） |
 | `prompts/wake.md` | v3 | 主动唤醒（含 `[SILENT]` 沉默协议） | Dynamic Tail（`wake` 模式拼入） |
 | `prompts/recall-gate.md` | v3 | 召回门控、精排与 1 跳双链早停指令（含双边判据） | `decision` 分类器槽位（不进入 Psyber 主对话上下文） |
+| `prompts/memory-radar.md` | v2 | 睡前整理与周反思前置只读体检雷达指令（含 `promote` 与看板巡检双边判据） | `decision` 分类器槽位（产出 `<memory_radar>` 只读线索清单） |
 
 ### 5.1 条件模式触发与退出协议
 

@@ -137,6 +137,8 @@ export interface SanitizedSettings {
   identity?: { residentName: string | null; residentPronoun: string | null; named: boolean; userName: string | null; userPronoun: string | null };
   userStatus?: { moodText?: string; undisturbed: boolean; updatedAt: number };
   recallEvalNoticeResident?: boolean; // 可选：开启召回评测检视时是否坦诚告知Psyber
+  recall: RecallConfig;
+  radar: RadarConfig;
   circadian: { sleepStart: string; sleepEnd: string; heartbeatIntervalMin: number; proactiveEnabled: boolean; proactiveMinGapMin: number; proactiveCooldownMin: number };
   notifications: { channels: Record<string, { enabled: boolean; configured: boolean; summary?: string }> };
   tools: { defaultConfirmTimeoutSec: number; sessionAllowEnabled: boolean };
@@ -159,7 +161,7 @@ export interface SanitizedSettings {
 | `POST /api/v1/stickers` | `multipart/form-data`（`file`、`id`、`label`、`pack?`，上限 `2 MB`） | `{ "id": string, "label": string, "pack": string, "url": string }`；超 `2 MB` 返 `413 PAYLOAD_TOO_LARGE` |
 | `POST /api/v1/devices/push-token` | `{ "provider": "bark"\|"ntfy"\|"webhook"\|"apns"\|"fcm", "token": string, "endpoint"?: string }` | `{ "ok": true, "deviceId": string }`（敏感令牌写入 `credentials.json` 的 `pushTokens[deviceId] = { provider, token, endpoint, updatedAt }`，由 `NotificationHub` 与 `config.json` 全局 `notifications.channels` 合并扇出；设备吊销时自动清除对应项） |
 | `GET /api/v1/settings` | 无 | `SanitizedSettings`（**严禁返回任何 API Key / OAuth Token / Push Token 明文**） |
-| `PATCH /api/v1/settings` | 局部配置补丁（支持更新 `llm` / 新 `apiKey`（写入 `credentials.json`）、`circadian`、`notifications`、`tools`、`mcpServers`、`timezone`、`recallEvalNoticeResident` 及 `revokeDeviceIds?: string[]`） | `{ "ok": true, "settings": SanitizedSettings }`（热更新 `mcpServers` 与 `circadian` 定时器，立即吊销指定设备并断其 SSE） |
+| `PATCH /api/v1/settings` | 局部配置补丁（支持更新 `llm` / 新 `apiKey`（写入 `credentials.json`）、`recall`、`radar`、`circadian`、`notifications`、`tools`、`bash`、`mcpServers`、`timezone`、`recallEvalNoticeResident` 及 `revokeDeviceIds?: string[]`） | `{ "ok": true, "settings": SanitizedSettings }`（热更新 `mcpServers` 与 `circadian` 定时器，立即吊销指定设备并断其 SSE） |
 | `GET /api/v1/llm/models` | `?provider=<id>`（Ring 1.5 模型发现） | `{ "models": Array<{ "id": string; "name": string; "provider": string; "contextWindow"?: number; "maxTokens"?: number; "thinkingLevels"?: string[] }> }` |
 | `POST /api/v1/llm/test` | `{ "provider": string; "model": string }`（Ring 1.5 一键测试） | `{ "ok": boolean; "latencyMs": number; "error"?: string }` |
 | `GET /api/v1/usage/stats` | 无（Ring 1.5 设置页消耗统计） | `{ "today": UsageBucket, "total": UsageBucket, "daily": Array<{ "date": string } & UsageBucket>, "byModel": Array<{ "model": string } & UsageBucket> }`（含 `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheHitRate`/`estimatedCostUsd`） |

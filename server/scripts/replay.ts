@@ -28,6 +28,7 @@ import { maybeRunReflectAfterBedtime } from "../src/engine/reflect.ts";
 import { runMemoryTidyTask } from "../src/engine/tidy.ts";
 import type { ChatModelClient, ChatStreamChunk } from "../src/llm/client.ts";
 import { DynamicDecisionClient } from "../src/llm/decision.ts";
+import { DynamicEmbeddingClient } from "../src/llm/embedding.ts";
 import { DynamicChatModel, resolveByokSlot } from "../src/llm/router.ts";
 import { applyGenesisMemory } from "../src/memory/genesis.ts";
 import { MemoryIndex } from "../src/memory/index.ts";
@@ -1057,6 +1058,12 @@ async function main(): Promise<void> {
             dataDir: opts.dataDir,
             getConfig: () => config,
           });
+      const embedding = opts.mock
+        ? undefined
+        : new DynamicEmbeddingClient({
+            dataDir: opts.dataDir,
+            getConfig: () => config,
+          });
       console.log(`[${day} ${weekday}] 开始静默整理 (VirtualClock = ${clockLabel})...`);
       const t0 = Date.now();
       const outcome = await runMemoryTidyTask(
@@ -1070,6 +1077,7 @@ async function main(): Promise<void> {
           memoryTools,
           chatModel,
           decisionClient,
+          embedding,
           getConfig: () => config,
         },
         { taskType: "bedtime", nightDate: day },
@@ -1099,8 +1107,12 @@ async function main(): Promise<void> {
           ? ` | 已合并日反思${outcome.dailyReflect.decisionScores ? ` scores=${JSON.stringify(outcome.dailyReflect.decisionScores)}` : ""}`
           : ` | 日反思跳过(${outcome.dailyReflect.skipReason ?? "无需反思"}${outcome.dailyReflect.decisionScores ? ` scores=${JSON.stringify(outcome.dailyReflect.decisionScores)}` : ""})`
         : "";
+      const radarTag =
+        outcome.radar?.executed && outcome.radar.findingsCount > 0
+          ? ` | 雷达命中 ${outcome.radar.findingsCount} 条(板${outcome.radar.boardItemsChecked}/对${outcome.radar.pairsEvaluated})`
+          : "";
       console.log(
-        `[${day}] 整理成功 (${elapsedSec}s): 消化 ${outcome.processedEvents} 条 | 摘要: ${outcome.summary}${dailyRefTag} | 触碰卡片 (${outcome.touchedMemoryPaths.length}): ${outcome.touchedMemoryPaths.join(", ") || "无"}`,
+        `[${day}] 整理成功 (${elapsedSec}s): 消化 ${outcome.processedEvents} 条 | 摘要: ${outcome.summary}${dailyRefTag}${radarTag} | 触碰卡片 (${outcome.touchedMemoryPaths.length}): ${outcome.touchedMemoryPaths.join(", ") || "无"}`,
       );
 
       if (!opts.mock && decisionClient) {
@@ -1115,6 +1127,7 @@ async function main(): Promise<void> {
             memoryTools,
             chatModel,
             decisionClient,
+            embedding,
             getConfig: () => config,
           },
           { targetDay: day },

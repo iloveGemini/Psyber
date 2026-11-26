@@ -201,7 +201,14 @@ export class LlmFallbackDecisionClient implements DecisionClient {
     const qToTemplate: Record<string, string> = {};
 
     for (const [qId, q] of entries) {
-      const marker = `[${qId}]`;
+      const suffixMatch = /^[a-z]+_([a-z0-9]+)$/i.exec(qId);
+      const targetId =
+        !q.instructions.includes(`[${qId}]`) &&
+        suffixMatch &&
+        q.instructions.includes(`[${suffixMatch[1]}]`)
+          ? suffixMatch[1]!
+          : qId;
+      const marker = `[${targetId}]`;
       const normInstructions = q.instructions.replaceAll(marker, "{{id}}");
       let normCriteria: Record<string, string> | undefined;
       if (q.criteria) {
@@ -239,12 +246,12 @@ export class LlmFallbackDecisionClient implements DecisionClient {
       "You are a calibrated decision classifier. Evaluate the input against each question.",
       ...(deduplicated
         ? [
-            "<questions> uses shared templates where each question ID maps to a template ID; replace {{id}} with [<question_id>].",
+            "<questions> uses shared templates where each question ID maps to a template ID; replace {{id}} with [<question_id>] (or its item suffix after '_', e.g. ob_b0 -> [b0]).",
           ]
         : []),
       "Output ONLY a valid compact JSON object matching this exact schema, with no markdown fences or extra commentary:",
       '{"answers": {"<question_id>": {"noul": 0.01..0.99}}}',
-      'For type="choice", return {"choice": "<option_key>"}. For type="score", return {"score": <number>}.',
+      'For type="choice", return {"choice": "<option_key>", "confidence": 0.01..0.99}. For type="score", return {"score": <number>}.',
     ].join("\n");
 
     const userPrompt = `<input>\n${req.input}\n</input>\n\n<questions>\n${questionSpec}\n</questions>`;
@@ -267,6 +274,12 @@ export class LlmFallbackDecisionClient implements DecisionClient {
       if (chunk.type === "text_delta") {
         text += chunk.delta;
       }
+    }
+
+    if (req.signal?.aborted) {
+      throw req.signal.reason instanceof Error
+        ? req.signal.reason
+        : new Error("Decision fallback LLM aborted");
     }
 
     const jsonMatch = /\{[\s\S]*\}/.exec(text.trim());

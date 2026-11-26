@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（完成最近两轮召回/向量/双链代码的审查缺陷修复与契约同步，补充 4 组回归用例）。
+> 最后更新：2026-11-26（落地快脑只读体检雷达 `memory/radar.ts` 并完成 15 项代码审查问题全量修复与回归单测）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与向量+Decision 召回管线已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与向量+Decision 召回/体检管线已落地
 
 ### 已完成
+- **快脑只读体检雷达（Memory Radar · 严守 NG-2 只读不代写，`docs/` + `prompts/` + `server/`，2026-11-26）**：
+  - 契约与提示词：更新 `docs/MEMORY.md`、`docs/API.md`、`docs/spec/01-engine-tools-prompts.md`、`docs/spec/02-memory-execution.md` §6.1 与 `docs/spec/04-api-and-flutter.md`；新增 `prompts/memory-radar.md`（v2，`slot: decision`，`contradiction`/独立 `promote`/`obsolete`/`link`/`redundant`/`representation` + `core/{state,open}.md` 看板巡检双边判据），同步更新 `prompts/tidy.md`（v11）、`prompts/reflect.md`（v3）与 `prompts/README.md`。
+  - 共享向量与只读引擎：抽出 `memory/embeddings.ts`（单次批量加载 `card_embeddings` 缓存、对齐解码与分块保留部分向量）；新增 `memory/radar.ts`（两路扫描：双看板各保底 6 条配额巡检 + 向量/FTS5 配对受控并发体检，`card_links` 内存邻接表短路 `link` 且跳过「新持久专卡 ↔ 已互链旧 `ep-*`」溯源对，历史 `ep-*.md` 屏蔽 `obsolete`/`merge`、仅持久专卡互比问 `redundant`/`representation`，`weekly` 支持同周跨日新卡互配，修复占位词正则误伤、FTS 跳过预算计数、`ob_b0`/`ct_b0` 模板去重与 `AbortSignal` 即时中止）。
+  - 管线接入与配置：`config.ts` / `admin_routes.ts` 新增 `radar` 独立配置（防 `undefined`/`null`/数组污染）与 `/settings` 校验合并；接入 `engine/tidy.ts`（`bedtime` Step 2，非反思轮隔离 `lessons/`/`core/` 提炼引导）与 `engine/reflect.ts`（`reflect_weekly` 及日/周反思门控 `reflectGateHint`）；同步 `index.ts`、`scripts/replay.ts`，新增 `scripts/dryrun_radar.ts`（`bun run radar:dryrun`，带 `~/` 展开与正式库拦截）与 `tests/memory_radar.test.ts`（7 组单测）。
 - **召回/双链/客户端审查缺陷全量修复与契约同步（`docs/` + `server/`，2026-11-26）**：
   - 配置与校验：`config.ts` 新增 `mergeRecallConfig` 深度合并 `multiHop`（`neighborThreshold` 默认按 `Math.max(0.4, rerank.threshold)` 生效）；`admin_routes.ts` 补齐 `PATCH /settings` 对超时/阈值/多跳字段校验与深度合并。
   - 路由与客户端：`llm/decision.ts` 对重复题干去重并动态放大 `maxTokens`；`llm/embedding.ts` / `llm/reranker.ts` / `llm/router.ts` 修复 `openai-compat` 错路、未配 `baseUrl` 默认跳 SiliconFlow、异常响应静默空返回、孤立代理项与非有限向量、预中止 `AbortSignal` 穿透及 `Dynamic*Client` 悬空校验；`recall_eval.ts` / `eval_recall_replay.ts` 补齐虚拟事件 `seq`、并发缓存加载锁、中止重试退避与脚本 `nowMs` 参数。
@@ -51,5 +55,5 @@
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 及 `scripts/eval_recall_replay.ts` 严格检查零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（22 文件 / 94 用例 / 1304 断言）全部通过。
+- **`server/`（2026-11-26）**：`bun run typecheck` 及 `scripts/dryrun_radar.ts` / `scripts/replay.ts` 严格检查零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（23 文件 / 101 用例 / 1388 断言）全部通过。
 - **`app/`**：`2026-11-23` `AppDelegate.swift` 已通过 `swiftc -parse`；`1104b64` 与 `392d5c0` 前端改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

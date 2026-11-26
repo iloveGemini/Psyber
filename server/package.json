@@ -8,6 +8,7 @@
     "pair": "bun run src/index.ts --pair",
     "replay": "bun run scripts/replay.ts",
     "eval:recall-replay": "bun run scripts/eval_recall_replay.ts",
+    "radar:dryrun": "bun run scripts/dryrun_radar.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

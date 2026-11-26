@@ -320,6 +320,9 @@ describe("Git helpers & Reflect hard/decision gating", () => {
       const seenQuestions: string[][] = [];
       const mixedDecision: DecisionClient = {
         async decide(req: DecisionRequest): Promise<DecisionResponse> {
+          if (req.input.includes("<board_items>")) {
+            return { answers: { ob_b0: { noul: 0.1 }, ct_b0: { noul: 0.1 } } };
+          }
           seenQuestions.push(Object.keys(req.questions));
           if ("has_notable_shift" in req.questions) {
             return {

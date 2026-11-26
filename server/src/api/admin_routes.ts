@@ -5,6 +5,7 @@ import {
   DEFAULT_CIRCADIAN_CONFIG,
   DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_RECALL_CONFIG,
+  mergeRadarConfig,
   mergeRecallConfig,
   saveConfig,
   type BashToolConfig,
@@ -14,6 +15,7 @@ import {
   type ModelMetadataOverride,
   type NotificationsConfig,
   type PsyberConfig,
+  type RadarConfig,
   type RecallConfig,
 } from "../core/config.ts";
 import { loadCredentials, saveCredentials, type StoredCredentials } from "../core/credentials.ts";
@@ -145,7 +147,8 @@ function sanitizeSettings(
           creds.channelTokens[cfg.notifications.ntfy.credentialKey],
       ),
     },
-    recall: cfg.recall ?? DEFAULT_RECALL_CONFIG,
+    recall: mergeRecallConfig(cfg.recall),
+    radar: mergeRadarConfig(cfg.radar),
     bash: {
       allowedDirs: cfg.bash?.allowedDirs ?? [],
       timeoutMs: cfg.bash?.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
@@ -200,10 +203,11 @@ function validateCircadianPatch(patch: Partial<CircadianConfig>): string | null 
   return null;
 }
 
-function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
-  const isNumInRange = (v: unknown, min: number, max: number) =>
-    typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+function isNumInRange(v: unknown, min: number, max: number): boolean {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+}
 
+function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
   if (patch.charBudget !== undefined && !isNumInRange(patch.charBudget, 200, 20_000)) {
     return "recall.charBudget 须在 200..20000 之间";
   }
@@ -276,6 +280,39 @@ function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
     }
     if (patch.multiHop.timeoutMs !== undefined && !isNumInRange(patch.multiHop.timeoutMs, 200, 60_000)) {
       return "recall.multiHop.timeoutMs 须在 200..60000 之间";
+    }
+  }
+  return null;
+}
+
+function validateRadarPatch(patch: Partial<RadarConfig>): string | null {
+  if (patch.enabled !== undefined && typeof patch.enabled !== "boolean") {
+    return "radar.enabled 须为布尔值";
+  }
+  const numericBounds: Array<[keyof RadarConfig, number, number]> = [
+    ["maxPairsDaily", 1, 100],
+    ["maxPairsWeekly", 1, 100],
+    ["topKPerCard", 1, 10],
+    ["minSimilarity", 0, 1],
+    ["concurrency", 1, 16],
+    ["timeoutMs", 500, 120_000],
+    ["maxFindingsDaily", 1, 20],
+    ["maxFindingsWeekly", 1, 30],
+  ];
+  for (const [field, min, max] of numericBounds) {
+    if (patch[field] !== undefined && !isNumInRange(patch[field], min, max)) {
+      return `radar.${field} 须在 ${min}..${max} 之间`;
+    }
+  }
+  if (patch.thresholds !== undefined) {
+    if (!patch.thresholds || typeof patch.thresholds !== "object" || Array.isArray(patch.thresholds)) {
+      return "radar.thresholds 须为对象";
+    }
+    for (const k of ["redundant", "contradiction", "obsolete", "link", "promote", "merge"] as const) {
+      const v = patch.thresholds[k];
+      if (v !== undefined && !isNumInRange(v, 0, 1)) {
+        return `radar.thresholds.${k} 须在 0..1 之间`;
+      }
     }
   }
   return null;
@@ -721,6 +758,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       notifications?: Partial<NotificationsConfig>;
       notificationSecrets?: { barkDeviceKey?: string; ntfyToken?: string };
       recall?: Partial<RecallConfig>;
+      radar?: Partial<RadarConfig>;
       llm?: Partial<LlmConfig> & {
         deleteProviderIds?: string[];
         apiKeys?: Record<string, string>;
@@ -739,15 +777,31 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
     }
 
-    if (body.circadian && typeof body.circadian === "object") {
+    if (body.circadian !== undefined) {
+      if (!body.circadian || typeof body.circadian !== "object" || Array.isArray(body.circadian)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "circadian 配置必须为对象" } }, 400);
+      }
       const err = validateCircadianPatch(body.circadian);
       if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
     }
-    if (body.recall && typeof body.recall === "object") {
+    if (body.recall !== undefined) {
+      if (!body.recall || typeof body.recall !== "object" || Array.isArray(body.recall)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "recall 配置必须为对象" } }, 400);
+      }
       const err = validateRecallPatch(body.recall);
       if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
     }
-    if (body.notifications && typeof body.notifications === "object") {
+    if (body.radar !== undefined) {
+      if (!body.radar || typeof body.radar !== "object" || Array.isArray(body.radar)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "radar 配置必须为对象" } }, 400);
+      }
+      const err = validateRadarPatch(body.radar);
+      if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
+    }
+    if (body.notifications !== undefined) {
+      if (!body.notifications || typeof body.notifications !== "object" || Array.isArray(body.notifications)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "notifications 配置必须为对象" } }, 400);
+      }
       const err = validateNotificationsPatch(body.notifications);
       if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
     }
@@ -778,10 +832,10 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (typeof body.recallEvalNoticeResident === "boolean") {
       cfg.recallEvalNoticeResident = body.recallEvalNoticeResident;
     }
-    if (body.circadian && typeof body.circadian === "object") {
+    if (body.circadian && typeof body.circadian === "object" && !Array.isArray(body.circadian)) {
       cfg.circadian = { ...(cfg.circadian ?? DEFAULT_CIRCADIAN_CONFIG), ...body.circadian };
     }
-    if (body.notifications && typeof body.notifications === "object") {
+    if (body.notifications && typeof body.notifications === "object" && !Array.isArray(body.notifications)) {
       const prev = cfg.notifications ?? DEFAULT_NOTIFICATIONS_CONFIG;
       cfg.notifications = {
         ...prev,
@@ -821,8 +875,11 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
           : {}),
       };
     }
-    if (body.recall && typeof body.recall === "object") {
+    if (body.recall && typeof body.recall === "object" && !Array.isArray(body.recall)) {
       cfg.recall = mergeRecallConfig(cfg.recall, body.recall);
+    }
+    if (body.radar && typeof body.radar === "object" && !Array.isArray(body.radar)) {
+      cfg.radar = mergeRadarConfig(cfg.radar, body.radar);
     }
     if (validatedBash !== null) {
       cfg.bash = {
