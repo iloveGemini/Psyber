@@ -131,6 +131,49 @@ export async function recoverUncommittedTrackedCards(
   );
 }
 
+/**
+ * 安全回滚指定路径列表（用于 MCP 搬家 abort(rollback=true)）：
+ * - 严禁使用 git clean 或 git reset --hard，避免误删用户未跟踪杂文件；
+ * - 原来不存在的新建文件（existedBefore=false）先清理暂存区再物理删除；
+ * - 原来已存在的文件（existedBefore=true）且有 baseCommit 时，用 git checkout 还原；
+ * - 原来已存在但尚无 baseCommit（空仓未提交旧文件）时，记入 skipped 由调用方明确告知，绝不静默假装已还原。
+ */
+export async function rollbackMemoryTouchedPaths(
+  dataDir: string,
+  entries: ReadonlyArray<{ path: string; existedBefore: boolean }>,
+  baseCommit: string | null,
+): Promise<{ restored: string[]; deleted: string[]; skipped: string[] }> {
+  const restored: string[] = [];
+  const deleted: string[] = [];
+  const skipped: string[] = [];
+  if (entries.length === 0) return { restored, deleted, skipped };
+  const memoryDir = path.join(dataDir, "memory");
+  const head = await getMemoryHeadCommit(dataDir);
+
+  for (const entry of entries) {
+    const rel = entry.path;
+    if (!rel) continue;
+    if (!entry.existedBefore) {
+      if (head) {
+        await runGit(memoryDir, ["rm", "-f", "--ignore-unmatch", "--", rel]);
+      }
+      await fs.rm(path.join(memoryDir, rel), { force: true });
+      deleted.push(rel);
+      continue;
+    }
+    if (baseCommit) {
+      const res = await runGit(memoryDir, ["checkout", baseCommit, "--", rel]);
+      if (res.code !== 0) {
+        throw new Error(`git checkout ${baseCommit} -- ${rel} failed: ${res.stderr}`);
+      }
+      restored.push(rel);
+    } else {
+      skipped.push(rel);
+    }
+  }
+  return { restored, deleted, skipped };
+}
+
 /** 获取 memory/.git 当前 HEAD commit hash；尚未有任何提交时返回 null */
 export async function getMemoryHeadCommit(dataDir: string): Promise<string | null> {
   const memoryDir = path.join(dataDir, "memory");

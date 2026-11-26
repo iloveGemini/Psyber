@@ -244,14 +244,19 @@ export class MemoryTools {
     return this.writeMutex.runExclusive(fn);
   }
 
-  private validateCardBeforeWrite(rel: string, content: string): { error: string | null; note: string } {
+  private validateCardBeforeWrite(
+    rel: string,
+    content: string,
+    clockOverride?: Clock,
+  ): { error: string | null; note: string } {
     if (rel === "threads/REGISTRY.yaml" || rel === "entities/REGISTRY.yaml") {
       const check = validateRegistryYaml(rel, content);
       return { error: check.ok ? null : check.error, note: "" };
     }
 
-    const nowMs = this.clock.now();
-    const parsed = parseCardMarkdown(rel, content, nowMs, this.clock.timeZone, true);
+    const activeClock = clockOverride ?? this.clock;
+    const nowMs = activeClock.now();
+    const parsed = parseCardMarkdown(rel, content, nowMs, activeClock.timeZone, true);
     const rawStatus = parsed.rawFrontmatter.status;
     if (typeof rawStatus === "string" && !VALID_CARD_STATUSES.has(rawStatus.trim() as CardStatus)) {
       return {
@@ -545,7 +550,11 @@ export class MemoryTools {
     return { ok: true, output: prefix + slice };
   }
 
-  async write(rawPath: string, content: string): Promise<ToolResult> {
+  async write(
+    rawPath: string,
+    content: string,
+    opts?: { clockOverride?: Clock; trustFrontmatterDates?: boolean },
+  ): Promise<ToolResult> {
     const target = await this.resolveWritableTarget(rawPath, "写入");
     if (!target.ok) return { ok: false, output: target.output };
     const { rel, abs } = target;
@@ -563,16 +572,24 @@ export class MemoryTools {
         }
       }
 
-      const { error, note } = this.validateCardBeforeWrite(rel, content);
+      const { error, note } = this.validateCardBeforeWrite(rel, content, opts?.clockOverride);
       if (error) return { ok: false, output: error };
 
       await atomicWriteFile(this.dataDir, abs, content);
-      await this.index.reindexFile(rel);
+      await this.index.reindexFile(
+        rel,
+        opts?.trustFrontmatterDates ? { trustFrontmatterDates: true } : undefined,
+      );
       return { ok: true, output: `已写入 ${rel}${note}` };
     });
   }
 
-  async edit(rawPath: string, oldString: string, newString: string): Promise<ToolResult> {
+  async edit(
+    rawPath: string,
+    oldString: string,
+    newString: string,
+    opts?: { clockOverride?: Clock; trustFrontmatterDates?: boolean },
+  ): Promise<ToolResult> {
     if (!oldString) {
       return { ok: false, output: "old_string 不能为空" };
     }
@@ -628,11 +645,14 @@ export class MemoryTools {
         }
       }
 
-      const { error, note } = this.validateCardBeforeWrite(rel, updated);
+      const { error, note } = this.validateCardBeforeWrite(rel, updated, opts?.clockOverride);
       if (error) return { ok: false, output: error };
 
       await atomicWriteFile(this.dataDir, abs, updated);
-      await this.index.reindexFile(rel);
+      await this.index.reindexFile(
+        rel,
+        opts?.trustFrontmatterDates ? { trustFrontmatterDates: true } : undefined,
+      );
       const fallbackTag = usedNormalizedFallback ? "（已通过标点/空白归一化匹配成功）" : "";
       return { ok: true, output: `已更新 ${rel}${fallbackTag}${note}` };
     });

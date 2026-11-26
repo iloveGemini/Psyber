@@ -1009,6 +1009,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
     await memoryIndex.reindexAll();
     await engine.invalidateStaticPrefix();
+    lastBedtimeNightDate = events.getBedtimeNightDate();
     if (mcp.getStatusList().length === 0 && (config.mcpServers?.length ?? 0) > 0) {
       mcp.connectAllAsync(config.mcpServers ?? []);
     }
@@ -1041,6 +1042,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     events,
     getActiveSessionId: () => engine.getActiveSessionId(),
     dataDir,
+    promptsDir,
     db,
     memoryIndex,
     memoryTools,

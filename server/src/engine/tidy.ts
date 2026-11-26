@@ -165,7 +165,7 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
+export const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
   daily_wrapup:
     "我整理游标后的近期对话，只负责事实与归档：① 在 episodes/YYYY/MM/DD/ep-<slug>.md 记录值得留存的情景切片（一事一卡、上限 800 字不设下限；已收进 threads/、favorite/、entities/ 的只留一句钩子 + [[短标题]]）；② 若聊天中出现新的短期状态或长线进度变更，同步更新 core/state.md 看板；③ 若出现值得逐字留存的重要原话或附件，收进 favorite/；④ 若识别出反复出现的跨天内容线或实体，对照 threads/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。本轮不写 index.md 梗概，也不写 rf-*.md 反思或修改 core/mirror.md、core/boundaries.md、core/open.md、lessons/。",
   bedtime:
@@ -184,7 +184,10 @@ async function readOptional(absPath: string): Promise<string | null> {
   }
 }
 
-function formatTidyAttachmentSuffix(metadataJson: string | null): string {
+export function formatTidyAttachmentSuffix(
+  metadataJson: string | null,
+  opts?: { includeMediaHashes?: boolean },
+): string {
   if (!metadataJson) return "";
   try {
     const parsed = JSON.parse(metadataJson) as {
@@ -206,11 +209,15 @@ function formatTidyAttachmentSuffix(metadataJson: string | null): string {
         ? parsed.attachmentDigest.trim()
         : null;
     if (attachments.length === 0 && videoDuration === null && !digest) return "";
+    const hashHint =
+      opts?.includeMediaHashes && attachments.length > 0
+        ? ` (${attachments.map((h) => `media/${h}`).join(", ")})`
+        : "";
     const label =
       videoDuration !== null
         ? `附带了约 ${videoDuration} 秒短视频`
         : attachments.length > 0
-          ? `附带了 ${attachments.length} 张图片`
+          ? `附带了 ${attachments.length} 张图片${hashHint}`
           : "附带了媒体附件";
     return digest ? ` [${label} · 摘要：${digest}]` : ` [${label}]`;
   } catch {
@@ -218,30 +225,30 @@ function formatTidyAttachmentSuffix(metadataJson: string | null): string {
   }
 }
 
-function clipExcerpt(text: string, maxChars: number): string {
+export function clipExcerpt(text: string, maxChars: number): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (cleaned.length <= maxChars) return cleaned;
   return `${cleaned.slice(0, Math.max(20, maxChars - 1))}…`;
 }
 
-function tailSlice(text: string, maxChars: number): string {
+export function tailSlice(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `…（前文略）\n${text.slice(text.length - maxChars)}`;
 }
 
-function episodeDirForDay(dayStr: string): string {
+export function episodeDirForDay(dayStr: string): string {
   const [y, m, d] = dayStr.split("-");
   return `episodes/${y}/${m}/${d}`;
 }
 
-interface GistWatermarkInfo {
+export interface GistWatermarkInfo {
   totalChars: number;
   budgetChars: number;
   softWarnChars: number;
   nearLimit: boolean;
 }
 
-function buildTidyContextBlock(opts: {
+export function buildTidyContextBlock(opts: {
   taskType: TidyTaskType;
   targetDay: string;
   gistWatermark?: GistWatermarkInfo;
@@ -282,7 +289,7 @@ function parseOptionalSummary(text: string, touched: string[]): string {
   return touched.length > 0 ? `update ${touched.join(", ")}` : "无新增记忆";
 }
 
-interface RawEventRow {
+export interface RawEventRow {
   id: string;
   seq: number;
   turn_id: string | null;
@@ -292,6 +299,27 @@ interface RawEventRow {
   content: string;
   metadata: string | null;
   created_at: number;
+}
+
+/** 将单条事件渲染为第一人称整理话单行（严格遮罩用户撤回消息原文） */
+export function formatTidyTranscriptLine(
+  e: RawEventRow,
+  timeZone: string,
+  userLabel: string,
+  opts?: { includeMediaHashes?: boolean },
+): string {
+  const stamp = `[${localDateTime(e.created_at, timeZone)}]`;
+  const attSuffix = formatTidyAttachmentSuffix(e.metadata, opts);
+  if (e.status === "retracted") {
+    if (e.role === "user") {
+      return `${stamp} ${userLabel}: （${userLabel}撤回了一条消息）`;
+    }
+    return `${stamp} 我: ${e.content}${attSuffix}（已撤回，${userLabel}看不到内容）`;
+  }
+  if (e.kind === "door_note") {
+    return `${stamp} [${userLabel}从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}${attSuffix}`;
+  }
+  return `${stamp} ${e.role === "user" ? userLabel : "我"}: ${e.content}${attSuffix}`;
 }
 
 function getBedtimeLastRunAt(db: Database, nowMs: number, timeZone: string): number {
@@ -431,20 +459,9 @@ async function executeSingleTidyPass(
     sysSections.push(tidyPrompt!.body);
     systemPrompt = sysSections.join("\n\n");
 
-    const transcriptLines = opts.batch.map((e) => {
-      const stamp = `[${localDateTime(e.created_at, clock.timeZone)}]`;
-      const attSuffix = formatTidyAttachmentSuffix(e.metadata);
-      if (e.status === "retracted") {
-        if (e.role === "user") {
-          return `${stamp} ${userLabel}: （${userLabel}撤回了一条消息）`;
-        }
-        return `${stamp} 我: ${e.content}${attSuffix}（已撤回，${userLabel}看不到内容）`;
-      }
-      if (e.kind === "door_note") {
-        return `${stamp} [${userLabel}从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}${attSuffix}`;
-      }
-      return `${stamp} ${e.role === "user" ? userLabel : "我"}: ${e.content}${attSuffix}`;
-    });
+    const transcriptLines = opts.batch.map((e) =>
+      formatTidyTranscriptLine(e, clock.timeZone, userLabel),
+    );
 
     const materialParts: string[] = [
       buildTidyContextBlock({

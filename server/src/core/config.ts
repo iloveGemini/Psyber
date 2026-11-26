@@ -525,6 +525,8 @@ export interface MemoryMcpConfig {
   maxOutputChars: number;
   /** 按需单独停用的暴露工具名列表（默认 []） */
   disabledTools: string[];
+  /** 是否在 read_write 模式下向外部 MCP 暴露历史记忆搬家任务工具 memory_replay（默认 false；开启后才按游标受控下发历史对话，关闭时彻底隐藏并拒绝调用） */
+  replayToolsEnabled: boolean;
   /** 已签发的外部 MCP 客户端令牌列表（仅存哈希） */
   tokens: MemoryMcpToken[];
 }
@@ -536,6 +538,7 @@ export const DEFAULT_MEMORY_MCP_CONFIG: MemoryMcpConfig = {
   protectCoreFiles: true,
   maxOutputChars: 12_000,
   disabledTools: [],
+  replayToolsEnabled: false,
   tokens: [],
 };
 
@@ -610,6 +613,11 @@ export function mergeMemoryMcpConfig(
     ),
     maxOutputChars,
     disabledTools,
+    replayToolsEnabled: pickBool(
+      b?.replayToolsEnabled,
+      p?.replayToolsEnabled,
+      DEFAULT_MEMORY_MCP_CONFIG.replayToolsEnabled,
+    ),
     tokens,
   };
 }

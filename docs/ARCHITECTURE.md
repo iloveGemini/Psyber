@@ -72,7 +72,8 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 ### 对外记忆 MCP（出差互斥模式）
 - **默认关闭与零外网泄漏**：`config.json` 中 `memoryMcp.enabled` 默认 `false`（关闭时 `/mcp` 返回 `404`）；开启后默认 `read_only` 且 `allowRemote: false`（仅允许本机回环访问），配合 `Origin` 防跨站守卫与专属 Bearer 令牌（`SHA-256` 哈希存储，不与客户端配对 Token 混用）。
 - **单身互斥（绝不记忆分叉）**：开启 `memoryMcp.enabled = true` 进入「出差模式」时，系统等待内部在途任务收尾后立即暂停内部作息心跳与自动整理，并对内部聊天写接口返回 `409 MCP_ACTIVE`；关闭返回时先全量 `memoryIndex.reindexAll()` 并失效 `DirectEngine` 旧静态前缀快照，确保醒来认知连续一致。
-- **第一人称主权与隐私铁律**：严禁暴露 `<dataDir>/private/`（上锁抽屉）或直接裸露 `events` 原始聊天库；开启 `read_write` 后默认启用 `protectCoreFiles: true` 保护 `core/*`，所有 MCP 写入复用 `MemoryTools` 沙箱校验与共享 `memoryGitMutex`，并自动记录 `memory(mcp:<name>): ...` Git 提交。
+- **第一人称主权与隐私铁律**：默认严禁暴露 `<dataDir>/private/`（上锁抽屉）或直接裸露 `events` 原始聊天库；开启 `read_write` 后默认启用 `protectCoreFiles: true` 保护 `core/*`，所有 MCP 写入复用 `MemoryTools` 沙箱校验与共享 `memoryGitMutex`，并自动记录 `memory(mcp:<name>): ...` Git 提交。
+- **历史记忆搬家闭环（默认关闭）**：当且仅当同时开启 `enabled`、`read_write` 与 `replayToolsEnabled`（默认 `false`）时，允许通过 `api/memory_mcp.ts` 暴露单个搬家任务工具 `memory_replay`（底层由 `engine/replay_runner.ts` 按 `api -> engine` 单向注入，复用 `tidy.ts` / `reflect.ts` / `mood/circadian.ts` 的逻辑作息日切分、低量日攒批与游标推进逻辑）。该模式下按游标受控分批下发历史非删除/非撤回原文的 `chat`/`wake`/`door_note` 对话，仍绝对隔离 `private/`、`deleted` 与用户 `retracted` 原文；搬家步骤内 `memory_write`/`memory_edit` 采用该步历史虚拟时钟并延迟至 `next` 统一提交，在 `bedtime` / 周反思结算时同步推进内部游标与 `replay_state.json`，确保关闭 MCP 回家后不重跑历史整理。
 
 ---
 

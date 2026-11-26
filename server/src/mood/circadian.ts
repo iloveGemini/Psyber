@@ -120,6 +120,73 @@ export function getSleepWindowStatus(
   return { inSleepWindow: inWin, nightDate: today };
 }
 
+/**
+ * 按逻辑作息日（而非自然日 00:00）切分历史对话：
+ * - 凌晨 00:00..sleepEnd（默认 07:30）归属前一晚 nightDate；
+ * - 若通宵聊天跨过 sleepEnd 且相邻消息间隔 < bedtimeIdleMin（默认 30m），连续顺延归入前一晚，
+ *   直到出现真正停顿或达到 sleepEnd + bedtimeForceAfterSleepEndMin（默认 4h）硬上限；
+ * - 每晚的 bedtime 虚拟时钟对齐 max(当日 sleepStart, 该晚末条消息 + bedtimeIdleMin)。
+ */
+export function groupByLogicalNight<T>(
+  items: readonly T[],
+  getAtMs: (item: T) => number,
+  timeZone: string,
+  circadian: CircadianConfig = DEFAULT_CIRCADIAN_CONFIG,
+): {
+  days: string[];
+  byDay: Map<string, T[]>;
+  bedtimeByDay: Map<string, number>;
+} {
+  const idleMin = Math.max(
+    0,
+    circadian.bedtimeIdleMin ?? DEFAULT_CIRCADIAN_CONFIG.bedtimeIdleMin ?? 30,
+  );
+  const forceAfterMin = Math.max(
+    idleMin,
+    circadian.bedtimeForceAfterSleepEndMin ??
+      DEFAULT_CIRCADIAN_CONFIG.bedtimeForceAfterSleepEndMin ??
+      240,
+  );
+
+  const byDay = new Map<string, T[]>();
+  let prevNight: string | null = null;
+  let prevAt = 0;
+
+  for (const item of items) {
+    const at = getAtMs(item);
+    const baseNight = getLogicalNightDate(at, timeZone, circadian);
+    let assignedNight = baseNight;
+    if (prevNight !== null && baseNight > prevNight) {
+      const prevSleepEndMs = localWallClockMs(
+        addCalendarDays(prevNight, 1),
+        circadian.sleepEnd,
+        7 * 60 + 30,
+        timeZone,
+      );
+      const isContinuous = at - prevAt < idleMin * 60_000;
+      const withinForceCap = at <= prevSleepEndMs + forceAfterMin * 60_000;
+      if (isContinuous && withinForceCap) {
+        assignedNight = prevNight;
+      }
+    }
+    const list = byDay.get(assignedNight) ?? [];
+    list.push(item);
+    byDay.set(assignedNight, list);
+    prevNight = assignedNight;
+    prevAt = at;
+  }
+
+  const days = Array.from(byDay.keys()).sort();
+  const bedtimeByDay = new Map<string, number>();
+  for (const day of days) {
+    const list = byDay.get(day)!;
+    const lastAtMs = getAtMs(list[list.length - 1]!);
+    const sleepStartMs = localWallClockMs(day, circadian.sleepStart, 23 * 60 + 30, timeZone);
+    bedtimeByDay.set(day, Math.max(sleepStartMs, lastAtMs + idleMin * 60_000));
+  }
+  return { days, byDay, bedtimeByDay };
+}
+
 /** 输出客观作息状态短语，严禁泄露内部情绪浮点数（NG-4） */
 export function renderCircadianState(
   nowMs: number,

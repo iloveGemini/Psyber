@@ -221,11 +221,14 @@ export class MemoryIndex {
   }
 
   /** 增量同步单张 Markdown 卡片到 card_index + card_fts */
-  async reindexFile(relPath: string): Promise<void> {
-    await this.reindexFileInternal(relPath);
+  async reindexFile(relPath: string, opts?: { trustFrontmatterDates?: boolean }): Promise<void> {
+    await this.reindexFileInternal(relPath, opts);
   }
 
-  private async reindexFileInternal(relPath: string): Promise<boolean> {
+  private async reindexFileInternal(
+    relPath: string,
+    opts?: { trustFrontmatterDates?: boolean },
+  ): Promise<boolean> {
     if (!relPath.endsWith(".md")) return false;
     const absPath = path.join(this.memoryDir, relPath);
     let content: string;
@@ -251,7 +254,7 @@ export class MemoryIndex {
       content,
       stat.mtimeMs,
       this.clock.timeZone,
-      existing !== null,
+      opts?.trustFrontmatterDates ? false : existing !== null,
     );
 
     const titleTokens = tokenizeForFts(parsed.title);

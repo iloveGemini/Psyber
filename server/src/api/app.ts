@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { Hono, type Context } from "hono";
 import type { Clock } from "../core/clock.ts";
@@ -8,6 +9,7 @@ import type { MediaStore } from "../core/media.ts";
 import { AsyncMutex } from "../core/mutex.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine, TurnCheckpoint } from "../engine/direct.ts";
+import { McpReplayRunner } from "../engine/replay_runner.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
 import type { McpManager } from "../extensions/mcp.ts";
 import type { ModelCatalogService } from "../llm/catalog.ts";
@@ -164,6 +166,7 @@ export interface AppDeps {
   events: EventStore;
   getActiveSessionId: () => string;
   dataDir?: string;
+  promptsDir?: string;
   db?: Database;
   memoryIndex?: MemoryIndex;
   memoryTools?: MemoryTools;
@@ -1386,6 +1389,17 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   if (deps.dataDir && deps.db && deps.memoryIndex && deps.memoryTools) {
+    const gitMutex = deps.memoryGitMutex ?? new AsyncMutex();
+    const replayRunner = new McpReplayRunner({
+      db: deps.db,
+      dataDir: deps.dataDir,
+      promptsDir: deps.promptsDir ?? path.resolve(import.meta.dir, "../../../prompts"),
+      clock: deps.clock,
+      events: deps.events,
+      memoryIndex: deps.memoryIndex,
+      gitMutex,
+      getConfig: deps.getConfig,
+    });
     registerMemoryMcpRoutes(app, {
       version: deps.version,
       dataDir: deps.dataDir,
@@ -1395,7 +1409,8 @@ export function createApp(deps: AppDeps): Hono {
       memoryIndex: deps.memoryIndex,
       memoryTools: deps.memoryTools,
       embedding: deps.embedding,
-      gitMutex: deps.memoryGitMutex ?? new AsyncMutex(),
+      gitMutex,
+      replayRunner,
       getClientIp: deps.getClientIp,
       allowedOrigins: deps.allowedOrigins,
       onTokenUsed: async () => {

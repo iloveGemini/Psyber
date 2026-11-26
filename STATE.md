@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（落地对外可开关记忆 MCP 工具层第一阶段：Streamable HTTP `/mcp`、读写模式切换、出差互斥休眠与 CLI 启停）。
+> 最后更新：2026-11-26（落地对外可开关记忆 MCP 工具层第二阶段：单工具 `memory_replay` 复用 `replay.ts`/`tidy.ts`/`reflect.ts` 主链路、断点续跑与防回家重跑）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一阶段）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **对外记忆 MCP 工具层 · 第二阶段（`docs/` + `server/`，2026-11-26）**：
+  - 契约与开关：更新 [docs/API.md](docs/API.md) §3.5 与 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；`core/config.ts` 新增 `memoryMcp.replayToolsEnabled`（默认 `false`），`admin_routes.ts` 补齐 `/settings` 校验与下发；仅 `enabled && read_write && replayToolsEnabled` 三重门控全开时暴露 `memory_replay`。
+  - 共享主链路与搬家状态机：逻辑作息日分组 `groupByLogicalNight` 下沉至 `mood/circadian.ts` 与 `scripts/replay.ts` 共用；`engine/tidy.ts` 导出上下文拼装与 `formatTidyTranscriptLine`；新增 `engine/replay_runner.ts`（状态存于 `task_cursors['mcp_replay']`，支持 `start`/`next`/`status`/`abort`、低量日顺延、按 `turn_id` 拆批并豁免全局 `maxOutputChars` 截断、步骤内按历史虚拟时钟写盘暂存、带匹配 `step_id` 调 `next` 统一单次 Git 提交并同步 `daily_wrapup`/`bedtime`/`reflect_daily`/`reflect_weekly` 与 `replay_state.json`，无 `step_id` 重连原样续接防跳步）；`core/git.ts` 新增精准回滚 `rollbackMemoryTouchedPaths`（绝不误删未跟踪杂文件）。
+  - 路由与 CLI 闭环：`api/memory_mcp.ts` 挂载 `memory_replay`（全锁串行防并发竞态、完全豁免全局截断）并在搬家步骤内放行 `core/state.md`（周反思放行 `core/open.md`）；`index.ts` 回家关闭 MCP 时同步刷新内存 `lastBedtimeNightDate`；`scripts/memory_mcp.ts` 新增 `--replay`/`--no-replay` 与未收尾步骤关闭提醒；新增面向用户的 [docs/howto/memory-migration.md](docs/howto/memory-migration.md) 与 `tests/replay_mcp.test.ts`（6 组全离线用例）。
 - **对外可开关记忆 MCP 工具层 · 第一阶段（`docs/` + `server/`，2026-11-26）**：
   - 契约与配置：更新 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/API.md](docs/API.md)；`core/config.ts` 新增 `memoryMcp` 配置与 `mergeMemoryMcpConfig`（`enabled`、`accessMode: read_only|read_write`、`allowRemote`、`protectCoreFiles`、`maxOutputChars`、`disabledTools`、仅存 `SHA-256` 哈希的专属 `tokens`）。
   - Streamable HTTP 服务端与工具：`api/memory_mcp.ts` 落地 `POST/DELETE /mcp`（开关关闭 `404` + 回环 IP 守卫 + `Origin` 防跨站 + 专属令牌鉴权）；暴露 `memory_context`、`memory_search`（向量/FTS5 + 1 跳双链邻居，零 LLM 费用）、`memory_glob`、`memory_grep`、`memory_read`（`countAccess: false`）、`memory_history`，以及 `read_write` 下受 `protectCoreFiles` 与共享 `memoryGitMutex` 保护的 `memory_write`/`memory_edit`（自动提交 `memory(mcp:<name>): ...`）；严禁触碰 `private/` 与 `events` 原始聊天库。
@@ -63,10 +67,10 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
-- 对外记忆 MCP 第二阶段（按需）：新增 `replay_status` / `replay_next_batch` / `replay_complete_batch` 搬家任务工具及订阅 CLI 无人值守批处理驱动脚本；在 Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI。
+- 按需拓展：Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI；如需全自动挂机批量搬家，可在 `memory_replay` 之上薄包一层 CLI 循环驱动脚本。
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（27 文件 / 117 用例 / 1575 断言，含新增 `tests/memory_mcp.test.ts`）全部通过。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（28 文件 / 123 用例 / 1735 断言，含新增 `tests/replay_mcp.test.ts`）全部通过。
 - **`app/`（2026-11-26）**：仅微调设置页 `digest` 槽位说明文案；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

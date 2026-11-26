@@ -125,7 +125,11 @@
   - `DELETE /api/v1/memory-mcp/tokens/:id` — 立即吊销指定 MCP 令牌
 - **暴露工具**：
   - 只读（`read_only` / `read_write`）：`memory_context`、`memory_search`（向量/FTS5 + 1 跳双链邻居，零额外 LLM 成本）、`memory_glob`、`memory_grep`、`memory_read`（`countAccess: false`）、`memory_history`；
-  - 写入（仅 `read_write` 且令牌未降权时在 `tools/list` 暴露）：`memory_write`、`memory_edit`（受 `protectCoreFiles` 与 `MemoryTools` 沙箱保护，写后自动提交带来源标记的 Git Commit）。
+  - 写入（仅 `read_write` 且令牌未降权时在 `tools/list` 暴露）：`memory_write`、`memory_edit`（受 `protectCoreFiles` 与 `MemoryTools` 沙箱保护，写后自动提交带来源标记的 Git Commit；当处于 `memory_replay` 活跃步骤内时，暂存变动并按该步历史时钟校验/索引，在 `next` 结算时统一单次 Commit，并允许对 `core/state.md` 及周反思期的 `core/open.md` 对账更新）。
+  - 历史搬家任务工具（三重门控：仅当 `enabled === true && effectiveAccessMode === "read_write" && replayToolsEnabled === true` 时在 `tools/list` 暴露，默认 `replayToolsEnabled = false`）：`memory_replay`
+    - 参数：`action: "start" | "next" | "status" | "abort"`，可选 `days`（默认 `1`，上限 `365`）、`until`（`YYYY-MM-DD`）、`all`（布尔）、`step_id`、`summary`、`max_chars`（默认 `20000`，范围 `4000..60000`）、`min_chars`（默认 `500`，范围 `0..20000`）、`rollback`（仅 `abort` 有效，默认 `false`）、`cancel_plan`（仅 `abort` 有效，默认 `true`，设 `false` 仅中止当前步保留计划）。
+    - **断点防跳步**：仅当携带匹配当前在途步骤的 `step_id` 调用 `next` 时，才在互斥锁内统一 Git 提交本步改动、同步推进 `daily_wrapup` / `bedtime` / `reflect` 游标与 `replay_state.json` 并返回下一步；若新窗口未带 `step_id` 调用 `next` 或重调 `start`，服务端原样续接未完步骤与已写清单，绝不跳过未完成对话。CLI 执行 `bun run mcp -- disable` 时会只读检查是否存在未结算搬家步骤并打印提醒。
+    - **截断豁免与隐私边界**：`memory_replay` 返回的任务包完全豁免全局 `maxOutputChars` 截断，确保已纳入批次的原始对话完整送达；仅在 `replayToolsEnabled` 开启时按游标分批受控下发非删除/非撤回原文的历史 `chat`/`wake`/`door_note` 对话，严禁暴露 `private/` 上锁抽屉、`deleted` 消息或用户 `retracted` 原文。
 
 ---
 

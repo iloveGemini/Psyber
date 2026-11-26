@@ -138,7 +138,7 @@ function cursorKeyForScope(scope: ReflectScope): string {
   return scope === "daily" ? "reflect_daily" : "reflect_weekly";
 }
 
-function readReflectCursor(db: Database, scope: ReflectScope): ReflectCursorMeta {
+export function readReflectCursor(db: Database, scope: ReflectScope): ReflectCursorMeta {
   const row = db
     .query("SELECT meta_json FROM task_cursors WHERE task_key = ?")
     .get(cursorKeyForScope(scope)) as { meta_json: string | null } | null;

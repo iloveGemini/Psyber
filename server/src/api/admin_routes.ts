@@ -120,6 +120,7 @@ function sanitizeSettings(
       protectCoreFiles: rawMemoryMcp.protectCoreFiles,
       maxOutputChars: rawMemoryMcp.maxOutputChars,
       disabledTools: rawMemoryMcp.disabledTools,
+      replayToolsEnabled: rawMemoryMcp.replayToolsEnabled,
       tokens: rawMemoryMcp.tokens.map((t) => ({
         id: t.id,
         name: t.name,
@@ -229,6 +230,9 @@ function validateMemoryMcpPatch(patch: Partial<MemoryMcpConfig>): string | null 
     if (!Array.isArray(patch.disabledTools) || patch.disabledTools.some((t) => typeof t !== "string")) {
       return "memoryMcp.disabledTools 须为字符串数组";
     }
+  }
+  if (patch.replayToolsEnabled !== undefined && typeof patch.replayToolsEnabled !== "boolean") {
+    return "memoryMcp.replayToolsEnabled 须为布尔值";
   }
   if ((patch as Record<string, unknown>).tokens !== undefined) {
     return "memoryMcp.tokens 不可通过 /settings 直接覆盖，请使用 /api/v1/memory-mcp/tokens 管理令牌";

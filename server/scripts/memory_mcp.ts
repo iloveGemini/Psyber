@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 import { hashBearerToken, issueMemoryMcpToken } from "../src/api/pairing.ts";
 import { SystemClock } from "../src/core/clock.ts";
 import {
@@ -31,6 +32,8 @@ function printHelp(): void {
     --mode <read_only|read_write>         设置权限模式（默认沿用当前配置或 read_only）
     --allow-core                          允许写入 core/*（仅 read_write 生效）
     --protect-core                        保护 core/* 禁止外部写入（默认开启）
+    --replay                              开启历史搬家任务工具 memory_replay（仅 read_write 生效）
+    --no-replay                           关闭历史搬家任务工具 memory_replay（默认）
     --allow-remote                        允许非本机回环 IP 访问
     --local-only                          仅允许本机回环访问（默认）
   disable                                 关闭对外记忆 MCP（恢复内部 Psyber 正常对话与心跳）
@@ -92,6 +95,7 @@ function formatConfigStatus(cfg: MemoryMcpConfig, endpoint: string, dataDir: str
     `服务状态: ${cfg.enabled ? "已开启（出差互斥模式，内部对话与心跳已暂停）" : "已关闭"}`,
     `权限模式: ${cfg.accessMode}`,
     `核心档案保护 (protectCoreFiles): ${cfg.protectCoreFiles ? "开启" : "关闭"}`,
+    `搬家任务工具 (replayToolsEnabled): ${cfg.replayToolsEnabled ? "开启（允许 memory_replay）" : "关闭"}`,
     `允许远端访问 (allowRemote): ${cfg.allowRemote ? "是" : "否（仅本机回环）"}`,
     `单次输出上限: ${cfg.maxOutputChars} 字符`,
     `MCP 端点: ${endpoint}`,
@@ -154,6 +158,7 @@ async function main(): Promise<void> {
   if (cmd === "enable") {
     let accessMode: MemoryMcpAccessMode | undefined;
     let protectCoreFiles: boolean | undefined;
+    let replayToolsEnabled: boolean | undefined;
     let allowRemote: boolean | undefined;
     for (let i = 0; i < subArgs.length; i++) {
       const a = subArgs[i]!;
@@ -167,6 +172,10 @@ async function main(): Promise<void> {
         protectCoreFiles = false;
       } else if (a === "--protect-core") {
         protectCoreFiles = true;
+      } else if (a === "--replay") {
+        replayToolsEnabled = true;
+      } else if (a === "--no-replay") {
+        replayToolsEnabled = false;
       } else if (a === "--allow-remote") {
         allowRemote = true;
       } else if (a === "--local-only") {
@@ -179,11 +188,14 @@ async function main(): Promise<void> {
       enabled: true,
       ...(accessMode !== undefined ? { accessMode } : {}),
       ...(protectCoreFiles !== undefined ? { protectCoreFiles } : {}),
+      ...(replayToolsEnabled !== undefined ? { replayToolsEnabled } : {}),
       ...(allowRemote !== undefined ? { allowRemote } : {}),
     });
     await saveConfig(dataDir, cfg);
     const { notified, endpoint } = await notifyRunningServer(dataDir, cfg.instanceId);
-    console.log(`已开启对外记忆 MCP（mode=${cfg.memoryMcp.accessMode}，protectCoreFiles=${cfg.memoryMcp.protectCoreFiles}）。`);
+    console.log(
+      `已开启对外记忆 MCP（mode=${cfg.memoryMcp.accessMode}，protectCoreFiles=${cfg.memoryMcp.protectCoreFiles}，replayToolsEnabled=${cfg.memoryMcp.replayToolsEnabled}）。`,
+    );
     console.log(`端点：${endpoint}`);
     console.log(notified ? "已通知运行中的 Psyber 服务端即时热重载（内部对话与心跳已暂停）。" : "配置已落盘，将在服务端启动时生效。");
     return;
@@ -195,6 +207,31 @@ async function main(): Promise<void> {
     const { notified } = await notifyRunningServer(dataDir, cfg.instanceId);
     console.log("已关闭对外记忆 MCP。");
     console.log(notified ? "已通知运行中的 Psyber 服务端恢复内部对话与作息心跳。" : "配置已落盘，将在服务端启动时生效。");
+
+    const sqlitePath = path.join(dataDir, "psyber.sqlite");
+    try {
+      await fs.access(sqlitePath);
+      const db = new Database(sqlitePath, { readonly: true });
+      try {
+        const row = db
+          .query("SELECT meta_json FROM task_cursors WHERE task_key = 'mcp_replay'")
+          .get() as { meta_json: string | null } | null;
+        if (row?.meta_json) {
+          const parsed = JSON.parse(row.meta_json) as {
+            activeStep?: { stepId?: string; day?: string; phase?: string } | null;
+          };
+          if (parsed?.activeStep?.stepId) {
+            console.warn(
+              `[提醒] 检测到仍有未结算的搬家步骤 (${parsed.activeStep.stepId} | ${parsed.activeStep.day} ${parsed.activeStep.phase})，建议下次开启后通过 memory_replay(action="next" 或 "abort") 收尾。`,
+            );
+          }
+        }
+      } finally {
+        db.close();
+      }
+    } catch {
+      // 数据库不存在或未初始化表结构时忽略
+    }
     return;
   }
 

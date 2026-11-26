@@ -56,9 +56,11 @@ flutter run -d macos
 2. **初生引导（Genesis）**：按向导设置作息习惯、用户称呼/代词与首选模型凭证（BYOK），保存后即刻开启首段陪伴；
 3. **日常互动**：支持消息对话、门缝纸条输入切换、发图上传待发预览条、贴纸面板展开与具身表达渲染。
 
-### 4. 历史对话导入与按天回放（Replay）
+### 4. 历史对话导入与搬家（Replay / MCP）
 
-仓库内置了按天推进、支持断点续跑的回放脚本 [`server/scripts/replay.ts`](server/scripts/replay.ts)。你可以先让任意 AI 将 ChatGPT / Claude / SillyTavern 等历史记录转换为**标准 JSONL 导入格式**，再用本脚本按自然日导入并运行静默整理（脚本也向下兼容旧 Psyche `.db` 库，按文件后缀自动识别）：
+仓库支持两种历史搬家方式（完整图文步骤与常用 AI 指令模板见 **[`docs/howto/memory-migration.md`](docs/howto/memory-migration.md)**）：
+- **方式一（内置脚本全自动）**：通过 [`server/scripts/replay.ts`](server/scripts/replay.ts) 将标准 JSONL（或旧 Psyche `.db`）按逻辑作息日导入并调用配置的 `memory_task` 模型自动整理；
+- **方式二（订阅制客户端 + MCP `memory_replay` 零按量费用）**：先用 `--import-only --all` 零成本导入原文，再开启 `bun run mcp -- enable --mode read_write --replay` 连接 Claude Code / Cursor / Gemini 桌面端等分步整理与断点续跑。
 
 **标准 JSONL 导入格式**（每行一条 JSON，必填 `at` / `role` / `text`，其余可选）：
 
@@ -161,4 +163,5 @@ flutter test
 2. [`docs/MEMORY.md`](docs/MEMORY.md) — 活目录 Markdown 卡片仓、任务制写入、双轨召回与真实评测闭环
 3. [`docs/API.md`](docs/API.md) — 面向 Flutter 的精简 REST + SSE 接口契约
 4. [`docs/ROADMAP.md`](docs/ROADMAP.md) — 当前规划阶段（P0 → P1 执行规程）与后续 Ring 0/1/2 分期路线
-5. [`STATE.md`](STATE.md) — 当前进度与交接备忘
+5. [`docs/howto/memory-migration.md`](docs/howto/memory-migration.md) — 面向用户的历史记忆搬家指南（`replay` 脚本与对外 MCP `memory_replay` 双方案）
+6. [`STATE.md`](STATE.md) — 当前进度与交接备忘

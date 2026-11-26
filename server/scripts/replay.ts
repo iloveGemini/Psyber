@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { VirtualClock, addCalendarDays, localDateTime, localDay, localWeekday } from "../src/core/clock.ts";
+import { VirtualClock, localDateTime, localDay, localWeekday } from "../src/core/clock.ts";
 import {
   DEFAULT_CIRCADIAN_CONFIG,
   atomicWriteFile,
@@ -14,7 +14,7 @@ import {
   saveConfig,
   type CircadianConfig,
 } from "../src/core/config.ts";
-import { getLogicalNightDate, localWallClockMs } from "../src/mood/circadian.ts";
+import { groupByLogicalNight as groupByLogicalNightShared } from "../src/mood/circadian.ts";
 import { loadCredentials } from "../src/core/credentials.ts";
 import { openDatabase, runMigrations } from "../src/core/db.ts";
 import {
@@ -284,6 +284,9 @@ Psyber 历史对话导入与按天回放脚本（支持标准 JSONL 导入与断
      bun run replay -- --source /path/to/import.jsonl --until 2026-10-18
      bun run replay -- --source /path/to/import.jsonl --all
 
+  6. 仅导入全部原文（供开启 --replay 对外记忆 MCP 后由外部订阅制客户端分批整理）:
+     bun run replay -- --source /path/to/import.jsonl --data-dir ~/.psyber/my-psyber --init --import-only --all
+
 选项:
   --source <path>        必填（或设 PSYBER_REPLAY_SOURCE）：标准 .jsonl 文件路径（也兼容旧 Psyche .db）
   --format <fmt>         auto（默认，按后缀识别）| jsonl | psyche
@@ -517,47 +520,12 @@ function groupByLogicalNight(
   summaries: DaySummary[];
   bedtimeByDay: Map<string, number>;
 } {
-  const idleMin = Math.max(
-    0,
-    circadian.bedtimeIdleMin ?? DEFAULT_CIRCADIAN_CONFIG.bedtimeIdleMin ?? 30,
+  const { days, byDay, bedtimeByDay } = groupByLogicalNightShared(
+    rows,
+    (r) => r.at,
+    timeZone,
+    circadian,
   );
-  const forceAfterMin = Math.max(
-    idleMin,
-    circadian.bedtimeForceAfterSleepEndMin ??
-      DEFAULT_CIRCADIAN_CONFIG.bedtimeForceAfterSleepEndMin ??
-      240,
-  );
-
-  const byDay = new Map<string, NormalizedMessage[]>();
-  let prevNight: string | null = null;
-  let prevAt = 0;
-
-  for (const row of rows) {
-    const baseNight = getLogicalNightDate(row.at, timeZone, circadian);
-    let assignedNight = baseNight;
-    if (prevNight !== null && baseNight > prevNight) {
-      const prevSleepEndMs = localWallClockMs(
-        addCalendarDays(prevNight, 1),
-        circadian.sleepEnd,
-        7 * 60 + 30,
-        timeZone,
-      );
-      const isContinuous = row.at - prevAt < idleMin * 60_000;
-      const withinForceCap = row.at <= prevSleepEndMs + forceAfterMin * 60_000;
-      if (isContinuous && withinForceCap) {
-        assignedNight = prevNight;
-      }
-    }
-    row.day = assignedNight;
-    const list = byDay.get(assignedNight) ?? [];
-    list.push(row);
-    byDay.set(assignedNight, list);
-    prevNight = assignedNight;
-    prevAt = row.at;
-  }
-
-  const days = Array.from(byDay.keys()).sort();
-  const bedtimeByDay = new Map<string, number>();
   const summaries: DaySummary[] = days.map((day) => {
     const list = byDay.get(day)!;
     let msgIn = 0;
@@ -565,6 +533,7 @@ function groupByLogicalNight(
     let attachments = 0;
     let chars = 0;
     for (const r of list) {
+      r.day = day;
       if (r.role === "user") msgIn++;
       else msgOut++;
       chars += r.text.length;
@@ -572,9 +541,7 @@ function groupByLogicalNight(
     }
     const firstAtMs = list[0]!.at;
     const lastAtMs = list[list.length - 1]!.at;
-    const sleepStartMs = localWallClockMs(day, circadian.sleepStart, 23 * 60 + 30, timeZone);
-    const bedtimeAtMs = Math.max(sleepStartMs, lastAtMs + idleMin * 60_000);
-    bedtimeByDay.set(day, bedtimeAtMs);
+    const bedtimeAtMs = bedtimeByDay.get(day)!;
     return { day, msgIn, msgOut, attachments, chars, firstAtMs, lastAtMs, bedtimeAtMs };
   });
   return { days, byDay, summaries, bedtimeByDay };

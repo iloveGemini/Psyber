@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { Context, Hono } from "hono";
-import { localDay, vagueWhen, type Clock } from "../core/clock.ts";
+import { VirtualClock, localDay, vagueWhen, type Clock } from "../core/clock.ts";
 import {
   mergeMemoryMcpConfig,
   type MemoryMcpAccessMode,
@@ -22,6 +22,7 @@ import {
 } from "../core/git.ts";
 import type { AsyncMutex } from "../core/mutex.ts";
 import { stripFrontmatter } from "../core/prompts.ts";
+import type { McpReplayRunner } from "../engine/replay_runner.ts";
 import { cosineSimilarity, ensureCardEmbeddings } from "../memory/embeddings.ts";
 import { effectiveStatus, filterActiveStateMarkdown } from "../memory/frontmatter.ts";
 import { buildContinuityBlock } from "../memory/gist.ts";
@@ -53,6 +54,7 @@ interface McpToolDefinition {
   name: string;
   description: string;
   readOnly: boolean;
+  replayOnly?: boolean;
   inputSchema: Record<string, unknown>;
 }
 
@@ -193,6 +195,36 @@ const MCP_MEMORY_TOOL_DEFS: McpToolDefinition[] = [
       required: ["path", "old_string", "new_string"],
     },
   },
+  {
+    name: "memory_replay",
+    readOnly: false,
+    replayOnly: true,
+    description:
+      "按逻辑作息日分批拉取待整理的历史对话任务包，并在写完卡片后结算 Git 提交与游标（仅在 read_write 且开启 replayToolsEnabled 时可用）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["start", "next", "status", "abort"],
+          description: "start 开启或续接计划；next 交卷当前步并取下一步；status 查看进度；abort 中止当前步",
+        },
+        days: { type: "integer", description: "action=start 时指定整理天数（默认 1，上限 365）" },
+        until: { type: "string", description: "action=start 时指定整理截止日期 YYYY-MM-DD" },
+        all: { type: "boolean", description: "action=start 时是否整理全部剩余日期" },
+        step_id: {
+          type: "string",
+          description: "action=next 时传入当前步 step_id 确认交卷；新窗口续接可不传",
+        },
+        summary: { type: "string", description: "action=next 时的 15 字以内中文摘要（用于 Git 提交说明）" },
+        max_chars: { type: "integer", description: "单批原始对话字符上限（4000..60000，默认 20000）" },
+        min_chars: { type: "integer", description: "低量日攒批顺延阈值（0..20000，默认 500）" },
+        rollback: { type: "boolean", description: "action=abort 时是否安全回滚本步修改的卡片（默认 false）" },
+        cancel_plan: { type: "boolean", description: "action=abort 时是否同时清除整个计划（默认 true）" },
+      },
+      required: ["action"],
+    },
+  },
 ];
 
 export interface MemoryMcpRouteDeps {
@@ -205,6 +237,7 @@ export interface MemoryMcpRouteDeps {
   memoryTools: MemoryTools;
   embedding?: EmbeddingClient;
   gitMutex: AsyncMutex;
+  replayRunner?: McpReplayRunner;
   getClientIp?: (req: Request) => string;
   allowedOrigins?: string[];
   /** 节流持久化 token.lastUsedAt（由运行期装配传入） */
@@ -557,23 +590,60 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     const norm = normalizeRelPath(rawPath);
     if (!norm.ok) return { ok: false, output: norm.error };
     if (!norm.rel) return { ok: false, output: "path 不能为空。" };
-    if (protectCoreFiles && norm.rel.startsWith("core/")) {
-      return {
-        ok: false,
-        output: `已启用核心档案保护（protectCoreFiles），禁止通过外部 MCP 修改 ${norm.rel}。`,
-      };
-    }
 
     return deps.gitMutex.runExclusive(async () => {
+      // 在 gitMutex 内读取 activeStep 并校验权限，避免与并发 memory_replay(next/abort) 产生竞态
+      const activeStep = deps.replayRunner?.getActiveStep() ?? null;
+      if (protectCoreFiles && norm.rel.startsWith("core/")) {
+        const allowedReplayCore =
+          activeStep !== null &&
+          (norm.rel === "core/state.md" ||
+            (activeStep.phase === "reflect_weekly" && norm.rel === "core/open.md"));
+        if (!allowedReplayCore) {
+          return {
+            ok: false,
+            output: `已启用核心档案保护（protectCoreFiles），禁止通过外部 MCP 修改 ${norm.rel}。`,
+          };
+        }
+      }
+
+      let existedBefore = false;
+      if (activeStep) {
+        try {
+          await fs.access(path.join(memoryDir, norm.rel));
+          existedBefore = true;
+        } catch {
+          existedBefore = false;
+        }
+      }
+      const writeOpts = activeStep
+        ? {
+            clockOverride: new VirtualClock(
+              activeStep.bedtimeAtMs,
+              deps.getConfig().timezone || deps.clock.timeZone,
+            ),
+            trustFrontmatterDates: true,
+          }
+        : undefined;
+
       const res =
         kind === "write"
-          ? await deps.memoryTools.write(rawPath, String(args.content ?? ""))
+          ? await deps.memoryTools.write(rawPath, String(args.content ?? ""), writeOpts)
           : await deps.memoryTools.edit(
               rawPath,
               String(args.old_string ?? ""),
               String(args.new_string ?? ""),
+              writeOpts,
             );
       if (!res.ok) return res;
+
+      if (activeStep && deps.replayRunner) {
+        deps.replayRunner.recordStepWrite(norm.rel, existedBefore);
+        return {
+          ok: true,
+          output: `${res.output}（已暂存至当前搬家步骤 ${activeStep.stepId}，将在 memory_replay(action="next") 时统一 Git 提交）`,
+        };
+      }
 
       const safeClient = sanitizeCommitPart(clientName, 24) || "client";
       const safeNote = sanitizeCommitPart(args.note, 60);
@@ -601,6 +671,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       token: MemoryMcpToken;
       effectiveMode: MemoryMcpAccessMode;
       protectCoreFiles: boolean;
+      replayToolsEnabled: boolean;
       maxOutputChars: number;
       disabledSet: Set<string>;
       onNewSession: (sid: string) => void;
@@ -665,6 +736,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       const tools = MCP_MEMORY_TOOL_DEFS.filter((t) => {
         if (ctx.disabledSet.has(t.name)) return false;
         if (!t.readOnly && ctx.effectiveMode !== "read_write") return false;
+        if (t.replayOnly && (!ctx.replayToolsEnabled || !deps.replayRunner)) return false;
         return true;
       }).map((t) => ({
         name: t.name,
@@ -696,6 +768,21 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
               {
                 type: "text",
                 text: `权限拒绝：当前处于只读模式（read_only），禁止调用写入工具 ${name}。`,
+              },
+            ],
+            isError: true,
+          },
+        };
+      }
+      if (def.replayOnly && (!ctx.replayToolsEnabled || !deps.replayRunner)) {
+        return {
+          jsonrpc: "2.0",
+          id: rpcId,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: "权限拒绝：未开启历史搬家工具开关（memoryMcp.replayToolsEnabled），禁止调用 memory_replay。",
               },
             ],
             isError: true,
@@ -739,6 +826,25 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
           case "memory_edit":
             toolRes = await runWriteOrEdit("edit", args, ctx.token.name, ctx.protectCoreFiles);
             break;
+          case "memory_replay": {
+            const replayRes = await deps.replayRunner!.execute(args, {
+              protectCoreFiles: ctx.protectCoreFiles,
+            });
+            // memory_replay 原文已按 max_chars 受控切批，完全豁免全局 maxOutputChars 截断以防静默丢失历史对话
+            return {
+              jsonrpc: "2.0",
+              id: rpcId,
+              result: {
+                content: [
+                  {
+                    type: "text",
+                    text: replayRes.output,
+                  },
+                ],
+                isError: !replayRes.ok,
+              },
+            };
+          }
           default:
             return jsonRpcError(rpcId, -32602, `未实现的记忆工具: ${name}`);
         }
@@ -896,6 +1002,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       token: matchedToken,
       effectiveMode,
       protectCoreFiles: cfg.protectCoreFiles,
+      replayToolsEnabled: cfg.replayToolsEnabled,
       maxOutputChars: cfg.maxOutputChars,
       disabledSet,
       onNewSession: (sid: string) => {
