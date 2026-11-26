@@ -5,6 +5,7 @@ import {
   DEFAULT_CIRCADIAN_CONFIG,
   DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_RECALL_CONFIG,
+  mergeRecallConfig,
   saveConfig,
   type BashToolConfig,
   type CircadianConfig,
@@ -200,17 +201,82 @@ function validateCircadianPatch(patch: Partial<CircadianConfig>): string | null 
 }
 
 function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
-  if (patch.charBudget !== undefined && (typeof patch.charBudget !== "number" || patch.charBudget < 200 || patch.charBudget > 20_000)) {
+  const isNumInRange = (v: unknown, min: number, max: number) =>
+    typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+
+  if (patch.charBudget !== undefined && !isNumInRange(patch.charBudget, 200, 20_000)) {
     return "recall.charBudget 须在 200..20000 之间";
   }
-  if (patch.dedupWindowMin !== undefined && (typeof patch.dedupWindowMin !== "number" || patch.dedupWindowMin < 0 || patch.dedupWindowMin > 1440)) {
+  if (patch.dedupWindowMin !== undefined && !isNumInRange(patch.dedupWindowMin, 0, 1440)) {
     return "recall.dedupWindowMin 须在 0..1440 之间";
   }
-  if (patch.recentDailyWindowHours !== undefined && (typeof patch.recentDailyWindowHours !== "number" || patch.recentDailyWindowHours < 1 || patch.recentDailyWindowHours > 720)) {
+  if (patch.recentDailyWindowHours !== undefined && !isNumInRange(patch.recentDailyWindowHours, 1, 720)) {
     return "recall.recentDailyWindowHours 须在 1..720 之间";
   }
-  if (patch.embedTimeoutMs !== undefined && (typeof patch.embedTimeoutMs !== "number" || patch.embedTimeoutMs < 200 || patch.embedTimeoutMs > 30_000)) {
+  if (patch.embedTimeoutMs !== undefined && !isNumInRange(patch.embedTimeoutMs, 200, 30_000)) {
     return "recall.embedTimeoutMs 须在 200..30000 之间";
+  }
+  if (patch.decisionTimeoutMs !== undefined && !isNumInRange(patch.decisionTimeoutMs, 200, 60_000)) {
+    return "recall.decisionTimeoutMs 须在 200..60000 之间";
+  }
+  if (patch.rerankTimeoutMs !== undefined && !isNumInRange(patch.rerankTimeoutMs, 200, 60_000)) {
+    return "recall.rerankTimeoutMs 须在 200..60000 之间";
+  }
+  if (patch.queryWindowTurns !== undefined && !isNumInRange(patch.queryWindowTurns, 0, 20)) {
+    return "recall.queryWindowTurns 须在 0..20 之间";
+  }
+  if (patch.candidatePool !== undefined && !isNumInRange(patch.candidatePool, 1, 100)) {
+    return "recall.candidatePool 须在 1..100 之间";
+  }
+  if (patch.catalogScanMaxCards !== undefined && !isNumInRange(patch.catalogScanMaxCards, 0, 1000)) {
+    return "recall.catalogScanMaxCards 须在 0..1000 之间";
+  }
+  for (const scoreField of ["ftsMinScore", "embedMinScore"] as const) {
+    if (patch[scoreField] !== undefined && !isNumInRange(patch[scoreField], 0, 1)) {
+      return `recall.${scoreField} 须在 0..1 之间`;
+    }
+  }
+  if (patch.hybridFtsWithEmbedding !== undefined && typeof patch.hybridFtsWithEmbedding !== "boolean") {
+    return "recall.hybridFtsWithEmbedding 须为布尔值";
+  }
+  if (patch.gate !== undefined) {
+    if (!patch.gate || typeof patch.gate !== "object" || Array.isArray(patch.gate)) {
+      return "recall.gate 须为对象";
+    }
+    if (patch.gate.enabled !== undefined && typeof patch.gate.enabled !== "boolean") {
+      return "recall.gate.enabled 须为布尔值";
+    }
+    if (patch.gate.threshold !== undefined && !isNumInRange(patch.gate.threshold, 0, 1)) {
+      return "recall.gate.threshold 须在 0..1 之间";
+    }
+  }
+  if (patch.rerank !== undefined) {
+    if (!patch.rerank || typeof patch.rerank !== "object" || Array.isArray(patch.rerank)) {
+      return "recall.rerank 须为对象";
+    }
+    if (patch.rerank.threshold !== undefined && !isNumInRange(patch.rerank.threshold, 0, 1)) {
+      return "recall.rerank.threshold 须在 0..1 之间";
+    }
+  }
+  if (patch.multiHop !== undefined) {
+    if (!patch.multiHop || typeof patch.multiHop !== "object" || Array.isArray(patch.multiHop)) {
+      return "recall.multiHop 须为对象";
+    }
+    if (patch.multiHop.enabled !== undefined && typeof patch.multiHop.enabled !== "boolean") {
+      return "recall.multiHop.enabled 须为布尔值";
+    }
+    if (patch.multiHop.maxNeighbors !== undefined && !isNumInRange(patch.multiHop.maxNeighbors, 1, 30)) {
+      return "recall.multiHop.maxNeighbors 须在 1..30 之间";
+    }
+    if (patch.multiHop.sufficientThreshold !== undefined && !isNumInRange(patch.multiHop.sufficientThreshold, 0, 1)) {
+      return "recall.multiHop.sufficientThreshold 须在 0..1 之间";
+    }
+    if (patch.multiHop.neighborThreshold !== undefined && !isNumInRange(patch.multiHop.neighborThreshold, 0, 1)) {
+      return "recall.multiHop.neighborThreshold 须在 0..1 之间";
+    }
+    if (patch.multiHop.timeoutMs !== undefined && !isNumInRange(patch.multiHop.timeoutMs, 200, 60_000)) {
+      return "recall.multiHop.timeoutMs 须在 200..60000 之间";
+    }
   }
   return null;
 }
@@ -756,7 +822,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       };
     }
     if (body.recall && typeof body.recall === "object") {
-      cfg.recall = { ...(cfg.recall ?? DEFAULT_RECALL_CONFIG), ...body.recall };
+      cfg.recall = mergeRecallConfig(cfg.recall, body.recall);
     }
     if (validatedBash !== null) {
       cfg.bash = {

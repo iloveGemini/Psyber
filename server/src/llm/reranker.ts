@@ -2,7 +2,7 @@ import type { PsyberConfig } from "../core/config.ts";
 import { loadCredentials } from "../core/credentials.ts";
 import { sanitizeUnicode } from "../core/decision.ts";
 import type { RerankerClient, RerankerOptions, RerankItem } from "../core/reranker.ts";
-import { resolveByokSlot, type ResolvedByokSlot } from "./router.ts";
+import { resolveByokSlot, withTimeoutSignal, type ResolvedByokSlot } from "./router.ts";
 
 export type { RerankerClient, RerankerOptions, RerankItem };
 
@@ -14,27 +14,17 @@ export function isRerankerModelId(modelId: string): boolean {
   return /(?:^|[/:_-])rerank(?:er)?(?:$|[/:_.-])/.test(s);
 }
 
-function resolveRerankUrl(baseUrl?: string): string {
-  const trimmed = (baseUrl?.trim() || "https://api.siliconflow.cn/v1").replace(/\/+$/, "");
+function resolveRerankUrl(baseUrl?: string, providerId?: string): string {
+  const raw = baseUrl?.trim();
+  if (!raw) {
+    if (providerId && !providerId.toLowerCase().includes("siliconflow")) {
+      throw new Error(`Reranker provider "${providerId}" 必须配置 baseUrl，避免将凭证发送到默认端点`);
+    }
+    return "https://api.siliconflow.cn/v1/rerank";
+  }
+  const trimmed = raw.replace(/\/+$/, "");
   if (trimmed.endsWith("/rerank")) return trimmed;
   return `${trimmed}/rerank`;
-}
-
-function withTimeoutSignal(
-  externalSignal: AbortSignal | undefined,
-  timeoutMs: number,
-): { signal: AbortSignal; cleanup: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onAbort = () => controller.abort();
-  externalSignal?.addEventListener("abort", onAbort, { once: true });
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      clearTimeout(timer);
-      externalSignal?.removeEventListener("abort", onAbort);
-    },
-  };
 }
 
 export interface HttpRerankerClientOptions {
@@ -61,7 +51,7 @@ export class HttpRerankerClient implements RerankerClient {
     this.apiKey = opts.apiKey;
     this.modelId = opts.modelId.trim();
     this.modelKey = `${opts.providerId?.trim() || "reranker"}:${this.modelId}`;
-    this.url = resolveRerankUrl(opts.baseUrl);
+    this.url = resolveRerankUrl(opts.baseUrl, opts.providerId);
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS;
   }
@@ -70,10 +60,13 @@ export class HttpRerankerClient implements RerankerClient {
     if (documents.length === 0) return [];
     const { signal, cleanup } = withTimeoutSignal(opts?.signal, this.timeoutMs);
     try {
+      if (signal.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+      }
       const body: Record<string, unknown> = {
         model: this.modelId,
-        query: sanitizeUnicode(query.trim() || " "),
-        documents: documents.map((d) => sanitizeUnicode(d.trim() || " ")),
+        query: sanitizeUnicode(query).trim() || " ",
+        documents: documents.map((d) => sanitizeUnicode(d).trim() || " "),
         return_documents: false,
       };
       if (opts?.topN && opts.topN > 0) {
@@ -120,6 +113,9 @@ export class HttpRerankerClient implements RerankerClient {
           out.push({ index: idx, relevanceScore: score });
         }
       }
+      if (results.length > 0 && out.length === 0) {
+        throw new Error("Rerank API returned results with no valid index/score items");
+      }
       out.sort((a, b) => b.relevanceScore - a.relevanceScore);
       return out;
     } finally {
@@ -160,8 +156,17 @@ export class DynamicRerankerClient implements RerankerClient {
   }
 
   isConfigured(): boolean {
-    const ref = this.deps.getConfig().llm?.slots?.reranker;
-    return Boolean(ref?.provider?.trim() && ref?.model?.trim());
+    const config = this.deps.getConfig();
+    const ref = config.llm?.slots?.reranker;
+    if (!ref?.provider?.trim() || !ref?.model?.trim()) return false;
+    const providerId = ref.provider.trim();
+    const providerCfg = config.llm?.providers?.[providerId];
+    if (!providerCfg) return false;
+    if (providerCfg.kind === "openai-compat" && !providerCfg.baseUrl?.trim()) return false;
+    if (!providerCfg.baseUrl?.trim() && !providerId.toLowerCase().includes("siliconflow")) {
+      return false;
+    }
+    return true;
   }
 
   async rerank(query: string, documents: string[], opts?: RerankerOptions): Promise<RerankItem[]> {

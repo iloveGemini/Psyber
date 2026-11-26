@@ -42,9 +42,9 @@ export interface RecallMultiHopConfig {
   maxNeighbors: number;
   /** 证据充分性早停门槛（0..1，默认 0.75；首跳已选卡片被判定足够接话且分数 >= 此值时立即早停不补卡；调低更克制、调高更积极补卡） */
   sufficientThreshold: number;
-  /** 1 跳邻接卡入选的最低相关性门槛（0..1，默认 0.40；高于首跳 rerank.threshold 以严控多跳噪声，仅放行高置信度补全卡） */
+  /** 1 跳邻接卡入选的最低相关性门槛（0..1，缺省取 Math.max(0.40, rerank.threshold)；调高仅放行强补全卡以压低噪声，调低放宽延伸联想） */
   neighborThreshold?: number;
-  /** 1 跳扩展单次硬超时（单位：毫秒，默认 2500；超时仅保留首跳结果不报错） */
+  /** 1 跳扩展单次硬超时（单位：毫秒，默认 2500；调大容忍慢网络但增加响应尾延迟，调小更快保留首跳结果回落） */
   timeoutMs?: number;
 }
 
@@ -71,11 +71,11 @@ export interface RecallConfig {
   catalogScanMaxCards?: number;
   /** 门控关闭或超时降级时的 FTS 归一化分数门槛（0..1，默认 0.25；调高过滤弱撞词噪声，调低放宽字面命中） */
   ftsMinScore?: number;
-  /** 向量粗筛最低余弦相似度门槛（0..1，默认 0.35；开启决策精排时默认放宽至 0.25 以扩大候选池） */
+  /** 向量粗筛最低余弦相似度门槛（0..1，未配置时开启精排默认 0.25、单阶段默认 0.35；调高减少弱相关向量入池，调低扩大候选覆盖面） */
   embedMinScore?: number;
   /** 向量可用时是否使用 RRF 将 FTS5 字面命中与向量语义命中混合融合（默认 false，实测纯向量粗筛显著优于混合 RRF；FTS5 仍作为向量异常时的降级兜底） */
   hybridFtsWithEmbedding?: boolean;
-  /** 二阶段独立精排模型（reranker）单次超时阈值（单位：毫秒，默认 3000；超时自动降级） */
+  /** 二阶段独立精排模型（reranker）单次超时阈值（单位：毫秒，默认 3000；调大容忍慢网络但增加延迟，调小更快超时回退） */
   rerankTimeoutMs?: number;
   /** 基于 [[短标题]] 与 Markdown 双链的 1 跳扩展及证据充分性早停配置 */
   multiHop?: RecallMultiHopConfig;
@@ -104,10 +104,36 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
     enabled: true,
     maxNeighbors: 6,
     sufficientThreshold: 0.75,
-    neighborThreshold: 0.4,
     timeoutMs: 2500,
   },
 };
+
+/** 深度合并召回配置（防止部分更新 gate / rerank / multiHop 时覆盖默认子字段） */
+export function mergeRecallConfig(
+  base?: Partial<RecallConfig>,
+  patch?: Partial<RecallConfig>,
+): RecallConfig {
+  return {
+    ...DEFAULT_RECALL_CONFIG,
+    ...(base ?? {}),
+    ...(patch ?? {}),
+    gate: {
+      ...DEFAULT_RECALL_CONFIG.gate!,
+      ...(base?.gate ?? {}),
+      ...(patch?.gate ?? {}),
+    },
+    rerank: {
+      ...DEFAULT_RECALL_CONFIG.rerank!,
+      ...(base?.rerank ?? {}),
+      ...(patch?.rerank ?? {}),
+    },
+    multiHop: {
+      ...DEFAULT_RECALL_CONFIG.multiHop!,
+      ...(base?.multiHop ?? {}),
+      ...(patch?.multiHop ?? {}),
+    },
+  };
+}
 
 /** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */
 export interface CircadianConfig {
@@ -451,18 +477,7 @@ export async function loadOrCreateConfig(
     auth: {
       devices: Array.isArray(cfg.auth?.devices) ? cfg.auth.devices : [],
     },
-    recall: {
-      ...DEFAULT_RECALL_CONFIG,
-      ...(cfg.recall ?? {}),
-      gate: {
-        ...DEFAULT_RECALL_CONFIG.gate!,
-        ...(cfg.recall?.gate ?? {}),
-      },
-      rerank: {
-        ...DEFAULT_RECALL_CONFIG.rerank!,
-        ...(cfg.recall?.rerank ?? {}),
-      },
-    },
+    recall: mergeRecallConfig(cfg.recall),
     circadian: {
       ...DEFAULT_CIRCADIAN_CONFIG,
       ...(cfg.circadian ?? {}),

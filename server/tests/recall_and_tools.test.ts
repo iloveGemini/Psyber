@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { createApp } from "../src/api/app.ts";
-import { saveConfig } from "../src/core/config.ts";
+import { loadOrCreateConfig, saveConfig } from "../src/core/config.ts";
 import { DirectEngine } from "../src/engine/direct.ts";
 import { SseHub, type SseFrame } from "../src/engine/sse.ts";
 import { extractMarkdownLinks } from "../src/memory/index.ts";
@@ -823,5 +824,406 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     });
     expect(safeFallback.hopStoppedReason).toBe("timeout_or_error");
     expect(safeFallback.items.map((i) => i.path)).toEqual(["episodes/2026/11/20/ep-anchor.md"]);
+  });
+
+  test("审查缺陷回归：配置合并与校验、card_links v1->v2 回填一致性、召回路由/降级/锚点与预算防护", async () => {
+    ctx = await createTestContext();
+
+    // 1) partial multiHop 深度合并 & PATCH /api/v1/settings 校验超时字段
+    ctx.config.recall = {
+      charBudget: 3200,
+      dedupWindowMin: 120,
+      recentDailyWindowHours: 72,
+      embedTimeoutMs: 2500,
+      multiHop: {
+        enabled: true,
+        maxNeighbors: 3,
+        sufficientThreshold: 0.75,
+      },
+    };
+    await saveConfig(ctx.dataDir, ctx.config);
+    const reloaded = await loadOrCreateConfig(ctx.dataDir, ctx.clock.now());
+    expect(reloaded.recall?.multiHop?.enabled).toBe(true);
+    expect(reloaded.recall?.multiHop?.maxNeighbors).toBe(3);
+    expect(reloaded.recall?.multiHop?.timeoutMs).toBe(2500);
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: ctx.clock,
+      getConfig: () => ctx!.config,
+      events: ctx.events,
+      getActiveSessionId: () => "sess-cfg",
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+    });
+    const badPatchRes = await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${ctx.authToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ recall: { rerankTimeoutMs: -1 } }),
+    });
+    expect(badPatchRes.status).toBe(400);
+
+    const okPatchRes = await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${ctx.authToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ recall: { multiHop: { sufficientThreshold: 0.68 } } }),
+    });
+    expect(okPatchRes.status).toBe(200);
+    expect(ctx.config.recall?.multiHop?.maxNeighbors).toBe(3);
+    expect(ctx.config.recall?.multiHop?.sufficientThreshold).toBeCloseTo(0.68, 4);
+
+    // 2) parseRecallGatePrompt 支持连续空标题与文末空标题；extractMarkdownLinks 支持 .. 文件名与带标题链接
+    const edgeParsed = parseRecallGatePrompt(
+      "# needs_memory\n# card_relevance\n检查卡片\n\n## true\n命中\n\n## false\n",
+    );
+    expect(edgeParsed.cardRelevance.instructions).toBe("检查卡片");
+    expect(edgeParsed.cardRelevance.criteria?.true_description).toBe("命中");
+    expect(edgeParsed.cardRelevance.criteria?.false_description).toBeUndefined();
+
+    expect(
+      extractMarkdownLinks(
+        '[版本说明](lessons/notes..v2.md) 与 [引文](favorite/q.md "原话")',
+        "episodes/2026/11/20/ep-x.md",
+      ),
+    ).toEqual([
+      { linkKind: "path", targetRef: "lessons/notes..v2.md" },
+      { linkKind: "path", targetRef: "favorite/q.md" },
+    ]);
+
+    // 3) v1 -> v2 回填：即便已有 1 张新卡先入 card_links，仍会补建其余未变旧卡；且忽略 YAML Frontmatter 里的假链接
+    await ctx.tools.write(
+      "episodes/2026/11/19/ep-v1-old.md",
+      "---\ntitle: 旧日记录\nwhen_to_recall: 不要索引 [[假双链]]\n---\n正文引用了 [[约定原话]]。\n",
+    );
+    await ctx.tools.write(
+      "favorite/2026-11-20-promise.md",
+      "---\ntitle: 约定原话\nkind: note\n---\n原话内容。\n",
+    );
+    // 模拟 v1 数据库（有 card_index 但尚未写过 index:card_links_v2，同时先手动往 card_links 写 1 条记录或改 1 张新卡）
+    ctx.db.query("DELETE FROM card_links").run();
+    ctx.db.query("DELETE FROM task_cursors WHERE task_key = 'index:card_links_v2'").run();
+    await ctx.tools.write(
+      "episodes/2026/11/20/ep-new.md",
+      "---\ntitle: 新卡\nkind: episode\n---\n提到 [[约定原话]]。\n",
+    );
+    await ctx.index.reindexAll();
+    const oldLinks = ctx.db
+      .query("SELECT target_ref FROM card_links WHERE src_path = ?")
+      .all("episodes/2026/11/19/ep-v1-old.md") as Array<{ target_ref: string }>;
+    expect(oldLinks.map((l) => l.target_ref)).toEqual(["约定原话"]);
+
+    // 4) 未配 embedding 但配了 reranker 且活跃卡 <= 250 时，shouldCatalogScan 不应截胡绕过 reranker
+    let rerankCalled = 0;
+    const gatePassDecision = {
+      async decide(req: { input: string; questions: Record<string, DecisionQuestion> }) {
+        const answers: Record<string, { noul: number }> = {};
+        if ("needs_memory" in req.questions) answers.needs_memory = { noul: 0.9 };
+        for (const k of Object.keys(req.questions)) {
+          if (k === "needs_memory") continue;
+          answers[k] = { noul: k === "c0" ? 0.25 : 0.1 };
+        }
+        return { answers, backend: "mock" };
+      },
+    };
+    const rerankerSpy = {
+      modelKey: "mock:rr",
+      async rerank(_q: string, docs: string[]) {
+        rerankCalled++;
+        return docs.map((_, index) => ({ index, relevanceScore: index === 0 ? 0.85 : 0.1 }));
+      },
+    };
+    const rerankWithoutEmbed = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-rr-no-emb",
+      turnId: "t-rr-no-emb",
+      query: "约定原话",
+      reranker: rerankerSpy,
+      decisionClient: gatePassDecision,
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { catalogScanMaxCards: 250, multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 } },
+    });
+    expect(rerankCalled).toBe(1);
+    expect(rerankWithoutEmbed.items.length).toBeGreaterThan(0);
+
+    // 5) embedding 超时时（<= 250 卡 + 健康 decisionClient）优先回落 catalogScan，且缺文件不拖垮其余卡片、分块落库有检查点
+    let missingFileHandled = false;
+    await ctx.tools.write(
+      "episodes/2026/11/20/ep-deleted.md",
+      "---\ntitle: 将被删除\nkind: episode\n---\n临时正文。\n",
+    );
+    await fs.rm(path.join(ctx.dataDir, "memory", "episodes/2026/11/20/ep-deleted.md"));
+
+    // 5a: 向量超时 -> 回落全卡目录直扫命中零字面重叠卡
+    const timeoutEmbed: EmbeddingClient = {
+      modelKey: "mock:timeout-emb",
+      async embed() {
+        throw new Error("timeout");
+      },
+    };
+    const catalogFallbackHit = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-emb-timeout",
+      turnId: "t-emb-timeout",
+      query: "毫无字面重叠的间接询问",
+      embedding: timeoutEmbed,
+      decisionClient: {
+        async decide(req) {
+          const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+          for (const k of Object.keys(req.questions)) {
+            if (k === "needs_memory") continue;
+            const line = req.input.split("\n").find((l) => l.startsWith(`[${k}] `));
+            answers[k] = { noul: line?.includes("约定原话") ? 0.91 : 0.05 };
+          }
+          return { answers, backend: "mock-cat-fb" };
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { catalogScanMaxCards: 250 },
+    });
+    expect(catalogFallbackHit.usedDecisionGate).toBe(true);
+    expect(catalogFallbackHit.items.some((i) => i.path === "favorite/2026-11-20-promise.md")).toBe(true);
+
+    // 5b: 多分块批量嵌入（>16 张卡）即使第 2 块失败，第 1 块已持久化进 card_embeddings，且磁盘缺失文件不报错
+    for (let i = 0; i < 18; i++) {
+      await ctx.tools.write(
+        `episodes/2026/11/18/ep-batch-${i}.md`,
+        `---\ntitle: 批量卡片${i}\nkind: episode\ncreated: 2026-11-18\n---\n内容编号 ${i}。\n`,
+      );
+    }
+    let batchChunkCalls = 0;
+    const flakyBatchEmbed: EmbeddingClient = {
+      modelKey: "mock:flaky-batch",
+      async embed() {
+        return new Float32Array([1, 0]);
+      },
+      async embedBatch(texts) {
+        batchChunkCalls++;
+        if (batchChunkCalls === 2) {
+          throw new Error("chunk 2 rate limited");
+        }
+        return texts.map(() => new Float32Array([1, 0]));
+      },
+    };
+    await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-batch-ckpt",
+      turnId: "t-batch-ckpt",
+      query: "批量卡片",
+      embedding: flakyBatchEmbed,
+    });
+    const savedEmbCount = (
+      ctx.db
+        .query("SELECT COUNT(*) AS cnt FROM card_embeddings WHERE model_key = 'mock:flaky-batch'")
+        .get() as { cnt: number }
+    ).cnt;
+    missingFileHandled = savedEmbCount === 16;
+    expect(missingFileHandled).toBe(true);
+
+    // 6) candidatePoolLimit 不得挤掉 daily_recent；且 reranker/gate 失败时 applyRuleFallback 守住 0.35 向量门槛
+    const unitEmbed: EmbeddingClient = {
+      modelKey: "mock:unit-vec",
+      async embed() {
+        return new Float32Array([1, 0]);
+      },
+      async embedBatch(texts) {
+        return texts.map((t) =>
+          t.includes("弱相关") ? new Float32Array([0.28, Math.sqrt(1 - 0.28 * 0.28)]) : new Float32Array([1, 0]),
+        );
+      },
+    };
+    await ctx.tools.write(
+      "episodes/2026/11/01/ep-weak-vec.md",
+      "---\ntitle: 弱相关卡\nkind: episode\ncreated: 2026-11-01\n---\n这条是弱相关测试内容。\n",
+    );
+    await ctx.tools.write(
+      "episodes/2026/11/20/ep-recent-daily.md",
+      "---\ntitle: 今日刚发生\nkind: episode\ncreated: 2026-11-20\n---\n今天刚刚聊过的新鲜日常。\n",
+    );
+    ctx.clock.setTime(Date.parse("2026-11-20T18:00:00+08:00"));
+    let sawRecentDailyInGate = false;
+    await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-daily-preserve",
+      turnId: "t-daily-preserve",
+      query: "随便聊聊",
+      embedding: unitEmbed,
+      decisionClient: {
+        async decide(req) {
+          sawRecentDailyInGate = req.input.includes("ep-recent-daily.md");
+          return { answers: { needs_memory: { noul: 0.1 } }, backend: "mock" };
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { candidatePool: 6, recentDailyWindowHours: 72 },
+    });
+    expect(sawRecentDailyInGate).toBe(true);
+
+    // 7) reranker 门控失败绝不绕过 needs_memory 放行，且降级过滤 0.28 弱向量；reranker 失败则回退到 decisionClient 评分与 1 跳
+    const gateRejectFallback = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-gate-fail",
+      turnId: "t-gate-fail",
+      query: "弱相关测试",
+      embedding: unitEmbed,
+      reranker: {
+        modelKey: "mock:rr-high",
+        async rerank(_q, docs) {
+          return docs.map((_, index) => ({ index, relevanceScore: 0.99 }));
+        },
+      },
+      decisionClient: {
+        async decide() {
+          throw new Error("needs_memory gate timed out");
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { catalogScanMaxCards: 0, candidatePool: 30 },
+    });
+    expect(gateRejectFallback.timedOut).toBe(true);
+    expect(gateRejectFallback.usedDecisionGate).toBe(false);
+    expect(gateRejectFallback.items.some((i) => i.path === "episodes/2026/11/01/ep-weak-vec.md")).toBe(
+      false,
+    );
+
+    let decFallbackSawCardRelevance = false;
+    const rerankFailUsesDecision = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-rr-fail",
+      turnId: "t-rr-fail",
+      query: "旧日记录",
+      embedding: unitEmbed,
+      reranker: {
+        modelKey: "mock:rr-down",
+        async rerank() {
+          throw new Error("reranker down");
+        },
+      },
+      decisionClient: {
+        async decide(req) {
+          if (Object.keys(req.questions).some((k) => k.startsWith("c"))) {
+            decFallbackSawCardRelevance = true;
+          }
+          const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+          for (const k of Object.keys(req.questions)) {
+            if (k === "needs_memory") continue;
+            const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+            answers[k] = { noul: block?.includes("ep-v1-old.md") ? 0.92 : 0.05 };
+          }
+          return { answers, backend: "mock" };
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      recallConfig: {
+        candidatePool: 30,
+        multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
+      },
+    });
+    expect(decFallbackSawCardRelevance).toBe(true);
+    expect(rerankFailUsesDecision.timedOut).toBe(false);
+    expect(rerankFailUsesDecision.items.map((i) => i.path)).toEqual([
+      "episodes/2026/11/19/ep-v1-old.md",
+    ]);
+
+    // 8) hop0PoolAnchors 按首跳分数选锚点并注入 <selected_evidence>；预算已满时早停跳过 1 跳 LLM 调用
+    let anchorSawSelectedEvidence = false;
+    let anchorPickedHighScore = false;
+    const anchorHopRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-anchor-score",
+      turnId: "t-anchor-score",
+      query: "旧日",
+      embedding: unitEmbed,
+      decisionClient: {
+        async decide(req) {
+          if ("needs_memory" in req.questions) {
+            const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+            for (const k of Object.keys(req.questions)) {
+              if (k === "needs_memory") continue;
+              const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+              // ep-v1-old 给 0.29（近阈值但 < 0.30），其余给 0.02
+              answers[k] = { noul: block?.includes("ep-v1-old.md") ? 0.29 : 0.02 };
+            }
+            return { answers, backend: "mock" };
+          }
+          anchorSawSelectedEvidence = req.input.includes("<selected_evidence>");
+          anchorPickedHighScore = req.input.includes("旧日记录");
+          const answers: Record<string, { noul: number }> = {};
+          for (const k of Object.keys(req.questions)) {
+            const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+            answers[k] = { noul: block?.includes("2026-11-20-promise.md") ? 0.95 : 0.05 };
+          }
+          return { answers, backend: "mock" };
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { candidatePool: 30 },
+    });
+    expect(anchorSawSelectedEvidence).toBe(true);
+    expect(anchorPickedHighScore).toBe(true);
+    expect(anchorHopRes.items.some((i) => i.path === "favorite/2026-11-20-promise.md")).toBe(true);
+
+    // 预算满时跳过 Step 2.8 不发第二跳请求
+    await ctx.tools.write(
+      "episodes/2026/11/20/ep-long-anchor.md",
+      `---\ntitle: 超长锚点\nkind: episode\ncreated: 2026-11-20\n---\n${"很长的故事内容。".repeat(300)}，关联 [[约定原话]]。\n`,
+    );
+    let hopCallsOnBudgetFull = 0;
+    const budgetFullRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-budget-full",
+      turnId: "t-budget-full",
+      query: "超长锚点",
+      embedding: unitEmbed,
+      decisionClient: {
+        async decide(req) {
+          if ("needs_memory" in req.questions) {
+            const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+            for (const k of Object.keys(req.questions)) {
+              if (k === "needs_memory") continue;
+              const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+              answers[k] = { noul: block?.includes("ep-long-anchor.md") ? 0.95 : 0.05 };
+            }
+            return { answers, backend: "mock" };
+          }
+          hopCallsOnBudgetFull++;
+          return { answers: {}, backend: "mock" };
+        },
+      },
+      promptsDir: PROMPTS_DIR,
+      charBudget: 400,
+      recallConfig: { candidatePool: 30 },
+    });
+    expect(hopCallsOnBudgetFull).toBe(0);
+    expect(budgetFullRes.hopStoppedReason).toBe("budget_full");
   });
 });

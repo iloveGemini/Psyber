@@ -199,14 +199,24 @@ describe("闲聊回放召回评测框架（离线合成夹具）", () => {
     // 改回 quiet 测基线报告
     updatedGold.find((g) => g.turnId === "t-tired")!.momentClass = "quiet";
 
-    // 4. runEvalVariant
+    // 4. runEvalVariant (含 2h 会话去重验证：同 sessionId 连续两轮回指同一张卡时，第 2 轮应命中去重不再重复召回)
+    updatedGold.push({
+      ...kingGold,
+      turnId: "t-king-repeat",
+      seq: kingGold.seq + 10,
+      createdAt: kingGold.createdAt + 60_000,
+    });
     const report = await runEvalVariant({
       dataDir: ctx.dataDir,
       timeZone: "Asia/Shanghai",
       variant: { name: "baseline" },
       gold: updatedGold,
     });
-    expect(report.metrics.callbackContHitAt5).toBe(1);
+    expect(report.metrics.callbackContHitAt5).toBeCloseTo(0.5, 2);
+    expect(report.turns.find((t) => t.turnId === "t-king")?.recalledPaths).toEqual([
+      "threads/myth/king.md",
+    ]);
+    expect(report.turns.find((t) => t.turnId === "t-king-repeat")?.recalledPaths).toEqual([]);
     expect(report.metrics.quietCount).toBe(1);
     const table = formatComparisonTable([report]);
     expect(table).toContain("baseline");

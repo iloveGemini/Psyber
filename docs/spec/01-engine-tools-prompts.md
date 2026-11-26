@@ -64,7 +64,7 @@ export interface ModelRef {
 | `chat`（主对话） | 输出达到上限截断（`stopReason === "length"`） | 若未产出任何正文、表达或分享，不落盘空白回复，推 `turn.error { code: "PROVIDER_ERROR", retryable: true }` 提示调大 `maxTokens` 或降低思考深度；若已流式输出部分正文则正常落盘并标 `metadata.truncated = true` |
 | `memory_task`（写作轮） | 写作阶段模型错误 / 超时 / 输出截断（`stopReason === "length"`）或仅输出思考无正文与工具调用 | **严格回滚本次未提交的磁盘改动，不推进 `task_cursors`**，记录告警日志，等待下次触发重试 |
 | `memory_task`（Ring 1.5 复核） | 复核/修订调用超时、报错或 JSON 不可解析 | **非阻塞降级**：仅记录告警日志，**绝不回滚阶段 A 已落盘的合法卡片**，正常提交阶段 A 改动并推进游标 |
-| `embedding` / `reranker` | 未配置 / 超时（`> 2500ms`）/ 报错 | Ring 1 静默降级为 SQLite FTS5 2-gram 字面检索（Ring 1.5 按需叠加 IDF/单字 `LIKE`），绝不阻塞主对话 |
+| `embedding` / `reranker` | 未配置 / 超时（`embedding > 2500ms`、`reranker > 3000ms`）/ 报错 | Ring 1 静默降级为 SQLite FTS5 2-gram 字面检索或规则/Decision 精排兜底，绝不阻塞主对话 |
 
 ---
 
@@ -417,6 +417,7 @@ export interface RegisteredTool {
 | `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
 | `prompts/genesis.md` | v5 | 创世中性开局 | Dynamic Tail（`self.md` `name` 为空时拼入） |
 | `prompts/wake.md` | v3 | 主动唤醒（含 `[SILENT]` 沉默协议） | Dynamic Tail（`wake` 模式拼入） |
+| `prompts/recall-gate.md` | v3 | 召回门控、精排与 1 跳双链早停指令（含双边判据） | `decision` 分类器槽位（不进入 Psyber 主对话上下文） |
 
 ### 5.1 条件模式触发与退出协议
 

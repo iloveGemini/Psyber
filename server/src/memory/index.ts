@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import YAML from "yaml";
 import type { Clock } from "../core/clock.ts";
+import { stripFrontmatter } from "../core/prompts.ts";
 import { effectiveStatus, parseCardMarkdown } from "./frontmatter.ts";
 import { buildSafeFtsQuery, tokenizeForFts } from "./fts.ts";
 
@@ -74,8 +75,8 @@ export function extractMarkdownLinks(body: string, srcPath?: string): ExtractedC
     if (norm) add("wiki", norm);
   }
 
-  // 2) [文本](relative/path.md)
-  const mdRe = /(?<!!)\[[^\]]*\]\(([^)\s]+)\)/g;
+  // 2) [文本](relative/path.md) 或 [文本](relative/path.md "title")
+  const mdRe = /(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
   while ((m = mdRe.exec(body)) !== null) {
     let raw = m[1].trim();
     if (
@@ -89,8 +90,10 @@ export function extractMarkdownLinks(body: string, srcPath?: string): ExtractedC
     raw = raw.split("#")[0]?.split("?")[0]?.trim() ?? "";
     if (!raw.endsWith(".md")) continue;
     raw = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (raw.startsWith("/") || raw.includes("..")) continue;
-    add("path", raw);
+    if (!raw || raw.startsWith("/") || /^[a-zA-Z]:/.test(raw)) continue;
+    const segs = raw.split("/").filter(Boolean);
+    if (segs.length === 0 || segs.some((s) => s === "." || s === "..")) continue;
+    add("path", segs.join("/"));
   }
 
   return out;
@@ -219,7 +222,11 @@ export class MemoryIndex {
 
   /** 增量同步单张 Markdown 卡片到 card_index + card_fts */
   async reindexFile(relPath: string): Promise<void> {
-    if (!relPath.endsWith(".md")) return;
+    await this.reindexFileInternal(relPath);
+  }
+
+  private async reindexFileInternal(relPath: string): Promise<boolean> {
+    if (!relPath.endsWith(".md")) return false;
     const absPath = path.join(this.memoryDir, relPath);
     let content: string;
     let stat: Awaited<ReturnType<typeof fs.stat>>;
@@ -227,7 +234,7 @@ export class MemoryIndex {
       [content, stat] = await Promise.all([fs.readFile(absPath, "utf8"), fs.stat(absPath)]);
     } catch {
       this.removeFromIndex(relPath);
-      return;
+      return false;
     }
 
     const contentHash = crypto.createHash("sha256").update(content).digest("hex");
@@ -236,7 +243,7 @@ export class MemoryIndex {
       .get(relPath) as { content_hash: string; access_count: number; last_accessed: number | null } | null;
 
     if (existing && existing.content_hash === contentHash) {
-      return;
+      return false;
     }
 
     const parsed = parseCardMarkdown(
@@ -308,6 +315,7 @@ export class MemoryIndex {
       }
     });
     tx();
+    return true;
   }
 
   removeFromIndex(relPath: string): void {
@@ -322,7 +330,11 @@ export class MemoryIndex {
 
   /** 启动对账 / 全量重建索引（跳过 .git 与非 .md 文件） */
   async reindexAll(): Promise<{ indexed: number; removed: number }> {
+    const linksBackfilled = Boolean(
+      this.db.query("SELECT 1 FROM task_cursors WHERE task_key = 'index:card_links_v2'").get(),
+    );
     const found = new Set<string>();
+    const updatedInWalk = new Set<string>();
     const walk = async (dir: string, prefix: string): Promise<void> => {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
@@ -333,7 +345,9 @@ export class MemoryIndex {
           await walk(abs, rel);
         } else if (entry.isFile() && entry.name.endsWith(".md")) {
           found.add(rel);
-          await this.reindexFile(rel);
+          if (await this.reindexFileInternal(rel)) {
+            updatedInWalk.add(rel);
+          }
         }
       }
     };
@@ -348,9 +362,19 @@ export class MemoryIndex {
       }
     }
 
-    // 兼容从 v1 升级到 v2 的既有库：若 card_links 尚无数据但已有卡片，无损补建链接索引（不碰 card_embeddings）
-    if (found.size > 0 && !this.db.query("SELECT 1 FROM card_links LIMIT 1").get()) {
-      await this.backfillCardLinks(Array.from(found));
+    // 兼容从 v1 升级到 v2 的既有库：用 task_cursors 标记是否完成过回填，防止个别文件先写入导致其余旧卡漏回填或零链接库每次重启全量重扫
+    if (!linksBackfilled) {
+      const toBackfill = Array.from(found).filter((p) => !updatedInWalk.has(p));
+      if (toBackfill.length > 0) {
+        await this.backfillCardLinks(toBackfill);
+      }
+      this.db
+        .query(
+          `INSERT INTO task_cursors (task_key, last_event_id, meta_json, updated_at)
+           VALUES ('index:card_links_v2', 'v2', NULL, ?)
+           ON CONFLICT(task_key) DO UPDATE SET updated_at = excluded.updated_at`,
+        )
+        .run(this.clock.now());
     }
 
     this.expireOverdueStateCards();
@@ -358,24 +382,26 @@ export class MemoryIndex {
   }
 
   private async backfillCardLinks(relPaths: readonly string[]): Promise<void> {
-    const extracted: Array<{ srcPath: string; links: ExtractedCardLink[] }> = [];
-    for (const rel of relPaths) {
-      try {
-        const content = await fs.readFile(path.join(this.memoryDir, rel), "utf8");
-        const links = extractMarkdownLinks(content, rel);
-        if (links.length > 0) {
-          extracted.push({ srcPath: rel, links });
+    const extracted = await Promise.all(
+      relPaths.map(async (rel) => {
+        try {
+          const content = await fs.readFile(path.join(this.memoryDir, rel), "utf8");
+          // 与 reindexFile 保持一致：先剥除 YAML Frontmatter，仅扫描正文链接
+          const links = extractMarkdownLinks(stripFrontmatter(content), rel);
+          return { srcPath: rel, links };
+        } catch {
+          return null;
         }
-      } catch {
-        // 忽略读取异常
-      }
-    }
-    if (extracted.length === 0) return;
+      }),
+    );
+    const deleteLinks = this.db.query("DELETE FROM card_links WHERE src_path = ?");
     const insertLink = this.db.query(
       "INSERT OR IGNORE INTO card_links (src_path, target_ref, link_kind) VALUES (?, ?, ?)",
     );
     const tx = this.db.transaction(() => {
       for (const item of extracted) {
+        if (!item) continue;
+        deleteLinks.run(item.srcPath);
         for (const l of item.links) {
           insertLink.run(item.srcPath, l.targetRef, l.linkKind);
         }

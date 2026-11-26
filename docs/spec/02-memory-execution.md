@@ -241,7 +241,7 @@ CREATE TABLE recall_traces (
   query         TEXT NOT NULL,
   activity_hint TEXT,
   card_path     TEXT NOT NULL,
-  track         TEXT NOT NULL,                 -- same_activity | cross_vector | daily_recent
+  track         TEXT NOT NULL,                 -- same_activity | cross_vector | daily_recent | linked_hop
   sem_score     REAL NOT NULL DEFAULT 0,
   kw_score      REAL NOT NULL DEFAULT 0,
   rerank_score  REAL,
@@ -291,6 +291,16 @@ CREATE TABLE media_assets (
   created_at          INTEGER NOT NULL
 );
 CREATE INDEX idx_media_cleanup ON media_assets(origin, pinned, expired, created_at);
+
+-- 8. 卡片双向链接可重建派生索引（Migration v2，供 1 跳轻量多跳召回使用，唯一真相仍在 memory/*.md）
+CREATE TABLE card_links (
+  src_path    TEXT NOT NULL,
+  target_ref  TEXT NOT NULL,
+  link_kind   TEXT NOT NULL,                   -- wiki | path
+  PRIMARY KEY (src_path, target_ref, link_kind)
+);
+CREATE INDEX idx_card_links_src    ON card_links(src_path);
+CREATE INDEX idx_card_links_target ON card_links(link_kind, target_ref);
 ```
 
 ### 4.2 零依赖中文分词策略（解决 SQLite `unicode61` 中文无法切词）
@@ -309,9 +319,9 @@ SQLite 内置 `unicode61` 不切分无空格中文，且 `trigram` 无法命中�
 
 | 触发时机 | 行为 |
 | :--- | :--- |
-| `write` / `edit` 落盘 `memory/**/*.md` | **同步**计算 SHA-256 `content_hash`，若变化则在单事务内刷新 `card_index` + `card_fts`（耗时 `< 3ms`；**若落盘路径匹配 `entities/<category>/*.md`，索引器同步读取 `entities/REGISTRY.yaml`，将该实体声明的 `name`、`aliases` 与 `relation` 自动拼入 `trigger_tokens` 分词索引**，彻底解决口语称谓/别名搜不到实体问题）；同时将 `{ path, contentHash }` 推入异步单并发向量补齐队列（若 `slots.embedding` 已配置），**绝不阻塞工具返回**。`REGISTRY.yaml` 变更仅刷新内存空间描述向量缓存，不进 `card_index`。 |
-| `MemoryTx` 异常回滚 | 对回滚还原的每个 `touchedMemoryPaths` 调用 `reindexFile(path)`（新建被删文件则 `removeFromIndex(path)`，单事务清除 `card_index` + `card_fts` + `card_embeddings`），保证磁盘与索引 100% 一致。 |
-| 服务启动 & `bun run memory:reindex` | 扫描 `<dataDir>/memory/**/*.md`（跳过 `.git/` 与 `REGISTRY.yaml`）：新增/哈希变化的文件刷新索引，磁盘已删但表里残留的孤儿路径同时从 `card_index` / `card_fts` / `card_embeddings` 清除；向量仅对 `card_embeddings` 中缺失当前 `model_key + content_hash` 的卡片异步补算，不阻塞 HTTP 启动。 |
+| `write` / `edit` 落盘 `memory/**/*.md` | **同步**计算 SHA-256 `content_hash`，若变化则在单事务内刷新 `card_index` + `card_fts` + `card_links`（提取正文 `[[短标题]]` 与相对 `.md` 路径，跳过 YAML Frontmatter；耗时 `< 3ms`；**若落盘路径匹配 `entities/<category>/*.md`，索引器同步读取 `entities/REGISTRY.yaml`，将该实体声明的 `name`、`aliases` 与 `relation` 自动拼入 `trigger_tokens` 分词索引**，彻底解决口语称谓/别名搜不到实体问题）；同时将 `{ path, contentHash }` 推入异步单并发向量补齐队列（若 `slots.embedding` 已配置），**绝不阻塞工具返回**。`REGISTRY.yaml` 变更仅刷新内存空间描述向量缓存，不进 `card_index`。 |
+| `MemoryTx` 异常回滚 | 对回滚还原的每个 `touchedMemoryPaths` 调用 `reindexFile(path)`（新建被删文件则 `removeFromIndex(path)`，单事务清除 `card_index` + `card_fts` + `card_embeddings` + `card_links`），保证磁盘与索引 100% 一致。 |
+| 服务启动 & `bun run memory:reindex` | 扫描 `<dataDir>/memory/**/*.md`（跳过 `.git/` 与 `REGISTRY.yaml`）：新增/哈希变化的文件刷新索引，磁盘已删但表里残留的孤儿路径同时从 `card_index` / `card_fts` / `card_embeddings` / `card_links` 清除；v1→v2 升级时由 `task_cursors['index:card_links_v2']` 保障全量无遗漏补建链接索引；向量仅对 `card_embeddings` 中缺失当前 `model_key + content_hash` 的卡片异步补算，不阻塞 HTTP 启动。 |
 | 索引层过期巡检（`expireOverdueStateCards`） | 每次定时心跳、双轨召回、`glob`/`grep` 及 §6.1 状态对账前，先将 `space = 'daily' AND kind = 'state' AND status = 'active' AND expires_at <= Clock.now()` 的 `card_index.status` 置为 `faded`（见 §8.1）。 |
 
 ---
@@ -476,7 +486,7 @@ const FILLER_EXACT = new Set([
      - **离线/超时降级模式**（`embedding` 未配置、报错或超时 `> 2500ms`）：$w_{\text{sem}} = 0,\ w_{\text{kw}} = 1.0$；
    - 取一阶段 Top-12，按当前批最大值归一化为 `rrf_norm ∈ [0, 1]`。
 2. **二阶段可选 Reranker 精排**：
-   - 若 `slots.reranker` 已配置，以 `2500ms` 超时并发调用 Reranker（输入 `query` + 每张候选卡的 `标题 + 召回提示 + 正文前 600 字`），得 `rerank_score ∈ [0, 1]`，综合分 `final = 0.70 * rerank_score + 0.30 * rrf_norm`；
+   - 若 `slots.reranker` 已配置，以 `rerankTimeoutMs`（默认 `3000ms`）超时并发调用 Reranker（输入 `query` + 每张候选卡的 `标题 + 召回提示 + 正文前 600 字`），得 `rerank_score ∈ [0, 1]`，综合分 `final = 0.70 * rerank_score + 0.30 * rrf_norm`；
    - 未配置、报错或超时 → 静默降级 `final = rrf_norm`，绝不阻塞主对话。
 3. **跨目录高门槛与去重排序（防无关串场，最多选 2 张）**：
    - 先过滤通过以下任一门槛的候选：① 正常模式 `sem_score >= 0.65`（配置了 Reranker 且可用时亦满足 `rerank_score >= 0.60`）；② 降级模式或强专名命中 `kw_score >= 0.55`；

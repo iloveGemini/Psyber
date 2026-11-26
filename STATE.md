@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（新增 `card_links` 双向双链派生索引与轻量 1 跳扩展 + 证据充分性早停；双协议向量/精排客户端与回放盲测收官）。
+> 最后更新：2026-11-26（完成最近两轮召回/向量/双链代码的审查缺陷修复与契约同步，补充 4 组回归用例）。
 
 ## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与向量+Decision 召回管线已落地
 
 ### 已完成
+- **召回/双链/客户端审查缺陷全量修复与契约同步（`docs/` + `server/`，2026-11-26）**：
+  - 配置与校验：`config.ts` 新增 `mergeRecallConfig` 深度合并 `multiHop`（`neighborThreshold` 默认按 `Math.max(0.4, rerank.threshold)` 生效）；`admin_routes.ts` 补齐 `PATCH /settings` 对超时/阈值/多跳字段校验与深度合并。
+  - 路由与客户端：`llm/decision.ts` 对重复题干去重并动态放大 `maxTokens`；`llm/embedding.ts` / `llm/reranker.ts` / `llm/router.ts` 修复 `openai-compat` 错路、未配 `baseUrl` 默认跳 SiliconFlow、异常响应静默空返回、孤立代理项与非有限向量、预中止 `AbortSignal` 穿透及 `Dynamic*Client` 悬空校验；`recall_eval.ts` / `eval_recall_replay.ts` 补齐虚拟事件 `seq`、并发缓存加载锁、中止重试退避与脚本 `nowMs` 参数。
+  - 索引与召回：`memory/index.ts` 用 `task_cursors['index:card_links_v2']` 保障 v1→v2 无遗漏回填且剥离 Frontmatter；`memory/recall.ts` 修复 `rerankerActive` 门控失败回退、0.35 向量兜底门槛、`daily_recent` 截断、单卡缺失容错与 16 卡分块落库、1 跳锚点打分/`<selected_evidence>`/预算早停及正则空节解析；同步更新 `Spec 01`/`Spec 02` 与回归单测。
 - **基于 `[[短标题]]` 双链的轻量 1 跳扩展与证据充分性早停（`prompts/` + `docs/` + `server/`，2026-11-26）**：
   - 数据库迁移 v2 新增可重建派生表 `card_links`；`MemoryIndex` 新增 `extractMarkdownLinks`（解析 `[[短标题]]` 与相对 `.md` 链接）与 `findLinkedNeighbors`（双向出/入边查询、多锚点共指优先、兼容 v1 库无损回填）。
   - `prompts/recall-gate.md` 升级至 v3，保留原两节不变以复用首跳缓存，新增 `# evidence_sufficient` 早停与 `# hop_neighbor_relevance` 邻卡双边判据；`memory/recall.ts` 新增 `linked_hop` 轨道（`[关联延伸]`），在首跳未满 5 张且存在邻卡时至多发起 1 次受预算约束的并行判断（`sufficientThreshold=0.75`、`neighborThreshold=0.40`、`maxNeighbors=6`），超时/异常绝不丢弃首跳结果。
@@ -44,8 +48,8 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
-- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位；大记忆库（>250 张活跃卡）阶段再按数据评估接入 Embedding 粗筛。
+- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（22 文件 / 92 用例 / 1253 断言）全部通过。
+- **`server/`（2026-11-26）**：`bun run typecheck` 及 `scripts/eval_recall_replay.ts` 严格检查零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（22 文件 / 94 用例 / 1304 断言）全部通过。
 - **`app/`**：`2026-11-23` `AppDelegate.swift` 已通过 `swiftc -parse`；`1104b64` 与 `392d5c0` 前端改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

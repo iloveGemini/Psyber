@@ -259,7 +259,7 @@ interface EmbeddingCacheEntry {
  */
 export class CachedEmbeddingClient implements EmbeddingClient {
   private readonly cache = new Map<string, Float32Array>();
-  private loaded = false;
+  private loadPromise: Promise<void> | null = null;
   public hits = 0;
   public misses = 0;
 
@@ -276,30 +276,33 @@ export class CachedEmbeddingClient implements EmbeddingClient {
     return this.inner.isConfigured ? this.inner.isConfigured() : true;
   }
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const raw = await fs.readFile(this.cachePath, "utf8");
-      for (const line of raw.split(/\r?\n/)) {
-        if (!line.trim()) continue;
+  private ensureLoaded(): Promise<void> {
+    if (!this.loadPromise) {
+      this.loadPromise = (async () => {
         try {
-          const entry = JSON.parse(line) as EmbeddingCacheEntry;
-          if (entry?.key && entry?.b64 && entry?.dim > 0) {
-            const buf = Buffer.from(entry.b64, "base64");
-            if (buf.byteLength === entry.dim * 4) {
-              const vec = new Float32Array(entry.dim);
-              new Uint8Array(vec.buffer).set(buf);
-              this.cache.set(entry.key, vec);
+          const raw = await fs.readFile(this.cachePath, "utf8");
+          for (const line of raw.split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            try {
+              const entry = JSON.parse(line) as EmbeddingCacheEntry;
+              if (entry?.key && entry?.b64 && entry?.dim > 0) {
+                const buf = Buffer.from(entry.b64, "base64");
+                if (buf.byteLength === entry.dim * 4) {
+                  const vec = new Float32Array(entry.dim);
+                  new Uint8Array(vec.buffer).set(buf);
+                  this.cache.set(entry.key, vec);
+                }
+              }
+            } catch {
+              // 忽略损坏行
             }
           }
         } catch {
-          // 忽略损坏行
+          // 首次无缓存文件
         }
-      }
-    } catch {
-      // 首次无缓存文件
+      })();
     }
+    return this.loadPromise;
   }
 
   private hashText(text: string, opts?: EmbeddingOptions): string {
@@ -315,13 +318,34 @@ export class CachedEmbeddingClient implements EmbeddingClient {
       .digest("hex");
   }
 
-  private async callWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+  private async sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error("Aborted during retry backoff");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new Error("Aborted during retry backoff"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private async callWithRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 5; attempt++) {
+      if (signal?.aborted) {
+        throw lastErr ?? new Error("Aborted");
+      }
       try {
         return await fn();
       } catch (err) {
         lastErr = err;
+        if (signal?.aborted) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         if (
           msg.includes("429") ||
@@ -332,7 +356,7 @@ export class CachedEmbeddingClient implements EmbeddingClient {
         ) {
           const secMatch = /retry in\s+(\d+)\s*s/i.exec(msg);
           const waitMs = (secMatch ? Number(secMatch[1]) + 2 : (attempt + 1) * 8) * 1000;
-          await new Promise((r) => setTimeout(r, waitMs));
+          await this.sleepAbortable(waitMs, signal);
           continue;
         }
         throw err;
@@ -377,7 +401,13 @@ export class CachedEmbeddingClient implements EmbeddingClient {
           res.push(await this.inner.embed(t, opts));
         }
         return res;
-      });
+      }, opts?.signal);
+
+      if (computed.length !== missIndices.length) {
+        throw new Error(
+          `Embedding client returned ${computed.length} vectors for ${missIndices.length} inputs`,
+        );
+      }
 
       const lines: string[] = [];
       const nowIso = new Date().toISOString();
@@ -411,7 +441,7 @@ interface RerankCacheEntry {
  */
 export class CachedRerankerClient implements RerankerClient {
   private readonly cache = new Map<string, RerankItem[]>();
-  private loaded = false;
+  private loadPromise: Promise<void> | null = null;
   public hits = 0;
   public misses = 0;
 
@@ -428,25 +458,28 @@ export class CachedRerankerClient implements RerankerClient {
     return this.inner.isConfigured ? this.inner.isConfigured() : true;
   }
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const raw = await fs.readFile(this.cachePath, "utf8");
-      for (const line of raw.split(/\r?\n/)) {
-        if (!line.trim()) continue;
+  private ensureLoaded(): Promise<void> {
+    if (!this.loadPromise) {
+      this.loadPromise = (async () => {
         try {
-          const entry = JSON.parse(line) as RerankCacheEntry;
-          if (entry?.key && Array.isArray(entry.results)) {
-            this.cache.set(entry.key, entry.results);
+          const raw = await fs.readFile(this.cachePath, "utf8");
+          for (const line of raw.split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            try {
+              const entry = JSON.parse(line) as RerankCacheEntry;
+              if (entry?.key && Array.isArray(entry.results)) {
+                this.cache.set(entry.key, entry.results);
+              }
+            } catch {
+              // 忽略损坏行
+            }
           }
         } catch {
-          // 忽略损坏行
+          // 首次无缓存文件
         }
-      }
-    } catch {
-      // 首次无缓存文件
+      })();
     }
+    return this.loadPromise;
   }
 
   private hashRequest(query: string, documents: string[]): string {
@@ -470,11 +503,15 @@ export class CachedRerankerClient implements RerankerClient {
     let results: RerankItem[] | null = null;
     let lastErr: unknown;
     for (let attempt = 0; attempt < 5; attempt++) {
+      if (opts?.signal?.aborted) {
+        throw lastErr ?? new Error("Aborted");
+      }
       try {
         results = await this.inner.rerank(query, documents, { signal: opts?.signal });
         break;
       } catch (err) {
         lastErr = err;
+        if (opts?.signal?.aborted) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         if (
           msg.includes("429") ||
@@ -485,7 +522,17 @@ export class CachedRerankerClient implements RerankerClient {
         ) {
           const secMatch = /retry in\s+(\d+)\s*s/i.exec(msg);
           const waitMs = (secMatch ? Number(secMatch[1]) + 2 : (attempt + 1) * 8) * 1000;
-          await new Promise((r) => setTimeout(r, waitMs));
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              opts?.signal?.removeEventListener("abort", onAbort);
+              resolve();
+            }, waitMs);
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(new Error("Aborted during rerank retry backoff"));
+            };
+            opts?.signal?.addEventListener("abort", onAbort, { once: true });
+          });
           continue;
         }
         throw err;
@@ -1559,14 +1606,18 @@ export async function runEvalVariant(opts: {
       }
       const latencyMs = performance.now() - t0;
 
-      // 写入虚拟 active 助手事件以保持 2h 会话去重与线上一致
+      // 写入虚拟 active 助手事件（带单调递增 seq 满足 NOT NULL 约束）以保持 2h 会话去重与线上一致
+      const maxSeqRow = snap.db
+        .query("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events")
+        .get() as { max_seq: number } | null;
+      const nextSeq = (maxSeqRow?.max_seq ?? 0) + 1;
       snap.db
         .query(
           `INSERT OR IGNORE INTO events (
-            id, session_id, turn_id, role, kind, status, content, created_at
-          ) VALUES (?, ?, ?, 'assistant', 'chat', 'active', 'ok', ?)`,
+            id, seq, session_id, turn_id, role, kind, status, content, created_at
+          ) VALUES (?, ?, ?, ?, 'assistant', 'chat', 'active', 'ok', ?)`,
         )
-        .run(`eval-ast-${rec.turnId}`, rec.sessionId, rec.turnId, rec.createdAt + 1000);
+        .run(`eval-ast-${rec.turnId}`, nextSeq, rec.sessionId, rec.turnId, rec.createdAt + 1000);
 
       const gradeMap = new Map(rec.candidates.map((c) => [c.path, c.grade]));
       const recalledPaths = res.items.map((i) => i.path);

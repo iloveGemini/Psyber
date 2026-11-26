@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import YAML from "yaml";
 import type { Clock } from "../core/clock.ts";
 import { vagueWhen } from "../core/clock.ts";
-import { DEFAULT_RECALL_CONFIG, type RecallConfig } from "../core/config.ts";
+import { DEFAULT_RECALL_CONFIG, mergeRecallConfig, type RecallConfig } from "../core/config.ts";
 import { sanitizeUnicode, type DecisionClient, type DecisionQuestion } from "../core/decision.ts";
 import type { EmbeddingClient } from "../core/embedding.ts";
 import type { RerankerClient } from "../core/reranker.ts";
@@ -222,7 +222,8 @@ function parseQuestionSection(
   if (!section) return fallback;
 
   // 支持可选的 `## true` / `## false` 双边判据子节（向后兼容不含子节的旧版单段指令）
-  const subHeadingRe = /(?:^|\r?\n)##\s+(true|false)\s*\r?\n/gi;
+  // 使用 /m 行锚定而不吞掉后续换行，避免连续空标题或文末空标题漏匹配
+  const subHeadingRe = /^##\s+(true|false)[ \t]*\r?$/gim;
   const matches: Array<{ key: "true" | "false"; start: number; contentStart: number }> = [];
   let m: RegExpExecArray | null;
   while ((m = subHeadingRe.exec(section)) !== null) {
@@ -252,7 +253,7 @@ function parseQuestionSection(
 
 export function parseRecallGatePrompt(body: string): RecallGatePromptSpec {
   const topHeadingRe =
-    /(?:^|\r?\n)#\s+(needs_memory|card_relevance|evidence_sufficient|hop_neighbor_relevance)\s*\r?\n/g;
+    /^#\s+(needs_memory|card_relevance|evidence_sufficient|hop_neighbor_relevance)[ \t]*\r?$/gm;
   const sections = new Map<string, string>();
   const matches: Array<{ name: string; start: number; contentStart: number }> = [];
   let m: RegExpExecArray | null;
@@ -349,37 +350,25 @@ export async function recallMemories(opts: {
 }): Promise<RecallResult> {
   const { db, dataDir, index, clock, sessionId, turnId, query } = opts;
   const nowMs = clock.now();
-  const cfg: RecallConfig = {
-    ...DEFAULT_RECALL_CONFIG,
-    ...(opts.recallConfig ?? {}),
-    gate: {
-      ...DEFAULT_RECALL_CONFIG.gate!,
-      ...(opts.recallConfig?.gate ?? {}),
-    },
-    rerank: {
-      ...DEFAULT_RECALL_CONFIG.rerank!,
-      ...(opts.recallConfig?.rerank ?? {}),
-    },
-    multiHop: {
-      ...DEFAULT_RECALL_CONFIG.multiHop!,
-      ...(opts.recallConfig?.multiHop ?? {}),
-    },
-  };
+  const cfg = mergeRecallConfig(opts.recallConfig);
+  const clampTimeout = (raw: number | undefined, fallback: number): number =>
+    Math.max(100, Math.min(60_000, typeof raw === "number" && Number.isFinite(raw) ? raw : fallback));
   const budget = opts.charBudget ?? cfg.charBudget;
   const dedupWindowMs = cfg.dedupWindowMin * 60_000;
   const recentDailyWindowMs = cfg.recentDailyWindowHours * 3_600_000;
-  const embedTimeoutMs = cfg.embedTimeoutMs;
+  const embedTimeoutMs = clampTimeout(cfg.embedTimeoutMs, 2500);
   const gateEnabled = Boolean(cfg.gate?.enabled && opts.decisionClient);
   const embeddingActive = Boolean(opts.embedding && opts.embedding.isConfigured?.() !== false);
   const rerankerActive = Boolean(opts.reranker && opts.reranker.isConfigured?.() !== false);
   const gateThreshold = cfg.gate?.threshold ?? 0.35;
   const rerankThreshold = cfg.rerank?.threshold ?? 0.3;
-  const decisionTimeoutMs = cfg.decisionTimeoutMs ?? 3000;
-  const rerankTimeoutMs = cfg.rerankTimeoutMs ?? decisionTimeoutMs;
+  const decisionTimeoutMs = clampTimeout(cfg.decisionTimeoutMs, 3000);
+  const rerankTimeoutMs = clampTimeout(cfg.rerankTimeoutMs, decisionTimeoutMs);
   const queryWindowTurns = cfg.queryWindowTurns ?? 4;
   const candidatePoolLimit = cfg.candidatePool ?? 15;
   const catalogScanMaxCards = cfg.catalogScanMaxCards ?? 250;
   const ftsMinScore = cfg.ftsMinScore ?? 0.25;
+  const fallbackMinSemScore = cfg.embedMinScore ?? 0.35;
 
   if (!opts.activityHint && isBlankTurn(query)) {
     return { skipped: true, items: [], renderedBlock: null, gateScore: null, usedDecisionGate: false };
@@ -461,23 +450,41 @@ export async function recallMemories(opts: {
   let hopCardVecs: Map<string, Float32Array> | null = null;
   let hop0PoolAnchors: string[] = [];
 
-  const eligibleForCatalog = allActive.filter((r) => !recentPaths.has(r.path));
-  // 配置了向量模型时，直接走「纯向量 Top-15（含 1200 字正文语义）+ Decision 联合精排」，不被全卡目录直扫截胡；
-  // 未配置向量模型时，活跃卡 <= catalogScanMaxCards 才启用全卡目录直扫绕开 FTS5 字面漏召。
-  const shouldCatalogScan =
-    !embeddingActive &&
-    gateEnabled &&
-    opts.decisionClient &&
-    catalogScanMaxCards > 0 &&
-    eligibleForCatalog.length > 0 &&
-    eligibleForCatalog.length <= catalogScanMaxCards;
-
-  if (shouldCatalogScan && opts.decisionClient) {
+  const cardBodyCache = new Map<string, string | null>();
+  const readCardBody = async (relPath: string): Promise<string | null> => {
+    if (cardBodyCache.has(relPath)) return cardBodyCache.get(relPath)!;
     try {
-      const [promptInst, residentBlock] = await Promise.all([
+      const rawMd = await fs.readFile(path.join(memoryDir, relPath), "utf8");
+      const stripped = stripFrontmatter(rawMd);
+      cardBodyCache.set(relPath, stripped);
+      return stripped;
+    } catch {
+      cardBodyCache.set(relPath, null);
+      return null;
+    }
+  };
+
+  let cachedGateContextPromise: Promise<{
+    promptInst: RecallGatePromptSpec;
+    residentBlock: string | null;
+  }> | null = null;
+  const getGateBaseContext = () => {
+    if (!cachedGateContextPromise) {
+      cachedGateContextPromise = Promise.all([
         loadRecallGateInstructions(opts.promptsDir),
         loadResidentContextForGate(memoryDir),
-      ]);
+      ]).then(([promptInst, residentBlock]) => ({ promptInst, residentBlock }));
+    }
+    return cachedGateContextPromise;
+  };
+
+  const rowByPath = new Map<string, CardIndexRow>(allActive.map((r) => [r.path, r]));
+  const eligibleForCatalog = allActive.filter((r) => !recentPaths.has(r.path));
+
+  const runCatalogScan = async (): Promise<RecallResult | null> => {
+    if (!opts.decisionClient || eligibleForCatalog.length === 0) return null;
+    try {
+      const { promptInst, residentBlock } = await getGateBaseContext();
       const convLines = [
         ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 160)}`),
         `user: ${clipForGate(query, 320)}`,
@@ -523,10 +530,12 @@ export async function recallMemories(opts: {
       }
 
       const spaceKey = matchedActivitySlug ? `thread:${matchedActivitySlug}` : null;
+      const scoredCatalog: Array<{ row: CardIndexRow; score: number }> = [];
       const passed: CandidateEntry[] = [];
       for (let i = 0; i < eligibleForCatalog.length; i++) {
         const row = eligibleForCatalog[i];
         const score = res.answers[`c${i}`]?.noul ?? 0;
+        scoredCatalog.push({ row, score });
         if (score >= rerankThreshold) {
           passed.push({
             row,
@@ -540,13 +549,33 @@ export async function recallMemories(opts: {
       }
       passed.sort((a, b) => b.finalScore - a.finalScore);
       selected = passed.slice(0, 5);
+      scoredCatalog.sort((a, b) => b.score - a.score);
+      hop0PoolAnchors = scoredCatalog.slice(0, 2).map((x) => x.row.path);
+      return null;
     } catch (err) {
       timedOut = true;
       console.warn(
         `[psyber] recall catalog scan failed/timed out, falling back to rules:`,
         (err as Error).message,
       );
+      return null;
     }
+  };
+
+  // 配置了向量或独立精排模型时，跳过全卡目录直扫（避免截胡向量/精排路线）；
+  // 未配置二者且活跃卡 <= catalogScanMaxCards 时启用全卡目录直扫绕开 FTS5 字面漏召。
+  const canCatalogScan =
+    !rerankerActive &&
+    gateEnabled &&
+    Boolean(opts.decisionClient) &&
+    catalogScanMaxCards > 0 &&
+    eligibleForCatalog.length > 0 &&
+    eligibleForCatalog.length <= catalogScanMaxCards;
+  const shouldCatalogScan = !embeddingActive && canCatalogScan;
+
+  if (shouldCatalogScan) {
+    const skippedRes = await runCatalogScan();
+    if (skippedRes) return skippedRes;
   }
 
   if (!usedDecisionGate) {
@@ -633,32 +662,20 @@ export async function recallMemories(opts: {
               ),
             );
           } else {
-            const rawMd = await fs.readFile(path.join(memoryDir, row.path), "utf8");
-            const embedText = `${row.title}\n${row.when_to_recall ?? ""}\n${stripFrontmatter(rawMd).slice(0, 1200)}`;
+            const body = await readCardBody(row.path);
+            if (body === null) continue;
+            const embedText = sanitizeUnicode(`${row.title}\n${row.when_to_recall ?? ""}\n${body.slice(0, 1200)}`);
             missing.push({ row, text: embedText });
           }
         }
 
         if (missing.length > 0) {
-          const batchTimeout = Math.max(embedTimeoutMs, Math.min(60_000, embedTimeoutMs * Math.ceil(missing.length / 8)));
-          let newVecs: Float32Array[];
-          if (opts.embedding.embedBatch) {
-            newVecs = await opts.embedding.embedBatch(
-              missing.map((m) => m.text),
-              { signal: AbortSignal.timeout(batchTimeout), taskType: "document" },
-            );
-          } else {
-            newVecs = [];
-            for (const m of missing) {
-              newVecs.push(
-                await opts.embedding.embed(m.text, {
-                  signal: AbortSignal.timeout(embedTimeoutMs),
-                  taskType: "document",
-                }),
-              );
-            }
-          }
-
+          const batchTimeout = Math.max(
+            embedTimeoutMs,
+            Math.min(60_000, embedTimeoutMs * Math.ceil(missing.length / 8)),
+          );
+          const deadline = Date.now() + batchTimeout;
+          const chunkSize = 16;
           const upsert = db.query(
             `INSERT INTO card_embeddings (path, model_key, content_hash, dim, vec, updated_at)
              VALUES (?, ?, ?, ?, ?, ?)
@@ -668,16 +685,52 @@ export async function recallMemories(opts: {
                vec = excluded.vec,
                updated_at = excluded.updated_at`,
           );
-          const tx = db.transaction(() => {
-            for (let i = 0; i < missing.length; i++) {
-              const cVec = newVecs[i];
-              const row = missing[i].row;
-              vecByPath.set(row.path, cVec);
-              const blob = new Uint8Array(cVec.buffer, cVec.byteOffset, cVec.byteLength);
-              upsert.run(row.path, modelKey, row.content_hash, cVec.length, blob, nowMs);
+
+          // 分块计算并逐块落库检查点：即使后续批次超时/限流，已算出的向量不再白费
+          for (let offset = 0; offset < missing.length; offset += chunkSize) {
+            const chunk = missing.slice(offset, offset + chunkSize);
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) {
+              throw new Error(`Embedding batch deadline exceeded after ${offset}/${missing.length} cards`);
             }
-          });
-          tx();
+            const chunkTimeout = Math.max(200, Math.min(embedTimeoutMs * 2, remainingMs));
+            let chunkVecs: Float32Array[];
+            if (opts.embedding.embedBatch) {
+              chunkVecs = await opts.embedding.embedBatch(
+                chunk.map((m) => m.text),
+                { signal: AbortSignal.timeout(chunkTimeout), taskType: "document" },
+              );
+            } else {
+              chunkVecs = [];
+              for (const m of chunk) {
+                const itemRemaining = deadline - Date.now();
+                if (itemRemaining <= 0) {
+                  throw new Error("Embedding batch deadline exceeded");
+                }
+                chunkVecs.push(
+                  await opts.embedding.embed(m.text, {
+                    signal: AbortSignal.timeout(Math.min(embedTimeoutMs, itemRemaining)),
+                    taskType: "document",
+                  }),
+                );
+              }
+            }
+            if (chunkVecs.length !== chunk.length) {
+              throw new Error(
+                `Embedding client returned ${chunkVecs.length} vectors for ${chunk.length} cards`,
+              );
+            }
+            const tx = db.transaction(() => {
+              for (let j = 0; j < chunk.length; j++) {
+                const cVec = chunkVecs[j];
+                const row = chunk[j].row;
+                vecByPath.set(row.path, cVec);
+                const blob = new Uint8Array(cVec.buffer, cVec.byteOffset, cVec.byteLength);
+                upsert.run(row.path, modelKey, row.content_hash, cVec.length, blob, nowMs);
+              }
+            });
+            tx();
+          }
         }
 
         const semScored: Array<{ row: CardIndexRow; score: number }> = [];
@@ -762,7 +815,13 @@ export async function recallMemories(opts: {
       }
     }
 
-    if (!usedEmbedding) {
+    // 若配置了向量但运行期超时/故障，小库（<=250张）且门控健康时优先回落到全卡目录直扫，否则再退纯 FTS5
+    if (!usedEmbedding && embeddingActive && canCatalogScan && !timedOut) {
+      const skippedRes = await runCatalogScan();
+      if (skippedRes) return skippedRes;
+    }
+
+    if (!usedDecisionGate && !usedEmbedding) {
       const ftsList = collectFtsHits();
       for (const item of ftsList.slice(0, globalLimit)) {
         candidates.push({
@@ -778,7 +837,7 @@ export async function recallMemories(opts: {
     }
 
     // 非特定线索闲聊时，补近 72h 活跃 episodes/ 最多 2 条
-    if (!matchedActivitySlug) {
+    if (!usedDecisionGate && !matchedActivitySlug) {
       const recentDaily = allActive
         .filter(
           (r) =>
@@ -813,7 +872,10 @@ export async function recallMemories(opts: {
             actCount++;
           }
         } else if (c.track === "cross_vector") {
-          // 降级模式对纯字面检索应用分数门槛；小语料（< 10 张卡）BM25 IDF 易塌缩，豁免过滤
+          // 降级模式对放宽进候选池的向量命中恢复 0.35 门槛，并过滤弱字面撞词（<10 张卡小语料豁免 BM25 IDF 塌缩）
+          if (c.semScore > 0 && c.semScore < fallbackMinSemScore) {
+            continue;
+          }
           if (c.semScore === 0 && ftsMinScore > 0 && allActive.length >= 10 && c.kwScore < ftsMinScore) {
             continue;
           }
@@ -831,18 +893,98 @@ export async function recallMemories(opts: {
       return out;
     };
 
+    const buildPoolSlice = (pool: CandidateEntry[], limit: number): CandidateEntry[] => {
+      if (pool.length <= limit) return pool;
+      // 保留同活动与近 72h 日常槽位，防止 cross_vector 填满 limit 后挤掉日常兜底
+      const pinned = pool.filter((c) => c.track === "same_activity" || c.track === "daily_recent");
+      const rest = pool.filter((c) => c.track === "cross_vector");
+      if (pinned.length >= limit) return pinned.slice(0, limit);
+      return [...pinned, ...rest.slice(0, limit - pinned.length)];
+    };
+
+    const runDecisionPoolScoring = async (
+      poolSlice: CandidateEntry[],
+      includeNeedsMemory: boolean,
+    ): Promise<RecallResult | null> => {
+      const { promptInst, residentBlock } = await getGateBaseContext();
+      const convLines = [
+        ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 200)}`),
+        `user: ${clipForGate(query, 400)}`,
+      ];
+
+      const cardSummaries: string[] = [];
+      const questions: Record<string, DecisionQuestion> = includeNeedsMemory
+        ? { needs_memory: buildNoulQuestion(promptInst.needsMemory) }
+        : {};
+
+      for (let i = 0; i < poolSlice.length; i++) {
+        const c = poolSlice[i];
+        const rawBody = await readCardBody(c.row.path);
+        const body = rawBody ? clipForGate(rawBody, 260) : "";
+        const hint = c.row.when_to_recall ? ` | 何时想起：${clipForGate(c.row.when_to_recall, 80)}` : "";
+        cardSummaries.push(`[c${i}] ${c.row.path} | 标题：${c.row.title}${hint}\n摘要：${body}`);
+        questions[`c${i}`] = buildNoulQuestion(promptInst.cardRelevance, `[c${i}]`);
+      }
+
+      const input = [
+        ...(residentBlock ? [residentBlock] : []),
+        "<conversation>",
+        convLines.join("\n"),
+        "</conversation>",
+        "<candidates>",
+        cardSummaries.join("\n\n"),
+        "</candidates>",
+      ].join("\n");
+
+      const res = await opts.decisionClient!.decide({
+        input,
+        questions,
+        signal: AbortSignal.timeout(decisionTimeoutMs),
+      });
+
+      usedDecisionGate = true;
+      if (includeNeedsMemory) {
+        gateScore = res.answers.needs_memory?.noul ?? 0.5;
+        if (gateScore < gateThreshold) {
+          return {
+            skipped: true,
+            items: [],
+            renderedBlock: null,
+            gateScore,
+            timedOut: false,
+            usedDecisionGate: true,
+          };
+        }
+      }
+
+      const scoredPool: Array<{ entry: CandidateEntry; score: number }> = [];
+      const passed: CandidateEntry[] = [];
+      for (let i = 0; i < poolSlice.length; i++) {
+        const c = poolSlice[i];
+        const score = res.answers[`c${i}`]?.noul ?? 0;
+        scoredPool.push({ entry: c, score });
+        if (score >= rerankThreshold) {
+          passed.push({
+            ...c,
+            rerankScore: score,
+            finalScore: score,
+          });
+        }
+      }
+      passed.sort((a, b) => b.finalScore - a.finalScore);
+      selected = passed.slice(0, 5);
+      scoredPool.sort((a, b) => b.score - a.score);
+      hop0PoolAnchors = scoredPool.slice(0, 2).map((x) => x.entry.row.path);
+      return null;
+    };
+
     // Step 2.5: 候选池二阶段门控与精排
-    if (rerankerActive && opts.reranker && candidates.length > 0) {
-      const poolSlice = candidates.slice(0, candidatePoolLimit);
+    if (!usedDecisionGate && rerankerActive && opts.reranker && candidates.length > 0) {
+      const poolSlice = buildPoolSlice(candidates, candidatePoolLimit);
       const docTexts: string[] = [];
       for (const c of poolSlice) {
-        let body = "";
-        try {
-          const rawMd = await fs.readFile(path.join(memoryDir, c.row.path), "utf8");
-          body = clipForGate(stripFrontmatter(rawMd), 500);
-        } catch {
-          body = "";
-        }
+        const rawBody = await readCardBody(c.row.path);
+        const body = rawBody ? clipForGate(rawBody, 500) : "";
         const hint = c.row.when_to_recall ? `\n何时想起：${clipForGate(c.row.when_to_recall, 100)}` : "";
         docTexts.push(`标题：${c.row.title}${hint}\n正文：${body}`);
       }
@@ -856,10 +998,7 @@ export async function recallMemories(opts: {
 
       const runGateOnly = async () => {
         if (!(gateEnabled && !timedOut && opts.decisionClient)) return null;
-        const [promptInst, residentBlock] = await Promise.all([
-          loadRecallGateInstructions(opts.promptsDir),
-          loadResidentContextForGate(memoryDir),
-        ]);
+        const { promptInst, residentBlock } = await getGateBaseContext();
         const convLines = [
           ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 200)}`),
           `user: ${clipForGate(query, 400)}`,
@@ -886,6 +1025,7 @@ export async function recallMemories(opts: {
         }),
       ]);
 
+      let gateFailed = false;
       if (gateOutcome.status === "fulfilled" && gateOutcome.value) {
         usedDecisionGate = true;
         gateScore = gateOutcome.value.answers.needs_memory?.noul ?? 0.5;
@@ -900,112 +1040,67 @@ export async function recallMemories(opts: {
           };
         }
       } else if (gateOutcome.status === "rejected") {
+        // 门控超时/异常时绝不绕过门控直接放行精排卡，回落规则阈值
+        gateFailed = true;
         timedOut = true;
+        usedDecisionGate = false;
         console.warn(
-          `[psyber] recall needs_memory gate failed/timed out:`,
+          `[psyber] recall needs_memory gate failed/timed out, falling back to rules:`,
           (gateOutcome.reason as Error)?.message ?? String(gateOutcome.reason),
-        );
-      }
-
-      if (rerankOutcome.status === "fulfilled") {
-        const passed: CandidateEntry[] = [];
-        for (const item of rerankOutcome.value) {
-          const c = poolSlice[item.index];
-          if (!c) continue;
-          if (item.relevanceScore >= rerankThreshold) {
-            passed.push({
-              ...c,
-              rerankScore: item.relevanceScore,
-              finalScore: item.relevanceScore,
-            });
-          }
-        }
-        passed.sort((a, b) => b.finalScore - a.finalScore);
-        selected = passed.slice(0, 5);
-      } else {
-        timedOut = true;
-        console.warn(
-          `[psyber] recall reranker failed/timed out, falling back to rules:`,
-          (rerankOutcome.reason as Error)?.message ?? String(rerankOutcome.reason),
         );
         selected = applyRuleFallback(candidates);
       }
-    } else if (gateEnabled && !timedOut && opts.decisionClient && candidates.length > 0) {
-      const poolSlice = candidates.slice(0, candidatePoolLimit);
+
+      if (!gateFailed) {
+        if (rerankOutcome.status === "fulfilled") {
+          const orderedItems = [...rerankOutcome.value].sort(
+            (a, b) => b.relevanceScore - a.relevanceScore,
+          );
+          const passed: CandidateEntry[] = [];
+          for (const item of orderedItems) {
+            const c = poolSlice[item.index];
+            if (!c) continue;
+            if (item.relevanceScore >= rerankThreshold) {
+              passed.push({
+                ...c,
+                rerankScore: item.relevanceScore,
+                finalScore: item.relevanceScore,
+              });
+            }
+          }
+          selected = passed.slice(0, 5);
+          hop0PoolAnchors = orderedItems
+            .map((item) => poolSlice[item.index]?.row.path)
+            .filter((p): p is string => Boolean(p))
+            .slice(0, 2);
+        } else {
+          console.warn(
+            `[psyber] recall reranker failed/timed out:`,
+            (rerankOutcome.reason as Error)?.message ?? String(rerankOutcome.reason),
+          );
+          if (gateEnabled && opts.decisionClient) {
+            try {
+              await runDecisionPoolScoring(poolSlice, false);
+            } catch (decErr) {
+              timedOut = true;
+              usedDecisionGate = false;
+              console.warn(
+                `[psyber] recall decision fallback after reranker failure also failed:`,
+                (decErr as Error).message,
+              );
+              selected = applyRuleFallback(candidates);
+            }
+          } else {
+            timedOut = true;
+            selected = applyRuleFallback(candidates);
+          }
+        }
+      }
+    } else if (!usedDecisionGate && gateEnabled && !timedOut && opts.decisionClient && candidates.length > 0) {
+      const poolSlice = buildPoolSlice(candidates, candidatePoolLimit);
       try {
-        const [promptInst, residentBlock] = await Promise.all([
-          loadRecallGateInstructions(opts.promptsDir),
-          loadResidentContextForGate(memoryDir),
-        ]);
-        const convLines = [
-          ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 200)}`),
-          `user: ${clipForGate(query, 400)}`,
-        ];
-
-        const cardSummaries: string[] = [];
-        const questions: Record<string, DecisionQuestion> = {
-          needs_memory: buildNoulQuestion(promptInst.needsMemory),
-        };
-
-        for (let i = 0; i < poolSlice.length; i++) {
-          const c = poolSlice[i];
-          let body = "";
-          try {
-            const rawMd = await fs.readFile(path.join(memoryDir, c.row.path), "utf8");
-            body = clipForGate(stripFrontmatter(rawMd), 260);
-          } catch {
-            body = "";
-          }
-          const hint = c.row.when_to_recall ? ` | 何时想起：${clipForGate(c.row.when_to_recall, 80)}` : "";
-          cardSummaries.push(`[c${i}] ${c.row.path} | 标题：${c.row.title}${hint}\n摘要：${body}`);
-          questions[`c${i}`] = buildNoulQuestion(promptInst.cardRelevance, `[c${i}]`);
-        }
-
-        const input = [
-          ...(residentBlock ? [residentBlock] : []),
-          "<conversation>",
-          convLines.join("\n"),
-          "</conversation>",
-          "<candidates>",
-          cardSummaries.join("\n\n"),
-          "</candidates>",
-        ].join("\n");
-
-        const res = await opts.decisionClient.decide({
-          input,
-          questions,
-          signal: AbortSignal.timeout(decisionTimeoutMs),
-        });
-
-        usedDecisionGate = true;
-        gateScore = res.answers.needs_memory?.noul ?? 0.5;
-
-        if (gateScore < gateThreshold) {
-          return {
-            skipped: true,
-            items: [],
-            renderedBlock: null,
-            gateScore,
-            timedOut: false,
-            usedDecisionGate: true,
-          };
-        }
-
-        const passed: CandidateEntry[] = [];
-        for (let i = 0; i < poolSlice.length; i++) {
-          const c = poolSlice[i];
-          const score = res.answers[`c${i}`]?.noul ?? 0;
-          if (score >= rerankThreshold) {
-            passed.push({
-              ...c,
-              rerankScore: score,
-              finalScore: score,
-            });
-          }
-        }
-        passed.sort((a, b) => b.finalScore - a.finalScore);
-        selected = passed.slice(0, 5);
-        hop0PoolAnchors = poolSlice.slice(0, 2).map((c) => c.row.path);
+        const skippedRes = await runDecisionPoolScoring(poolSlice, true);
+        if (skippedRes) return skippedRes;
       } catch (err) {
         timedOut = true;
         console.warn(
@@ -1014,9 +1109,44 @@ export async function recallMemories(opts: {
         );
         selected = applyRuleFallback(candidates);
       }
-    } else {
+    } else if (!usedDecisionGate) {
       selected = applyRuleFallback(candidates);
     }
+  }
+
+  const renderEntryForCandidate = async (
+    cand: CandidateEntry,
+    remainingBudget: number,
+  ): Promise<{ entry: string; excerpt: string } | null> => {
+    if (remainingBudget < 160) return null;
+    const body = await readCardBody(cand.row.path);
+    if (body === null) return null;
+    const whenLabel = vagueWhen(cand.row.updated_at, nowMs, clock.timeZone);
+    const trackLabel =
+      cand.track === "same_activity"
+        ? "同活动"
+        : cand.track === "daily_recent"
+          ? "近期日常"
+          : cand.track === "linked_hop"
+            ? "关联延伸"
+            : "相关记忆";
+    const statusFlag = cand.row.status === "disputed" ? " · [待确认/有分歧]" : "";
+    const dateFlag = cand.row.date_kind === "gentle" ? " · [敏感忌日·轻声对待]" : "";
+    const header = `- [${trackLabel}] ${cand.row.path}（${whenLabel} · kind: ${cand.row.kind}${statusFlag}${dateFlag}）\n  标题：${cand.row.title}\n  `;
+    const bodyBudget = remainingBudget - header.length - 2;
+    if (bodyBudget < 40) return null;
+    const excerpt = truncateToBudget(body, bodyBudget);
+    return { entry: `${header}${excerpt}`, excerpt };
+  };
+
+  let hop0EstimatedChars = 0;
+  for (const s of selected) {
+    const rendered = await renderEntryForCandidate(s, budget - hop0EstimatedChars);
+    if (!rendered) {
+      hop0EstimatedChars = budget;
+      break;
+    }
+    hop0EstimatedChars += rendered.entry.length + 1;
   }
 
   // Step 2.8: 轻量 1 跳双链扩展 + 证据充分性早停（基于 card_links 双向 [[短标题]]/路径邻卡，严格受预算与早停约束，绝不丢弃首跳结果）
@@ -1028,7 +1158,8 @@ export async function recallMemories(opts: {
     opts.decisionClient &&
     gateScore !== null &&
     gateScore >= gateThreshold &&
-    selected.length < 5
+    selected.length < 5 &&
+    budget - hop0EstimatedChars >= 160
   ) {
     const anchorPaths =
       selected.length > 0 ? selected.slice(0, 3).map((s) => s.row.path) : hop0PoolAnchors;
@@ -1065,10 +1196,7 @@ export async function recallMemories(opts: {
           .slice(0, maxNeighbors);
 
         try {
-          const [promptInst, residentBlock] = await Promise.all([
-            loadRecallGateInstructions(opts.promptsDir),
-            loadResidentContextForGate(memoryDir),
-          ]);
+          const { promptInst, residentBlock } = await getGateBaseContext();
           const convLines = [
             ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 200)}`),
             `user: ${clipForGate(query, 400)}`,
@@ -1077,14 +1205,21 @@ export async function recallMemories(opts: {
           const selectedSummaries: string[] = [];
           for (let i = 0; i < selected.length; i++) {
             const s = selected[i];
-            let body = "";
-            try {
-              const rawMd = await fs.readFile(path.join(memoryDir, s.row.path), "utf8");
-              body = clipForGate(stripFrontmatter(rawMd), 260);
-            } catch {
-              body = "";
-            }
+            const rawBody = await readCardBody(s.row.path);
+            const body = rawBody ? clipForGate(rawBody, 260) : "";
             selectedSummaries.push(`[s${i}] ${s.row.path} | 标题：${s.row.title}\n摘要：${body}`);
+          }
+          if (selectedSummaries.length === 0) {
+            // 当首跳无直接命中但从候选锚点扩展时，注入锚点摘要作为 <selected_evidence>，避免 hop_neighbor_relevance 失去参照物
+            for (let i = 0; i < anchorPaths.length; i++) {
+              const row = rowByPath.get(anchorPaths[i]);
+              if (!row) continue;
+              const rawBody = await readCardBody(row.path);
+              const body = rawBody ? clipForGate(rawBody, 220) : "";
+              selectedSummaries.push(
+                `[a${i}] ${row.path} | 标题：${row.title}（首跳候选锚点，未达直选门槛）\n摘要：${body}`,
+              );
+            }
           }
 
           const neighborSummaries: string[] = [];
@@ -1096,13 +1231,8 @@ export async function recallMemories(opts: {
 
           for (let i = 0; i < rankedNeighbors.length; i++) {
             const { nb } = rankedNeighbors[i];
-            let body = "";
-            try {
-              const rawMd = await fs.readFile(path.join(memoryDir, nb.row.path), "utf8");
-              body = clipForGate(stripFrontmatter(rawMd), 260);
-            } catch {
-              body = "";
-            }
+            const rawBody = await readCardBody(nb.row.path);
+            const body = rawBody ? clipForGate(rawBody, 260) : "";
             const dirLabel = nb.direction === "out" ? "正文引用自" : "反向关联到";
             const hint = nb.row.when_to_recall
               ? ` | 何时想起：${clipForGate(nb.row.when_to_recall, 80)}`
@@ -1126,7 +1256,7 @@ export async function recallMemories(opts: {
             "</linked_neighbors>",
           ].join("\n");
 
-          const hopTimeoutMs = multiHopCfg.timeoutMs ?? 2500;
+          const hopTimeoutMs = clampTimeout(multiHopCfg.timeoutMs, 2500);
           const hopRes = await opts.decisionClient.decide({
             input: hopInput,
             questions,
@@ -1180,6 +1310,14 @@ export async function recallMemories(opts: {
     hopStoppedReason = "disabled";
   } else if (selected.length >= 5) {
     hopStoppedReason = "full";
+  } else if (
+    usedDecisionGate &&
+    !timedOut &&
+    gateScore !== null &&
+    gateScore >= gateThreshold &&
+    budget - hop0EstimatedChars < 160
+  ) {
+    hopStoppedReason = "budget_full";
   }
 
   // Step 3: 字符预算裁剪与留痕落库
@@ -1188,36 +1326,11 @@ export async function recallMemories(opts: {
   let usedChars = 0;
 
   for (const cand of selected) {
-    const remainingBudget = budget - usedChars;
-    if (remainingBudget < 160) break;
+    const rendered = await renderEntryForCandidate(cand, budget - usedChars);
+    if (!rendered) break;
 
-    let body: string;
-    try {
-      const rawMd = await fs.readFile(path.join(memoryDir, cand.row.path), "utf8");
-      body = stripFrontmatter(rawMd);
-    } catch {
-      continue;
-    }
-
-    const whenLabel = vagueWhen(cand.row.updated_at, nowMs, clock.timeZone);
-    const trackLabel =
-      cand.track === "same_activity"
-        ? "同活动"
-        : cand.track === "daily_recent"
-          ? "近期日常"
-          : cand.track === "linked_hop"
-            ? "关联延伸"
-            : "相关记忆";
-    const statusFlag = cand.row.status === "disputed" ? " · [待确认/有分歧]" : "";
-    const dateFlag = cand.row.date_kind === "gentle" ? " · [敏感忌日·轻声对待]" : "";
-    const header = `- [${trackLabel}] ${cand.row.path}（${whenLabel} · kind: ${cand.row.kind}${statusFlag}${dateFlag}）\n  标题：${cand.row.title}\n  `;
-    const bodyBudget = remainingBudget - header.length - 2;
-    if (bodyBudget < 40) break;
-
-    const excerpt = truncateToBudget(body, bodyBudget);
-    const entry = `${header}${excerpt}`;
-    lines.push(entry);
-    usedChars += entry.length + 1;
+    lines.push(rendered.entry);
+    usedChars += rendered.entry.length + 1;
 
     recalled.push({
       path: cand.row.path,
@@ -1230,8 +1343,12 @@ export async function recallMemories(opts: {
       rerankScore: cand.rerankScore,
       finalScore: cand.finalScore,
       updatedAt: cand.row.updated_at,
-      excerpt,
+      excerpt: rendered.excerpt,
     });
+  }
+
+  if (hopStoppedReason === "expanded" && !recalled.some((r) => r.track === "linked_hop")) {
+    hopStoppedReason = "budget_full";
   }
 
   if (recalled.length > 0) {

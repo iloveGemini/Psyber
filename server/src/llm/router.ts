@@ -69,6 +69,29 @@ const ZERO_COST = {
   cacheWrite: 0,
 };
 
+/** 组合外部 AbortSignal 与单次超时，若外部信号已处于 aborted 状态则立刻中止，绝不触发后续请求 */
+export function withTimeoutSignal(
+  externalSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  if (externalSignal?.aborted) {
+    controller.abort(externalSignal.reason);
+    return { signal: controller.signal, cleanup: () => {} };
+  }
+  const safeMs = Math.max(1, Math.min(600_000, Number.isFinite(timeoutMs) ? timeoutMs : 10_000));
+  const timer = setTimeout(() => controller.abort(), safeMs);
+  const onAbort = () => controller.abort(externalSignal?.reason);
+  externalSignal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 /** 归一化思考深度档位（兼容旧版 thinking.enabled 布尔字段） */
 export function resolveEffectiveThinkingLevel(config: PsyberConfig): ThinkingLevel {
   const level = config.llm?.thinking?.level;

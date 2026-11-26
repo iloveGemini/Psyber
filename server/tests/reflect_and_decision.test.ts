@@ -29,14 +29,18 @@ import {
   DynamicDecisionClient,
   GeminiDecisionClient,
   isGeminiDecisionModel,
+  LlmFallbackDecisionClient,
 } from "../src/llm/decision.ts";
 import {
+  buildEmbeddingClient,
   DynamicEmbeddingClient,
   GeminiEmbeddingClient,
   isEmbeddingModelId,
+  normalizeL2,
   OpenAiEmbeddingClient,
 } from "../src/llm/embedding.ts";
 import {
+  buildRerankerClient,
   DynamicRerankerClient,
   HttpRerankerClient,
   isRerankerModelId,
@@ -888,5 +892,173 @@ describe("GeminiDecisionClient, DynamicDecisionClient & router decision slot", (
       fetchImpl: rerankFetch,
     });
     expect(rrPing.ok).toBe(true);
+  });
+
+  test("Review regression: protocol routing, pre-aborted signals, Unicode/NaN guards, dangling slots, and LlmFallbackDecisionClient template dedup", async () => {
+    // 1. openai-compat with gemini-embedding-* stays on OpenAI /embeddings (not Google :embedContent)
+    let compatHitUrl = "";
+    const compatFetch = (async (input: RequestInfo | URL) => {
+      compatHitUrl = String(input);
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [3, 4] }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const compatEmb = buildEmbeddingClient(
+      {
+        providerId: "oneapi",
+        kind: "openai-compat",
+        modelId: "gemini-embedding-001",
+        apiKey: "sk-compat",
+        baseUrl: "https://proxy.example.com/v1",
+      },
+      compatFetch,
+    );
+    await compatEmb.embed("hello");
+    expect(compatHitUrl).toBe("https://proxy.example.com/v1/embeddings");
+
+    // 2. isEmbeddingModelId handles plural/unseparated names
+    expect(isEmbeddingModelId("jinaai/jina-embeddings-v3")).toBe(true);
+    expect(isEmbeddingModelId("embeddinggemma")).toBe(true);
+
+    // 3. HttpRerankerClient rejects missing baseUrl on non-SiliconFlow providers & malformed empty results
+    expect(() =>
+      buildRerankerClient({
+        providerId: "openai",
+        kind: "openai",
+        modelId: "rerank-test",
+        apiKey: "sk-openai",
+      }),
+    ).toThrow();
+
+    const badResultsRr = new HttpRerankerClient({
+      apiKey: "sf-key",
+      providerId: "sf",
+      baseUrl: "https://api.siliconflow.cn/v1",
+      modelId: "Qwen/Qwen3-Reranker-8B",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ results: [{ index: "0", relevance_score: null }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof fetch,
+    });
+    await expect(badResultsRr.rerank("q", ["doc"])).rejects.toThrow("no valid index/score");
+
+    // 4. Pre-aborted AbortSignal makes 0 HTTP calls in embedding, reranker, and decision clients
+    let abortedFetchCalls = 0;
+    const countingFetch = (async () => {
+      abortedFetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const preAborted = AbortSignal.abort("already aborted");
+
+    await expect(
+      new GeminiEmbeddingClient({ apiKey: "k", modelId: "gemini-embedding-2", fetchImpl: countingFetch }).embed(
+        "hi",
+        { signal: preAborted },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      new OpenAiEmbeddingClient({
+        apiKey: "k",
+        modelId: "text-embedding-3-small",
+        fetchImpl: countingFetch,
+      }).embed("hi", { signal: preAborted }),
+    ).rejects.toThrow();
+    await expect(
+      new HttpRerankerClient({
+        apiKey: "k",
+        providerId: "sf",
+        baseUrl: "https://api.siliconflow.cn/v1",
+        modelId: "Qwen/Qwen3-Reranker-8B",
+        fetchImpl: countingFetch,
+      }).rerank("q", ["d"], { signal: preAborted }),
+    ).rejects.toThrow();
+    await expect(
+      new GeminiDecisionClient({ apiKey: "k", fetchImpl: countingFetch }).decide({
+        input: "hi",
+        questions: { q: { type: "noul", instructions: "ok?" } },
+        signal: preAborted,
+      }),
+    ).rejects.toThrow();
+    expect(abortedFetchCalls).toBe(0);
+
+    // 5. Lone-surrogate input is sanitized before trim || " " & normalizeL2 rejects NaN/Infinity
+    let sentPayload: Record<string, unknown> = {};
+    const captureEmbed = new OpenAiEmbeddingClient({
+      apiKey: "k",
+      modelId: "text-embedding-3-small",
+      fetchImpl: (async (_u: RequestInfo | URL, init?: RequestInit) => {
+        sentPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch,
+    });
+    await captureEmbed.embed("\uD83D");
+    expect(sentPayload.input).toBe(" ");
+    expect(() => normalizeL2([Number.NaN, 1])).toThrow();
+    expect(() => normalizeL2([1e40, 1])).toThrow();
+
+    // 6. DynamicEmbeddingClient / DynamicRerankerClient reject dangling provider & normalize google models/ prefix
+    const cfgDir = await makeTempDir("psyber-dyn-check-");
+    await initDataDir(cfgDir);
+    const cfg = await loadOrCreateConfig(cfgDir, Date.now());
+    cfg.llm = {
+      providers: {
+        google: { kind: "google", authMode: "api_key" },
+      },
+      slots: {
+        embedding: { provider: "deleted-provider", model: "models/gemini-embedding-001" },
+        reranker: { provider: "google", model: "rerank-1" },
+      },
+      thinking: { enabled: false },
+    };
+    const dynEmb = new DynamicEmbeddingClient({ dataDir: cfgDir, getConfig: () => cfg });
+    const dynRr = new DynamicRerankerClient({ dataDir: cfgDir, getConfig: () => cfg });
+    expect(dynEmb.isConfigured()).toBe(false);
+    expect(dynRr.isConfigured()).toBe(false);
+    cfg.llm.slots.embedding = { provider: "google", model: "models/gemini-embedding-001" };
+    expect(dynEmb.isConfigured()).toBe(true);
+    expect(dynEmb.modelKey).toBe("google:gemini-embedding-001");
+
+    // 7. LlmFallbackDecisionClient deduplicates shared templates & raises maxTokens for 60 questions
+    let seenPromptLen = 0;
+    let seenMaxTokens = 0;
+    const fallbackClient = new LlmFallbackDecisionClient(
+      new ScriptedChatModel((req) => {
+        seenMaxTokens = req.maxTokens ?? 0;
+        const userMsg = req.messages[0]?.content;
+        seenPromptLen = typeof userMsg === "string" ? userMsg.length : 0;
+        const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+        for (let i = 0; i < 60; i++) {
+          answers[`c${i}`] = { noul: i === 59 ? 0.91 : 0.05 };
+        }
+        return [{ type: "text_delta", delta: JSON.stringify({ answers }) }];
+      }),
+    );
+    const questions: Record<string, { type: "noul"; instructions: string; criteria: Record<string, string> }> = {
+      needs_memory: {
+        type: "noul",
+        instructions: "需要召回吗？",
+        criteria: { true_description: "回指", false_description: "闲聊" },
+      },
+    };
+    for (let i = 0; i < 60; i++) {
+      questions[`c${i}`] = {
+        type: "noul",
+        instructions: `判断 [${`c${i}`}] 是否相关，${"详细判据说明".repeat(20)}`,
+        criteria: {
+          true_description: `[${`c${i}`}] 直接回应问题`,
+          false_description: `[${`c${i}`}] 无关撞词`,
+        },
+      };
+    }
+    const decRes = await fallbackClient.decide({ input: "catalog", questions });
+    expect(seenPromptLen).toBeLessThan(3500);
+    expect(seenMaxTokens).toBeGreaterThanOrEqual(1500);
+    expect(decRes.answers.c59?.noul).toBeCloseTo(0.91, 2);
   });
 });

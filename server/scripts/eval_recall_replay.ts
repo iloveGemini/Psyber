@@ -84,20 +84,22 @@ function parseArgs(argv: string[]) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const cfg = await loadOrCreateConfig(args.dataDir);
+  const cfg = await loadOrCreateConfig(args.dataDir, Date.now());
   if (args.decisionProvider && cfg.llm?.slots?.decision) {
     cfg.llm.slots.decision = {
       ...cfg.llm.slots.decision,
       provider: args.decisionProvider,
     };
   }
-  if (args.embeddingProvider && args.embeddingModel && cfg.llm) {
+  if (args.embeddingProvider && args.embeddingModel) {
+    cfg.llm ??= { providers: {}, slots: {}, thinking: { enabled: false } };
     cfg.llm.slots.embedding = {
       provider: args.embeddingProvider,
       model: args.embeddingModel,
     };
   }
-  if (args.rerankerProvider && args.rerankerModel && cfg.llm) {
+  if (args.rerankerProvider && args.rerankerModel) {
+    cfg.llm ??= { providers: {}, slots: {}, thinking: { enabled: false } };
     cfg.llm.slots.reranker = {
       provider: args.rerankerProvider,
       model: args.rerankerModel,
@@ -234,6 +236,7 @@ async function main() {
               candidatePool: 10,
               catalogScanMaxCards: 0,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "catalog_gate":
@@ -247,6 +250,7 @@ async function main() {
               queryWindowTurns: 4,
               catalogScanMaxCards: 250,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "catalog_strict":
@@ -260,6 +264,7 @@ async function main() {
               queryWindowTurns: 4,
               catalogScanMaxCards: 250,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "catalog_loose":
@@ -273,6 +278,7 @@ async function main() {
               queryWindowTurns: 4,
               catalogScanMaxCards: 250,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "embed_only":
@@ -306,6 +312,7 @@ async function main() {
               embedMinScore: 0.25,
               hybridFtsWithEmbedding: false,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "embed_gate_strict":
@@ -324,6 +331,7 @@ async function main() {
               embedMinScore: 0.25,
               hybridFtsWithEmbedding: false,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "hybrid_gate":
@@ -342,6 +350,7 @@ async function main() {
               embedMinScore: 0.25,
               hybridFtsWithEmbedding: true,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "hybrid_gate_strict":
@@ -360,6 +369,7 @@ async function main() {
               embedMinScore: 0.25,
               hybridFtsWithEmbedding: true,
               decisionTimeoutMs: 10_000,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
             },
           };
         case "embed_rerank":

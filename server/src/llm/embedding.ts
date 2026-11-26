@@ -2,7 +2,7 @@ import type { PsyberConfig } from "../core/config.ts";
 import { loadCredentials } from "../core/credentials.ts";
 import { sanitizeUnicode } from "../core/decision.ts";
 import type { EmbeddingClient, EmbeddingOptions } from "../core/embedding.ts";
-import { resolveByokSlot, type ResolvedByokSlot } from "./router.ts";
+import { resolveByokSlot, withTimeoutSignal, type ResolvedByokSlot } from "./router.ts";
 
 export type { EmbeddingClient, EmbeddingOptions };
 
@@ -15,7 +15,11 @@ const QWEN3_DEFAULT_QUERY_INSTRUCT =
 /** 判断模型 ID 是否为向量嵌入模型（供设置页连通测试与协议路由识别） */
 export function isEmbeddingModelId(modelId: string): boolean {
   const s = modelId.trim().toLowerCase();
-  return /(?:^|[/:_-])(?:embedding|embed|bge-m3|bge-large|bge-base|text-embedding)(?:$|[/:_.-])/.test(s);
+  return (
+    /(?:^|[/:_-])(?:embeddings?|embed|bge-m3|bge-large|bge-base|text-embedding|nomic-embed|mxbai-embed)(?:$|[/:_.-])/.test(
+      s,
+    ) || /(?:^|\/)embeddinggemma(?:$|[/:_.-])/.test(s)
+  );
 }
 
 export function isGeminiEmbeddingModel(modelId: string): boolean {
@@ -26,15 +30,22 @@ export function isQwen3EmbeddingModel(modelId: string): boolean {
   return /qwen3-embedding/i.test(modelId.trim());
 }
 
-/** 将原始浮点数组归一化为单位 L2 向量（匹配 Spec 02 §4.1 缓存口径） */
+/** 将原始浮点数组归一化为单位 L2 向量（匹配 Spec 02 §4.1 缓存口径）；遇到 NaN/Infinity 显式报错防污染库 */
 export function normalizeL2(values: readonly number[] | Float32Array): Float32Array {
   const vec = values instanceof Float32Array ? new Float32Array(values) : Float32Array.from(values);
   let sumSq = 0;
   for (let i = 0; i < vec.length; i++) {
-    sumSq += vec[i] * vec[i];
+    const v = vec[i];
+    if (!Number.isFinite(v)) {
+      throw new Error("Embedding API returned non-finite vector element");
+    }
+    sumSq += v * v;
   }
   const norm = Math.sqrt(sumSq);
-  if (norm > 0 && Number.isFinite(norm)) {
+  if (!Number.isFinite(norm)) {
+    throw new Error("Embedding API returned non-finite vector norm");
+  }
+  if (norm > 0) {
     for (let i = 0; i < vec.length; i++) {
       vec[i] /= norm;
     }
@@ -53,23 +64,6 @@ function resolveOpenAiEmbeddingsUrl(baseUrl?: string): string {
   const trimmed = (baseUrl?.trim() || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
   if (trimmed.endsWith("/embeddings")) return trimmed;
   return `${trimmed}/embeddings`;
-}
-
-function withTimeoutSignal(
-  externalSignal: AbortSignal | undefined,
-  timeoutMs: number,
-): { signal: AbortSignal; cleanup: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onAbort = () => controller.abort();
-  externalSignal?.addEventListener("abort", onAbort, { once: true });
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      clearTimeout(timer);
-      externalSignal?.removeEventListener("abort", onAbort);
-    },
-  };
 }
 
 export interface GeminiEmbeddingClientOptions {
@@ -108,7 +102,8 @@ export class GeminiEmbeddingClient implements EmbeddingClient {
   }
 
   private buildRequestItem(text: string, opts?: EmbeddingOptions): Record<string, unknown> {
-    const clean = sanitizeUnicode(text.trim() || " ");
+    // 必须先清孤立代理项再 trim，防止纯损坏代理项文本变成空串 "" 触发上游 400
+    const clean = sanitizeUnicode(text).trim() || " ";
     const item: Record<string, unknown> = {
       model: this.modelName,
       content: { parts: [{ text: clean }] },
@@ -128,6 +123,9 @@ export class GeminiEmbeddingClient implements EmbeddingClient {
     const url = `${this.baseUrl}/${this.modelName}:embedContent`;
     const { signal, cleanup } = withTimeoutSignal(opts?.signal, this.timeoutMs);
     try {
+      if (signal.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+      }
       const res = await this.fetchImpl(url, {
         method: "POST",
         headers: {
@@ -167,6 +165,9 @@ export class GeminiEmbeddingClient implements EmbeddingClient {
       const url = `${this.baseUrl}/${this.modelName}:batchEmbedContents`;
       const { signal, cleanup } = withTimeoutSignal(opts?.signal, this.timeoutMs);
       try {
+        if (signal.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+        }
         const res = await this.fetchImpl(url, {
           method: "POST",
           headers: {
@@ -251,7 +252,7 @@ export class OpenAiEmbeddingClient implements EmbeddingClient {
   }
 
   private formatInput(text: string, opts?: EmbeddingOptions): string {
-    const clean = sanitizeUnicode(text.trim() || " ");
+    const clean = sanitizeUnicode(text).trim() || " ";
     if (opts?.taskType === "query" && this.queryInstruction) {
       return `Instruct: ${this.queryInstruction}\nQuery:${clean}`;
     }
@@ -272,6 +273,9 @@ export class OpenAiEmbeddingClient implements EmbeddingClient {
       const slice = texts.slice(i, i + chunkSize).map((t) => this.formatInput(t, opts));
       const { signal, cleanup } = withTimeoutSignal(opts?.signal, this.timeoutMs);
       try {
+        if (signal.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+        }
         const body: Record<string, unknown> = {
           model: this.modelId,
           input: slice.length === 1 ? slice[0] : slice,
@@ -323,7 +327,8 @@ export function buildEmbeddingClient(
   slot: ResolvedByokSlot,
   fetchImpl?: typeof fetch,
 ): EmbeddingClient {
-  if (slot.kind === "google" || isGeminiEmbeddingModel(slot.modelId)) {
+  // 仅当 provider kind 为 google 时走原生 :embedContent；openai-compat 代理（含挂着 gemini-embedding-* 名字的网关）统一走 /embeddings
+  if (slot.kind === "google") {
     return new GeminiEmbeddingClient({
       apiKey: slot.apiKey,
       modelId: slot.modelId,
@@ -348,20 +353,30 @@ export interface DynamicEmbeddingClientDeps {
 }
 
 /**
- * 动态向量客户端：热读取 `llm.slots.embedding`（未配置时 `isConfigured()` 返回 false，绝不回落到 chat 槽位）。
+ * 动态向量客户端：热读取 `llm.slots.embedding`（未配置或指向无效 Provider 时 `isConfigured()` 返回 false，绝不回落到 chat 槽位）。
  */
 export class DynamicEmbeddingClient implements EmbeddingClient {
   constructor(private readonly deps: DynamicEmbeddingClientDeps) {}
 
   get modelKey(): string {
-    const ref = this.deps.getConfig().llm?.slots?.embedding;
+    const config = this.deps.getConfig();
+    const ref = config.llm?.slots?.embedding;
     if (!ref?.provider?.trim() || !ref?.model?.trim()) return "unconfigured";
-    return `${ref.provider.trim()}:${ref.model.trim()}`;
+    const providerId = ref.provider.trim();
+    const providerCfg = config.llm?.providers?.[providerId];
+    const rawModel = ref.model.trim();
+    const modelId = providerCfg?.kind === "google" ? rawModel.replace(/^models\//, "") : rawModel;
+    return `${providerId}:${modelId}`;
   }
 
   isConfigured(): boolean {
-    const ref = this.deps.getConfig().llm?.slots?.embedding;
-    return Boolean(ref?.provider?.trim() && ref?.model?.trim());
+    const config = this.deps.getConfig();
+    const ref = config.llm?.slots?.embedding;
+    if (!ref?.provider?.trim() || !ref?.model?.trim()) return false;
+    const providerCfg = config.llm?.providers?.[ref.provider.trim()];
+    if (!providerCfg) return false;
+    if (providerCfg.kind === "openai-compat" && !providerCfg.baseUrl?.trim()) return false;
+    return true;
   }
 
   private async resolveClient(): Promise<EmbeddingClient> {

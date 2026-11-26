@@ -13,6 +13,7 @@ import type { ChatModelClient } from "./client.ts";
 import {
   buildPiAiChatClient,
   resolveByokSlot,
+  withTimeoutSignal,
   type ResolvedByokSlot,
 } from "./router.ts";
 
@@ -134,12 +135,12 @@ export class GeminiDecisionClient implements DecisionClient {
       questionsPayload[qId] = payload;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const onExternalAbort = () => controller.abort();
-    req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    const { signal, cleanup } = withTimeoutSignal(req.signal, this.timeoutMs);
 
     try {
+      if (signal.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+      }
       const res = await this.fetchImpl(url, {
         method: "POST",
         headers: {
@@ -152,7 +153,7 @@ export class GeminiDecisionClient implements DecisionClient {
           input: sanitizeUnicode(req.input),
           questions: questionsPayload,
         }),
-        signal: controller.signal,
+        signal,
       });
 
       if (!res.ok) {
@@ -176,8 +177,7 @@ export class GeminiDecisionClient implements DecisionClient {
         backend: `gemini-decisions:${this.modelId}`,
       };
     } finally {
-      clearTimeout(timer);
-      req.signal?.removeEventListener("abort", onExternalAbort);
+      cleanup();
     }
   }
 }
@@ -194,15 +194,62 @@ export class LlmFallbackDecisionClient implements DecisionClient {
   ) {}
 
   async decide(req: DecisionRequest): Promise<DecisionResponse> {
-    const questionSpec = JSON.stringify(req.questions, null, 2);
+    const entries = Object.entries(req.questions);
+    // 按归一化模板去重（如全卡目录直扫 c0..c249 共用同一题干与双边判据），避免 250 份重复描述撑爆输入上限
+    const templateKeyToId = new Map<string, string>();
+    const templates: Record<string, DecisionQuestion> = {};
+    const qToTemplate: Record<string, string> = {};
+
+    for (const [qId, q] of entries) {
+      const marker = `[${qId}]`;
+      const normInstructions = q.instructions.replaceAll(marker, "{{id}}");
+      let normCriteria: Record<string, string> | undefined;
+      if (q.criteria) {
+        normCriteria = {};
+        for (const [ck, cv] of Object.entries(q.criteria)) {
+          normCriteria[ck] = cv.replaceAll(marker, "{{id}}");
+        }
+      }
+      const sig = JSON.stringify({
+        type: q.type,
+        instructions: normInstructions,
+        criteria: normCriteria,
+      });
+      let tplId = templateKeyToId.get(sig);
+      if (!tplId) {
+        tplId = `t${templateKeyToId.size}`;
+        templateKeyToId.set(sig, tplId);
+        templates[tplId] = {
+          type: q.type,
+          instructions: normInstructions,
+          ...(normCriteria ? { criteria: normCriteria } : {}),
+        };
+      }
+      qToTemplate[qId] = tplId;
+    }
+
+    const deduplicated = templateKeyToId.size < entries.length;
+    const questionSpec = deduplicated
+      ? JSON.stringify({
+          templates,
+          questions: qToTemplate,
+        })
+      : JSON.stringify(req.questions);
     const systemPrompt = [
       "You are a calibrated decision classifier. Evaluate the input against each question.",
-      "Output ONLY a valid JSON object matching this exact schema, with no markdown fences or extra commentary:",
+      ...(deduplicated
+        ? [
+            "<questions> uses shared templates where each question ID maps to a template ID; replace {{id}} with [<question_id>].",
+          ]
+        : []),
+      "Output ONLY a valid compact JSON object matching this exact schema, with no markdown fences or extra commentary:",
       '{"answers": {"<question_id>": {"noul": 0.01..0.99}}}',
       'For type="choice", return {"choice": "<option_key>"}. For type="score", return {"score": <number>}.',
     ].join("\n");
 
     const userPrompt = `<input>\n${req.input}\n</input>\n\n<questions>\n${questionSpec}\n</questions>`;
+    // 按题目数量线性放大输出上限（每题约需 ~15-20 tokens），避免目录直扫 40..250 张卡时被 512 截断 JSON
+    const maxTokens = Math.max(512, Math.min(8192, entries.length * 24 + 128));
 
     let text = "";
     for await (const chunk of this.chatModel.stream({
@@ -210,7 +257,7 @@ export class LlmFallbackDecisionClient implements DecisionClient {
       messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
       tools: [],
       temperature: 0,
-      maxTokens: 512,
+      maxTokens,
       thinkingLevel: "off",
       signal: req.signal,
     })) {
