@@ -1,11 +1,18 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-25（Decision 召回门控/全卡目录直扫与闲聊回放评测框架落地；记忆卡片规范重设计、睡前整理与日反思合流及 hot-tidy）。
+> 最后更新：2026-11-26（双协议向量客户端 `llm/embedding.ts`、独立精排客户端 `llm/reranker.ts` 与三路线回放盲测收官；召回门控 `recall-gate.md` v2 双边判据落地）。
 
 ## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与 Decision 召回门控已落地
 
 ### 已完成
+- **向量嵌入 + 独立精排客户端与三路线回放盲测（`server/`，2026-11-26）**：
+  - 新增 `core/embedding.ts`、`llm/embedding.ts`（Google 原生 `:embedContent`/`:batchEmbedContents` + OpenAI 兼容 `/embeddings` 与 Qwen3 查询指令）、`core/reranker.ts`、`llm/reranker.ts`（标准 `/rerank` HTTP 客户端）；`router.ts` 新增 `embedding`/`reranker` 槽位解析（不回落 `chat`）与连通测试，`index.ts`/`direct.ts` 接入 `DirectEngine`。
+  - `memory/recall.ts` 升级批量卡片嵌入、自动分流路由（配置 `slots.embedding` 时默认走纯向量 Top-15 粗筛 + Decision 联合门控精排，`hybridFtsWithEmbedding=false`；未配置时沿用 ≤250 张全卡直扫）及独立 `reranker` 并行门控路径；默认阈值调整为 `gate.threshold=0.35`、`rerank.threshold=0.30`、`candidatePool=15`；同步更新 `docs/MEMORY.md` 与 `docs/spec/02-memory-execution.md` §7。
+  - `memory/recall_eval.ts` 与 `scripts/eval_recall_replay.ts` 新增磁盘向量/精排缓存及 `embed_*`/`hybrid_*`/`embed_*rerank` 变体；闲聊回放盲测验证纯向量粗筛（`Qwen3-Embedding-8B` / `gemini-embedding-2`）+ `gemini-decision-1` 联合门控精排显著优于全卡直扫、混合 RRF 与传统 Cross-Encoder `Qwen3-Reranker-8B`。
+- **召回门控 `noul` 双边判据（`prompts/` + `docs/` + `server/`，2026-11-26）**：
+  - `prompts/recall-gate.md` 升级至 v2，为 `needs_memory` 与 `card_relevance` 新增 `## true` / `## false` 双边判据（明确排除常驻已覆盖、闲聊情绪宣泄、偶然撞词与硬翻旧账）；同步更新 `prompts/README.md` 与 `docs/spec/02-memory-execution.md` §7。
+  - `memory/recall.ts` 新增 `parseRecallGatePrompt`（向后兼容旧版无子节提示词）并在全卡直扫与候选池精排统一透传 `criteria: { true_description, false_description }`（含 `{{card_id}}` 替换）；`llm/decision.ts` 对齐 Google `/v1beta/decisions` `NoulCriteria` 字段名并兼容 `true`/`false` 简写映射；补充单测覆盖。
 - **Decision 召回门控、全卡目录直扫与闲聊回放评测框架（`docs/` + `prompts/` + `server/`，2026-11-25）**：
   - 契约与提示词：新增 `prompts/recall-gate.md`，更新 `docs/spec/02-memory-execution.md` §7/§9.3 与 `docs/MEMORY.md`；`core/decision.ts` 抽出共享 `DecisionClient` 接口与 `sanitizeUnicode`（修复截断 emoji 导致 Decisions API HTTP 400）；`llm/decision.ts` 与 `router.ts` 修复本地代理（`/v1` → `/v1beta/decisions`）下 `gemini-decision-*` 原生路由。
   - 召回优化：`recall.ts` 接入查询窗口、`<resident_context>`（`core/{open,state,user,self}.md` 精简 ≤1500 字）、活跃卡 ≤250 张单次全卡目录直扫（超上限自动切 FTS+精排）、`rerank_score` 落库与超时降级；默认参数经真实闲聊回放集调优定为 `gate.threshold=0.20`、`rerank.threshold=0.25`、`decisionTimeoutMs=3000`（`gate.enabled=false` 可一键回退）。
@@ -37,5 +44,5 @@
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位；大记忆库（>250 张活跃卡）阶段再按数据评估接入 Embedding 粗筛。
 
 ## 2. 验证结果
-- **`server/`（2026-11-25）**：`bun run typecheck` 零错误；`bun test`（22 文件 / 90 用例）89 通过，唯一失败为既有 `slice3_circadian_tidy_api.test.ts` 中 Bark/ntfy 并发扇出顺序偶发断言；召回门控与回放评测新增单测（`recall_and_tools.test.ts`、`recall_eval.test.ts`、`reflect_and_decision.test.ts`）全绿。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（22 文件 / 91 用例 / 1231 断言）全部通过。
 - **`app/`**：`2026-11-23` `AppDelegate.swift` 已通过 `swiftc -parse`；`1104b64` 与 `392d5c0` 前端改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

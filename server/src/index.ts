@@ -55,6 +55,8 @@ import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import { ModelCatalogService } from "./llm/catalog.ts";
 import type { ChatModelClient } from "./llm/client.ts";
 import { DynamicDecisionClient, LlmFallbackDecisionClient } from "./llm/decision.ts";
+import { DynamicEmbeddingClient, type EmbeddingClient } from "./llm/embedding.ts";
+import { DynamicRerankerClient, type RerankerClient } from "./llm/reranker.ts";
 import { DynamicChatModel, type ResolvedByokSlot } from "./llm/router.ts";
 import { DrawerStore } from "./memory/drawer.ts";
 import { readIdentityProfile } from "./memory/genesis.ts";
@@ -96,6 +98,10 @@ export interface BootOptions {
   tidyRetryDelaysMs?: number[];
   /** 可注入决策模型客户端（供离线测试验证反思门控） */
   decisionClient?: DecisionClient;
+  /** 可注入向量嵌入客户端（供离线测试或覆盖配置槽位） */
+  embeddingClient?: EmbeddingClient;
+  /** 可注入二阶段精排客户端（供离线测试或覆盖配置槽位） */
+  rerankerClient?: RerankerClient;
   /** 可注入桌面通知发送器，供离线测试阻断系统弹窗 */
   desktopSender?: (payload: NotificationPayload) => Promise<void>;
   /** 可注入 fetch 实现，供离线测试阻断外网请求 */
@@ -304,6 +310,25 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           dataDir,
           getConfig: () => config,
           catalog: modelCatalog,
+          fetchImpl: opts.fetchImpl,
+        }));
+
+  const embeddingClient: EmbeddingClient | undefined =
+    opts.embeddingClient ??
+    (opts.chatModel
+      ? undefined
+      : new DynamicEmbeddingClient({
+          dataDir,
+          getConfig: () => config,
+          fetchImpl: opts.fetchImpl,
+        }));
+  const rerankerClient: RerankerClient | undefined =
+    opts.rerankerClient ??
+    (opts.chatModel
+      ? undefined
+      : new DynamicRerankerClient({
+          dataDir,
+          getConfig: () => config,
           fetchImpl: opts.fetchImpl,
         }));
 
@@ -684,6 +709,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     chatModel,
     db,
     media,
+    embedding: embeddingClient,
+    reranker: rerankerClient,
     decisionClient: bedtimeDecisionClient,
     onBeforeRollover: (ctx) => runSyncDailyWrapup(ctx),
     onRolloverStatus: (ev) => {

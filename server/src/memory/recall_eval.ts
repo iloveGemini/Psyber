@@ -14,6 +14,8 @@ import {
   type DecisionRequest,
   type DecisionResponse,
 } from "../core/decision.ts";
+import type { EmbeddingClient, EmbeddingOptions } from "../core/embedding.ts";
+import type { RerankerClient, RerankerOptions, RerankItem } from "../core/reranker.ts";
 import { stripFrontmatter } from "../core/prompts.ts";
 import { effectiveStatus } from "./frontmatter.ts";
 import { MemoryIndex, type CardIndexRow } from "./index.ts";
@@ -87,6 +89,8 @@ export interface EvalVariantSpec {
   name: string;
   recallConfig?: Partial<RecallConfig>;
   useDecisionClient?: boolean;
+  useEmbeddingClient?: boolean;
+  useRerankerClient?: boolean;
   /** 若不传则使用默认 recallMemories */
   runner?: (ctx: {
     db: Database;
@@ -95,6 +99,8 @@ export interface EvalVariantSpec {
     clock: VirtualClock;
     record: GoldRecord;
     decisionClient?: DecisionClient;
+    embeddingClient?: EmbeddingClient;
+    rerankerClient?: RerankerClient;
     promptsDir?: string;
   }) => Promise<RecallResult & { timedOut?: boolean }>;
 }
@@ -237,6 +243,261 @@ export class CachedDecisionClient implements DecisionClient {
     await fs.mkdir(path.dirname(this.cachePath), { recursive: true });
     await fs.appendFile(this.cachePath, JSON.stringify(entry) + "\n", "utf8");
     return response;
+  }
+}
+
+interface EmbeddingCacheEntry {
+  key: string;
+  dim: number;
+  b64: string;
+  cachedAt: string;
+}
+
+/**
+ * 磁盘持久化向量缓存（按 modelKey + taskType + text 的 SHA-256 键缓存，
+ * 避免跨快照/跨阈值重复请求向量模型，自动处理 429/5xx 瞬时退避重试）。
+ */
+export class CachedEmbeddingClient implements EmbeddingClient {
+  private readonly cache = new Map<string, Float32Array>();
+  private loaded = false;
+  public hits = 0;
+  public misses = 0;
+
+  constructor(
+    private readonly inner: EmbeddingClient,
+    private readonly cachePath: string,
+  ) {}
+
+  get modelKey(): string {
+    return this.inner.modelKey;
+  }
+
+  isConfigured(): boolean {
+    return this.inner.isConfigured ? this.inner.isConfigured() : true;
+  }
+
+  private async ensureLoaded(): Promise<void> {
+    if (this.loaded) return;
+    this.loaded = true;
+    try {
+      const raw = await fs.readFile(this.cachePath, "utf8");
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as EmbeddingCacheEntry;
+          if (entry?.key && entry?.b64 && entry?.dim > 0) {
+            const buf = Buffer.from(entry.b64, "base64");
+            if (buf.byteLength === entry.dim * 4) {
+              const vec = new Float32Array(entry.dim);
+              new Uint8Array(vec.buffer).set(buf);
+              this.cache.set(entry.key, vec);
+            }
+          }
+        } catch {
+          // 忽略损坏行
+        }
+      }
+    } catch {
+      // 首次无缓存文件
+    }
+  }
+
+  private hashText(text: string, opts?: EmbeddingOptions): string {
+    return crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify({
+          modelKey: this.inner.modelKey,
+          taskType: opts?.taskType ?? "default",
+          text,
+        }),
+      )
+      .digest("hex");
+  }
+
+  private async callWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          msg.includes("429") ||
+          msg.includes("too_many_requests") ||
+          msg.includes("HTTP 502") ||
+          msg.includes("HTTP 503") ||
+          msg.includes("HTTP 504")
+        ) {
+          const secMatch = /retry in\s+(\d+)\s*s/i.exec(msg);
+          const waitMs = (secMatch ? Number(secMatch[1]) + 2 : (attempt + 1) * 8) * 1000;
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  }
+
+  async embed(text: string, opts?: EmbeddingOptions): Promise<Float32Array> {
+    const [vec] = await this.embedBatch([text], opts);
+    return vec;
+  }
+
+  async embedBatch(texts: string[], opts?: EmbeddingOptions): Promise<Float32Array[]> {
+    await this.ensureLoaded();
+    const out = new Array<Float32Array>(texts.length);
+    const missIndices: number[] = [];
+    const missKeys: string[] = [];
+    const missTexts: string[] = [];
+
+    for (let i = 0; i < texts.length; i++) {
+      const key = this.hashText(texts[i], opts);
+      const cached = this.cache.get(key);
+      if (cached) {
+        this.hits++;
+        out[i] = cached;
+      } else {
+        this.misses++;
+        missIndices.push(i);
+        missKeys.push(key);
+        missTexts.push(texts[i]);
+      }
+    }
+
+    if (missTexts.length > 0) {
+      const computed = await this.callWithRetry(async () => {
+        if (this.inner.embedBatch) {
+          return this.inner.embedBatch(missTexts, opts);
+        }
+        const res: Float32Array[] = [];
+        for (const t of missTexts) {
+          res.push(await this.inner.embed(t, opts));
+        }
+        return res;
+      });
+
+      const lines: string[] = [];
+      const nowIso = new Date().toISOString();
+      for (let j = 0; j < missIndices.length; j++) {
+        const vec = computed[j];
+        const idx = missIndices[j];
+        const key = missKeys[j];
+        out[idx] = vec;
+        this.cache.set(key, vec);
+        const b64 = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength).toString("base64");
+        const entry: EmbeddingCacheEntry = { key, dim: vec.length, b64, cachedAt: nowIso };
+        lines.push(JSON.stringify(entry));
+      }
+      await fs.mkdir(path.dirname(this.cachePath), { recursive: true });
+      await fs.appendFile(this.cachePath, lines.join("\n") + "\n", "utf8");
+    }
+
+    return out;
+  }
+}
+
+interface RerankCacheEntry {
+  key: string;
+  results: RerankItem[];
+  cachedAt: string;
+}
+
+/**
+ * 磁盘持久化精排缓存（按 modelKey + query + documents 的 SHA-256 键缓存，
+ * 避免跨阈值扫描重复请求 Reranker API，自动处理 429/5xx 瞬时退避重试）。
+ */
+export class CachedRerankerClient implements RerankerClient {
+  private readonly cache = new Map<string, RerankItem[]>();
+  private loaded = false;
+  public hits = 0;
+  public misses = 0;
+
+  constructor(
+    private readonly inner: RerankerClient,
+    private readonly cachePath: string,
+  ) {}
+
+  get modelKey(): string {
+    return this.inner.modelKey;
+  }
+
+  isConfigured(): boolean {
+    return this.inner.isConfigured ? this.inner.isConfigured() : true;
+  }
+
+  private async ensureLoaded(): Promise<void> {
+    if (this.loaded) return;
+    this.loaded = true;
+    try {
+      const raw = await fs.readFile(this.cachePath, "utf8");
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as RerankCacheEntry;
+          if (entry?.key && Array.isArray(entry.results)) {
+            this.cache.set(entry.key, entry.results);
+          }
+        } catch {
+          // 忽略损坏行
+        }
+      }
+    } catch {
+      // 首次无缓存文件
+    }
+  }
+
+  private hashRequest(query: string, documents: string[]): string {
+    return crypto
+      .createHash("sha256")
+      .update(JSON.stringify({ modelKey: this.inner.modelKey, query, documents }))
+      .digest("hex");
+  }
+
+  async rerank(query: string, documents: string[], opts?: RerankerOptions): Promise<RerankItem[]> {
+    if (documents.length === 0) return [];
+    await this.ensureLoaded();
+    const key = this.hashRequest(query, documents);
+    const cached = this.cache.get(key);
+    if (cached) {
+      this.hits++;
+      return opts?.topN ? cached.slice(0, opts.topN) : cached;
+    }
+
+    this.misses++;
+    let results: RerankItem[] | null = null;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        results = await this.inner.rerank(query, documents, { signal: opts?.signal });
+        break;
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          msg.includes("429") ||
+          msg.includes("too_many_requests") ||
+          msg.includes("HTTP 502") ||
+          msg.includes("HTTP 503") ||
+          msg.includes("HTTP 504")
+        ) {
+          const secMatch = /retry in\s+(\d+)\s*s/i.exec(msg);
+          const waitMs = (secMatch ? Number(secMatch[1]) + 2 : (attempt + 1) * 8) * 1000;
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!results) throw lastErr;
+
+    this.cache.set(key, results);
+    const entry: RerankCacheEntry = { key, results, cachedAt: new Date().toISOString() };
+    await fs.mkdir(path.dirname(this.cachePath), { recursive: true });
+    await fs.appendFile(this.cachePath, JSON.stringify(entry) + "\n", "utf8");
+    return opts?.topN ? results.slice(0, opts.topN) : results;
   }
 }
 
@@ -1252,6 +1513,8 @@ export async function runEvalVariant(opts: {
   variant: EvalVariantSpec;
   gold?: GoldRecord[];
   decisionClient?: DecisionClient;
+  embeddingClient?: EmbeddingClient;
+  rerankerClient?: RerankerClient;
   promptsDir?: string;
   saveReport?: boolean;
 }): Promise<EvalReport> {
@@ -1273,6 +1536,8 @@ export async function runEvalVariant(opts: {
           clock: snap.clock,
           record: rec,
           decisionClient: opts.variant.useDecisionClient ? opts.decisionClient : undefined,
+          embeddingClient: opts.variant.useEmbeddingClient ? opts.embeddingClient : undefined,
+          rerankerClient: opts.variant.useRerankerClient ? opts.rerankerClient : undefined,
           promptsDir: opts.promptsDir,
         });
       } else {
@@ -1285,6 +1550,8 @@ export async function runEvalVariant(opts: {
           turnId: rec.turnId,
           query: rec.userText,
           recentTurns: rec.recentTurns,
+          embedding: opts.variant.useEmbeddingClient ? opts.embeddingClient : undefined,
+          reranker: opts.variant.useRerankerClient ? opts.rerankerClient : undefined,
           decisionClient: opts.variant.useDecisionClient ? opts.decisionClient : undefined,
           promptsDir: opts.promptsDir,
           recallConfig: opts.variant.recallConfig,

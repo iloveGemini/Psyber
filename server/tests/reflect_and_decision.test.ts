@@ -30,6 +30,17 @@ import {
   GeminiDecisionClient,
   isGeminiDecisionModel,
 } from "../src/llm/decision.ts";
+import {
+  DynamicEmbeddingClient,
+  GeminiEmbeddingClient,
+  isEmbeddingModelId,
+  OpenAiEmbeddingClient,
+} from "../src/llm/embedding.ts";
+import {
+  DynamicRerankerClient,
+  HttpRerankerClient,
+  isRerankerModelId,
+} from "../src/llm/reranker.ts";
 import { discoverProviderModels, resolveByokSlot, testModelConnection } from "../src/llm/router.ts";
 import { runMemoryTidyTask } from "../src/engine/tidy.ts";
 import { MemoryIndex } from "../src/memory/index.ts";
@@ -575,7 +586,14 @@ describe("GeminiDecisionClient, DynamicDecisionClient & router decision slot", (
     const res = await client.decide({
       input: "Today we discussed boundaries.",
       questions: {
-        need_reflect: { type: "noul", instructions: "Should we reflect?" },
+        need_reflect: {
+          type: "noul",
+          instructions: "Should we reflect?",
+          criteria: {
+            true: "Contains boundary or emotional shift.",
+            false: "Ordinary small talk only.",
+          },
+        },
         scope: {
           type: "choice",
           instructions: "Which scope?",
@@ -589,6 +607,18 @@ describe("GeminiDecisionClient, DynamicDecisionClient & router decision slot", (
     expect(capturedUrl).toBe("https://generativelanguage.googleapis.com/v1beta/decisions");
     expect(capturedHeaders["x-goog-api-key"]).toBe("test-google-key");
     expect(capturedBody.model).toBe("gemini-decision-1");
+    const sentQuestions = capturedBody.questions as Record<
+      string,
+      { criteria?: Record<string, string> }
+    >;
+    expect(sentQuestions.need_reflect?.criteria).toEqual({
+      true_description: "Contains boundary or emotional shift.",
+      false_description: "Ordinary small talk only.",
+    });
+    expect(sentQuestions.scope?.criteria).toEqual({
+      daily: "Single day",
+      weekly: "Cross-day",
+    });
     expect(res.backend).toBe("gemini-decisions:gemini-decision-1");
     expect(res.answers.need_reflect?.noul).toBeCloseTo(0.82, 4);
     expect(res.answers.need_reflect?.confidence).toBeCloseTo(0.91, 4);
@@ -695,5 +725,168 @@ describe("GeminiDecisionClient, DynamicDecisionClient & router decision slot", (
     if (slotRes.ok) {
       expect(slotRes.slot.modelId).toBe("gpt-4o-mini");
     }
+
+    // 5. embedding slot does NOT fallback to chat when unset
+    const unsetEmbed = resolveByokSlot(config, creds, "embedding");
+    expect(unsetEmbed.ok).toBe(false);
+  });
+
+  test("GeminiEmbeddingClient & OpenAiEmbeddingClient support batch, Qwen3 query instruct, L2 norm & testModelConnection", async () => {
+    const geminiReqs: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const geminiFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      geminiReqs.push({ url, body });
+      if (url.endsWith(":batchEmbedContents")) {
+        return new Response(
+          JSON.stringify({
+            embeddings: [{ values: [3, 4] }, { values: [0, 5] }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ embedding: { values: [3, 4] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const gClient = new GeminiEmbeddingClient({
+      apiKey: "g-key",
+      modelId: "gemini-embedding-2",
+      fetchImpl: geminiFetch,
+    });
+    const qVec = await gClient.embed("测试查询", { taskType: "query" });
+    expect(qVec[0]).toBeCloseTo(0.6, 5);
+    expect(qVec[1]).toBeCloseTo(0.8, 5);
+    expect(geminiReqs[0]?.url).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+    );
+    expect(geminiReqs[0]?.body.taskType).toBe("RETRIEVAL_QUERY");
+
+    const docVecs = await gClient.embedBatch(["文档A", "文档B"], { taskType: "document" });
+    expect(docVecs.length).toBe(2);
+    expect(docVecs[1][1]).toBeCloseTo(1.0, 5);
+    expect(geminiReqs[1]?.url).toContain(":batchEmbedContents");
+
+    const openAiReqs: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const openAiFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      openAiReqs.push({ url, body });
+      const inputs = Array.isArray(body.input) ? body.input : [body.input];
+      return new Response(
+        JSON.stringify({
+          data: inputs
+            .map((_, idx) => ({ index: idx, embedding: [idx === 0 ? 3 : 0, 4] }))
+            .reverse(),
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const qwenClient = new OpenAiEmbeddingClient({
+      apiKey: "sf-key",
+      providerId: "Siliconflow-cn",
+      baseUrl: "https://api.siliconflow.cn/v1",
+      modelId: "Qwen/Qwen3-Embedding-8B",
+      fetchImpl: openAiFetch,
+    });
+    const qwenQ = await qwenClient.embed("上次说的电影", { taskType: "query" });
+    expect(qwenQ[0]).toBeCloseTo(0.6, 5);
+    expect(String(openAiReqs[0]?.body.input)).toContain("Instruct:");
+    expect(String(openAiReqs[0]?.body.input)).toContain("Query:上次说的电影");
+
+    const qwenDocs = await qwenClient.embedBatch(["卡片一", "卡片二"], { taskType: "document" });
+    expect(qwenDocs.length).toBe(2);
+    expect(qwenDocs[0][0]).toBeCloseTo(0.6, 5);
+    expect(qwenDocs[1][0]).toBeCloseTo(0, 5);
+    expect(openAiReqs[1]?.body.input).toEqual(["卡片一", "卡片二"]);
+
+    expect(isEmbeddingModelId("Qwen/Qwen3-Embedding-8B")).toBe(true);
+    expect(isEmbeddingModelId("gemini-embedding-2")).toBe(true);
+    expect(isEmbeddingModelId("gemini-4-neon")).toBe(false);
+
+    const dataDir = await makeTempDir("psyber-embed-slot-");
+    await initDataDir(dataDir);
+    const cfg = await loadOrCreateConfig(dataDir, Date.now());
+    cfg.llm = {
+      providers: {
+        sf: { kind: "openai-compat", authMode: "api_key", baseUrl: "https://api.siliconflow.cn/v1" },
+      },
+      slots: { chat: { provider: "sf", model: "chat-m" } },
+      thinking: { enabled: false },
+    };
+    const dynEmbed = new DynamicEmbeddingClient({
+      dataDir,
+      getConfig: () => cfg,
+      fetchImpl: openAiFetch,
+    });
+    expect(dynEmbed.isConfigured()).toBe(false);
+
+    cfg.llm.slots.embedding = { provider: "sf", model: "Qwen/Qwen3-Embedding-8B" };
+    await saveConfig(dataDir, cfg);
+    await saveCredentials(dataDir, { apiKeys: { sf: "sf-key" }, channelTokens: {} });
+    expect(dynEmbed.isConfigured()).toBe(true);
+    expect(dynEmbed.modelKey).toBe("sf:Qwen/Qwen3-Embedding-8B");
+
+    const pingRes = await testModelConnection({
+      config: cfg,
+      creds: { apiKeys: { sf: "sf-key" }, channelTokens: {} },
+      providerId: "sf",
+      modelId: "Qwen/Qwen3-Embedding-8B",
+      fetchImpl: openAiFetch,
+    });
+    expect(pingRes.ok).toBe(true);
+
+    // Reranker client & slot connectivity test
+    expect(isRerankerModelId("Qwen/Qwen3-Reranker-8B")).toBe(true);
+    expect(isRerankerModelId("Qwen/Qwen3-Embedding-8B")).toBe(false);
+    expect(resolveByokSlot(cfg, { apiKeys: { sf: "sf-key" }, channelTokens: {} }, "reranker").ok).toBe(false);
+
+    let rerankUrl = "";
+    const rerankFetch = (async (input: RequestInfo | URL) => {
+      rerankUrl = String(input);
+      return new Response(
+        JSON.stringify({
+          results: [
+            { index: 1, relevance_score: 0.91 },
+            { index: 0, relevance_score: 0.14 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const rr = new HttpRerankerClient({
+      apiKey: "sf-key",
+      providerId: "sf",
+      baseUrl: "https://api.siliconflow.cn/v1",
+      modelId: "Qwen/Qwen3-Reranker-8B",
+      fetchImpl: rerankFetch,
+    });
+    const ranked = await rr.rerank("加班崩溃", ["买菜清单", "深夜加班记录"]);
+    expect(rerankUrl).toBe("https://api.siliconflow.cn/v1/rerank");
+    expect(ranked[0]?.index).toBe(1);
+    expect(ranked[0]?.relevanceScore).toBeCloseTo(0.91, 4);
+
+    const dynRerank = new DynamicRerankerClient({
+      dataDir,
+      getConfig: () => cfg,
+      fetchImpl: rerankFetch,
+    });
+    expect(dynRerank.isConfigured()).toBe(false);
+    cfg.llm.slots.reranker = { provider: "sf", model: "Qwen/Qwen3-Reranker-8B" };
+    await saveConfig(dataDir, cfg);
+    expect(dynRerank.isConfigured()).toBe(true);
+    expect(dynRerank.modelKey).toBe("sf:Qwen/Qwen3-Reranker-8B");
+    const rrPing = await testModelConnection({
+      config: cfg,
+      creds: { apiKeys: { sf: "sf-key" }, channelTokens: {} },
+      providerId: "sf",
+      modelId: "Qwen/Qwen3-Reranker-8B",
+      fetchImpl: rerankFetch,
+    });
+    expect(rrPing.ok).toBe(true);
   });
 });

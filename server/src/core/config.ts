@@ -26,12 +26,12 @@ export interface PairedDevice {
 export interface RecallGateConfig {
   /** 是否启用决策模型门控与候选精排（默认 true；关闭后一键回退至纯规则 + FTS 分数门槛） */
   enabled: boolean;
-  /** 整轮是否需要召回的概率门槛（0..1，默认 0.20；因注入了 <resident_context> 决策模型偏克制，实测 0.20 可将闲聊误召压至 ~14% 且保住回指命中；调高更安静，调低更易触发） */
+  /** 整轮是否需要召回的概率门槛（0..1，默认 0.35；配合 recall-gate.md v2 双边判据实测平衡误召与命中；偏高更安静，如 0.35/0.35 噪声可低至 ~23%，调低至 0.30 可进一步提升召回率） */
   threshold: number;
 }
 
 export interface RecallRerankConfig {
-  /** 单张候选卡的相关性概率门槛（0..1，默认 0.25；调高进一步压低噪声卡，调低保留更多联想卡） */
+  /** 单张候选卡的相关性概率门槛（0..1，默认 0.30；调高至 0.35 可进一步压低噪声卡，调低保留更多联想卡） */
   threshold: number;
 }
 
@@ -52,12 +52,18 @@ export interface RecallConfig {
   decisionTimeoutMs?: number;
   /** 拼入检索查询与门控上下文的近期历史消息条数（单位：条，默认 4，即最近约 2 轮；调大补足短句上下文但可能引入旧话题词） */
   queryWindowTurns?: number;
-  /** 精排前宽召回候选池上限（单位：张，默认 10；仅在全卡目录直扫未触发时生效） */
+  /** 精排前宽召回候选池上限（单位：张，默认 15；配置 embedding 时自动走纯向量 Top-15 粗筛，未配置且超 catalogScanMaxCards 时用于 FTS 候选池） */
   candidatePool?: number;
-  /** 活跃卡总数不超过此值且开启决策门控时，直接用单次决策扫描全部活跃卡的「标题 + when_to_recall」，绕开 FTS5 字面漏召（单位：张，默认 250；设为 0 禁用直扫） */
+  /** 未配置 embedding 且活跃卡总数不超过此值并开启决策门控时，用单次决策扫描全部活跃卡的「标题 + when_to_recall」（单位：张，默认 250；设为 0 禁用直扫） */
   catalogScanMaxCards?: number;
   /** 门控关闭或超时降级时的 FTS 归一化分数门槛（0..1，默认 0.25；调高过滤弱撞词噪声，调低放宽字面命中） */
   ftsMinScore?: number;
+  /** 向量粗筛最低余弦相似度门槛（0..1，默认 0.35；开启决策精排时默认放宽至 0.25 以扩大候选池） */
+  embedMinScore?: number;
+  /** 向量可用时是否使用 RRF 将 FTS5 字面命中与向量语义命中混合融合（默认 false，实测纯向量粗筛显著优于混合 RRF；FTS5 仍作为向量异常时的降级兜底） */
+  hybridFtsWithEmbedding?: boolean;
+  /** 二阶段独立精排模型（reranker）单次超时阈值（单位：毫秒，默认 3000；超时自动降级） */
+  rerankTimeoutMs?: number;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallConfig = {
@@ -67,16 +73,18 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   embedTimeoutMs: 2500,
   gate: {
     enabled: true,
-    threshold: 0.2,
+    threshold: 0.35,
   },
   rerank: {
-    threshold: 0.25,
+    threshold: 0.3,
   },
   decisionTimeoutMs: 3000,
+  rerankTimeoutMs: 3000,
   queryWindowTurns: 4,
-  candidatePool: 10,
+  candidatePool: 15,
   catalogScanMaxCards: 250,
   ftsMinScore: 0.25,
+  hybridFtsWithEmbedding: false,
 };
 
 /** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */

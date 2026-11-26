@@ -1,6 +1,6 @@
 /**
  * 决策模型单题定义（对齐 Gemini Decisions API `v1beta/decisions`）：
- * - noul: 是/否校准概率（0.01..0.99）
+ * - noul: 是/否校准概率（0.01..0.99），可选 criteria: { true_description, false_description }
  * - choice: 单选分类（criteria 键值映射各选项说明）
  * - score: 有序量表打分
  *

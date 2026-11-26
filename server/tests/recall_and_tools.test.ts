@@ -4,7 +4,12 @@ import { createApp } from "../src/api/app.ts";
 import { saveConfig } from "../src/core/config.ts";
 import { DirectEngine } from "../src/engine/direct.ts";
 import { SseHub, type SseFrame } from "../src/engine/sse.ts";
-import { recallMemories, type EmbeddingClient } from "../src/memory/recall.ts";
+import {
+  parseRecallGatePrompt,
+  recallMemories,
+  type EmbeddingClient,
+} from "../src/memory/recall.ts";
+import type { DecisionQuestion } from "../src/core/decision.ts";
 import {
   ToolRegistry,
   registerCoreTier1Tools,
@@ -514,9 +519,15 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
       "---\ntitle: 未完挂念\n---\n约好周末一起复盘希腊神话积分账本。\n",
     );
     let capturedInput = "";
+    let capturedQuestions: Record<string, DecisionQuestion> = {};
     const capturingDecision = {
-      async decide(req: { input: string; questions: Record<string, unknown>; signal?: AbortSignal }) {
+      async decide(req: {
+        input: string;
+        questions: Record<string, DecisionQuestion>;
+        signal?: AbortSignal;
+      }) {
         capturedInput = req.input;
+        capturedQuestions = req.questions;
         return fakeDecision.decide(req);
       },
     };
@@ -537,5 +548,132 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(capturedInput).toContain("<resident_context>");
     expect(capturedInput).toContain("希腊神话积分账本");
     expect(catalogHit.items.map((i) => i.path)).toEqual(["threads/myth/king.md"]);
+
+    // 校验 recall-gate.md v2 的 true_description / false_description 双边判据及 {{card_id}} 替换
+    expect(capturedQuestions.needs_memory?.criteria?.true_description).toContain("回指");
+    expect(capturedQuestions.needs_memory?.criteria?.false_description).toContain("闲聊");
+    expect(capturedQuestions.c0?.instructions).toContain("[c0]");
+    expect(capturedQuestions.c0?.criteria?.true_description).toContain("[c0]");
+    expect(capturedQuestions.c0?.criteria?.false_description).toContain("[c0]");
+    expect(capturedQuestions.c0?.criteria?.true_description).not.toContain("{{card_id}}");
+
+    // 校验 parseRecallGatePrompt 向后兼容无 ## true / ## false 的旧版单段提示词
+    const legacyParsed = parseRecallGatePrompt(
+      "# needs_memory\n旧版单段门控指令。\n\n# card_relevance\n旧版单段卡片 {{card_id}} 指令。",
+    );
+    expect(legacyParsed.needsMemory.instructions).toBe("旧版单段门控指令。");
+    expect(legacyParsed.needsMemory.criteria).toBeUndefined();
+    expect(legacyParsed.cardRelevance.instructions).toBe("旧版单段卡片 {{card_id}} 指令。");
+    expect(legacyParsed.cardRelevance.criteria).toBeUndefined();
+
+    // 6) 批量向量嵌入 + RRF 混合粗筛（纯语义零字面重叠卡与 FTS 字面卡同时进入候选池）
+    await ctx.tools.write(
+      "episodes/2026/11/19/ep-semantic.md",
+      "---\ntitle: 深夜情绪记录\nkind: episode\ncreated: 2026-11-19\n---\n那天加班到凌晨两点，整个人特别崩溃。\n",
+    );
+    let batchCalls = 0;
+    const semanticEmbed: EmbeddingClient = {
+      modelKey: "mock:semantic-2d",
+      async embed(text) {
+        if (text.includes("撑不住") || text.includes("崩溃")) return new Float32Array([1, 0]);
+        return new Float32Array([0, 1]);
+      },
+      async embedBatch(texts) {
+        batchCalls++;
+        return texts.map((t) => (t.includes("崩溃") ? new Float32Array([1, 0]) : new Float32Array([0, 1])));
+      },
+    };
+    const hybridRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-hybrid",
+      turnId: "t-hybrid-1",
+      query: "最近加班快撑不住了",
+      embedding: semanticEmbed,
+      recallConfig: {
+        gate: { enabled: false, threshold: 0.5 },
+        catalogScanMaxCards: 0,
+        embedMinScore: 0.35,
+        hybridFtsWithEmbedding: true,
+      },
+    });
+    expect(batchCalls).toBe(1);
+    expect(hybridRes.items.some((i) => i.path === "episodes/2026/11/19/ep-semantic.md")).toBe(true);
+
+    // 7) 独立 Reranker 与 Decision needs_memory 门控并行：门控只发 needs_memory 一题，Reranker 精准打分过滤
+    let gateQuestionKeys: string[] = [];
+    const gateOnlyDecision = {
+      async decide(req: { input: string; questions: Record<string, DecisionQuestion> }) {
+        gateQuestionKeys = Object.keys(req.questions);
+        return { answers: { needs_memory: { noul: 0.88 } }, backend: "mock-gate" };
+      },
+    };
+    const mockReranker = {
+      modelKey: "mock:qwen3-reranker",
+      async rerank(_q: string, docs: string[]) {
+        return docs.map((d, index) => ({
+          index,
+          relevanceScore: d.includes("深夜情绪记录") ? 0.94 : 0.05,
+        }));
+      },
+    };
+    const rerankedRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-rerank-parallel",
+      turnId: "t-rerank-1",
+      query: "最近加班快撑不住了",
+      embedding: semanticEmbed,
+      reranker: mockReranker,
+      decisionClient: gateOnlyDecision,
+      promptsDir: PROMPTS_DIR,
+      recallConfig: {
+        gate: { enabled: true, threshold: 0.3 },
+        rerank: { threshold: 0.4 },
+        catalogScanMaxCards: 0,
+        embedMinScore: 0.25,
+        hybridFtsWithEmbedding: false,
+      },
+    });
+    expect(gateQuestionKeys).toEqual(["needs_memory"]);
+    expect(rerankedRes.usedDecisionGate).toBe(true);
+    expect(rerankedRes.items.map((i) => i.path)).toEqual(["episodes/2026/11/19/ep-semantic.md"]);
+    expect(rerankedRes.items[0]?.rerankScore).toBeCloseTo(0.94, 4);
+
+    // 8) 配置了 embedding 时，即使 catalogScanMaxCards=250 也自动走「纯向量粗筛 + <candidates> 正文摘要联合精排」而非全卡目录直扫
+    let vectorGateInput = "";
+    const vectorGateDecision = {
+      async decide(req: { input: string; questions: Record<string, DecisionQuestion> }) {
+        vectorGateInput = req.input;
+        const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.85 } };
+        for (const k of Object.keys(req.questions)) {
+          if (k === "needs_memory") continue;
+          const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+          answers[k] = { noul: block?.includes("ep-semantic.md") ? 0.92 : 0.05 };
+        }
+        return { answers, backend: "mock-vector-gate" };
+      },
+    };
+    const autoVecRes = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-auto-vec",
+      turnId: "t-auto-vec-1",
+      query: "最近加班快撑不住了",
+      embedding: semanticEmbed,
+      decisionClient: vectorGateDecision,
+      promptsDir: PROMPTS_DIR,
+      recallConfig: { catalogScanMaxCards: 250 },
+    });
+    expect(vectorGateInput).toContain("<candidates>");
+    expect(vectorGateInput).not.toContain("<memory_catalog>");
+    expect(vectorGateInput).toContain("凌晨两点");
+    expect(autoVecRes.items.map((i) => i.path)).toEqual(["episodes/2026/11/19/ep-semantic.md"]);
   });
 });

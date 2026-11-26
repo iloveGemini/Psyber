@@ -12,10 +12,14 @@ import os from "node:os";
 import path from "node:path";
 import { loadOrCreateConfig } from "../src/core/config.ts";
 import { DynamicDecisionClient } from "../src/llm/decision.ts";
+import { DynamicEmbeddingClient } from "../src/llm/embedding.ts";
+import { DynamicRerankerClient } from "../src/llm/reranker.ts";
 import {
   applyReviewMarkdown,
   buildAndGradeGold,
   CachedDecisionClient,
+  CachedEmbeddingClient,
+  CachedRerankerClient,
   formatComparisonTable,
   prepareMoments,
   runEvalVariant,
@@ -36,6 +40,10 @@ function parseArgs(argv: string[]) {
   let reviewCount = 50;
   let concurrency = 6;
   let decisionProvider = "";
+  let embeddingProvider = "";
+  let embeddingModel = "";
+  let rerankerProvider = "";
+  let rerankerModel = "";
   const variants: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -45,17 +53,33 @@ function parseArgs(argv: string[]) {
     else if (a === "--review") reviewCount = Number(argv[++i] ?? 50);
     else if (a === "--concurrency") concurrency = Number(argv[++i] ?? 6);
     else if (a === "--decision-provider") decisionProvider = argv[++i] ?? "";
+    else if (a === "--embedding-provider") embeddingProvider = argv[++i] ?? "";
+    else if (a === "--embedding-model") embeddingModel = argv[++i] ?? "";
+    else if (a === "--reranker-provider") rerankerProvider = argv[++i] ?? "";
+    else if (a === "--reranker-model") rerankerModel = argv[++i] ?? "";
     else if (a === "--variant") variants.push(argv[++i] ?? "");
     else if (!a.startsWith("-") && !command) command = a;
   }
 
   if (!dataDir || !command) {
     console.error(
-      "Usage: bun run eval:recall-replay --data-dir <dir> <prepare|grade|apply-review|run> [--sample 180] [--review 50] [--variant baseline] [--decision-provider <name>]",
+      "Usage: bun run eval:recall-replay --data-dir <dir> <prepare|grade|apply-review|run> [--sample 180] [--review 50] [--variant baseline] [--decision-provider <name>] [--embedding-provider <name> --embedding-model <id>] [--reranker-provider <name> --reranker-model <id>]",
     );
     process.exit(1);
   }
-  return { dataDir, command, sampleSize, reviewCount, concurrency, decisionProvider, variants };
+  return {
+    dataDir,
+    command,
+    sampleSize,
+    reviewCount,
+    concurrency,
+    decisionProvider,
+    embeddingProvider,
+    embeddingModel,
+    rerankerProvider,
+    rerankerModel,
+    variants,
+  };
 }
 
 async function main() {
@@ -67,12 +91,42 @@ async function main() {
       provider: args.decisionProvider,
     };
   }
+  if (args.embeddingProvider && args.embeddingModel && cfg.llm) {
+    cfg.llm.slots.embedding = {
+      provider: args.embeddingProvider,
+      model: args.embeddingModel,
+    };
+  }
+  if (args.rerankerProvider && args.rerankerModel && cfg.llm) {
+    cfg.llm.slots.reranker = {
+      provider: args.rerankerProvider,
+      model: args.rerankerModel,
+    };
+  }
   const cachePath = path.join(args.dataDir, "eval", "decision_cache.jsonl");
   const rawDecision = new DynamicDecisionClient({
     dataDir: args.dataDir,
     getConfig: () => cfg,
   });
   const decisionClient = new CachedDecisionClient(rawDecision, cachePath);
+
+  const embedCachePath = path.join(args.dataDir, "eval", "embedding_cache.jsonl");
+  const rawEmbedding = new DynamicEmbeddingClient({
+    dataDir: args.dataDir,
+    getConfig: () => cfg,
+  });
+  const embeddingClient = rawEmbedding.isConfigured()
+    ? new CachedEmbeddingClient(rawEmbedding, embedCachePath)
+    : undefined;
+
+  const rerankCachePath = path.join(args.dataDir, "eval", "rerank_cache.jsonl");
+  const rawReranker = new DynamicRerankerClient({
+    dataDir: args.dataDir,
+    getConfig: () => cfg,
+  });
+  const rerankerClient = rawReranker.isConfigured()
+    ? new CachedRerankerClient(rawReranker, rerankCachePath)
+    : undefined;
 
   if (args.command === "prepare") {
     console.log(`[eval] 正在对 ${args.dataDir} 提取并分类聊天时刻...`);
@@ -221,23 +275,179 @@ async function main() {
               decisionTimeoutMs: 10_000,
             },
           };
+        case "embed_only":
+          return {
+            name,
+            useDecisionClient: false,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              gate: { enabled: false, threshold: 0.55 },
+              queryWindowTurns: 4,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.35,
+              hybridFtsWithEmbedding: false,
+            },
+          };
+        case "embed_gate":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              gate: { enabled: true, threshold: 0.25 },
+              rerank: { threshold: 0.25 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+              decisionTimeoutMs: 10_000,
+            },
+          };
+        case "embed_gate_strict":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              gate: { enabled: true, threshold: 0.45 },
+              rerank: { threshold: 0.4 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+              decisionTimeoutMs: 10_000,
+            },
+          };
+        case "hybrid_gate":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              gate: { enabled: true, threshold: 0.25 },
+              rerank: { threshold: 0.25 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: true,
+              decisionTimeoutMs: 10_000,
+            },
+          };
+        case "hybrid_gate_strict":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              gate: { enabled: true, threshold: 0.45 },
+              rerank: { threshold: 0.4 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: true,
+              decisionTimeoutMs: 10_000,
+            },
+          };
+        case "embed_rerank":
+          return {
+            name,
+            useDecisionClient: false,
+            useEmbeddingClient: true,
+            useRerankerClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              rerankTimeoutMs: 15_000,
+              gate: { enabled: false, threshold: 0.55 },
+              rerank: { threshold: 0.5 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+            },
+          };
+        case "embed_gate_rerank":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            useRerankerClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              rerankTimeoutMs: 15_000,
+              decisionTimeoutMs: 10_000,
+              gate: { enabled: true, threshold: 0.3 },
+              rerank: { threshold: 0.35 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+            },
+          };
         default:
-          return { name, useDecisionClient: name.includes("gate") };
+          return {
+            name,
+            useDecisionClient: name.includes("gate"),
+            useEmbeddingClient: name.includes("embed") || name.includes("hybrid"),
+            useRerankerClient: name.includes("rerank"),
+          };
       }
     };
     const specs: EvalVariantSpec[] = requested.map(buildVariant);
 
     const reports: EvalReport[] = [];
     for (const spec of specs) {
-      console.log(`[eval] 运行变体：${spec.name}...`);
+      if (spec.useEmbeddingClient && !embeddingClient) {
+        throw new Error(
+          `Variant "${spec.name}" requires an embedding model. Configure llm.slots.embedding or pass --embedding-provider and --embedding-model.`,
+        );
+      }
+      if (spec.useRerankerClient && !rerankerClient) {
+        throw new Error(
+          `Variant "${spec.name}" requires a reranker model. Configure llm.slots.reranker or pass --reranker-provider and --reranker-model.`,
+        );
+      }
+      const tags: string[] = [];
+      if (spec.useEmbeddingClient && embeddingClient) tags.push(`emb=${embeddingClient.modelKey}`);
+      if (spec.useRerankerClient && rerankerClient) tags.push(`rerank=${rerankerClient.modelKey}`);
+      console.log(`[eval] 运行变体：${spec.name}${tags.length > 0 ? ` (${tags.join(", ")})` : ""}...`);
       const report = await runEvalVariant({
         dataDir: args.dataDir,
         timeZone: cfg.timezone,
         variant: spec,
         decisionClient,
+        embeddingClient,
+        rerankerClient,
         promptsDir: PROMPTS_DIR,
       });
       reports.push(report);
+    }
+    if (embeddingClient) {
+      console.log(
+        `[eval] embedding cache: hits=${embeddingClient.hits}, misses=${embeddingClient.misses} (${embeddingClient.modelKey})`,
+      );
+    }
+    if (rerankerClient) {
+      console.log(
+        `[eval] reranker cache: hits=${rerankerClient.hits}, misses=${rerankerClient.misses} (${rerankerClient.modelKey})`,
+      );
     }
     console.log("\n" + formatComparisonTable(reports));
     return;

@@ -111,11 +111,27 @@ export class GeminiDecisionClient implements DecisionClient {
 
     const questionsPayload: Record<string, Record<string, unknown>> = {};
     for (const [qId, q] of Object.entries(req.questions)) {
-      questionsPayload[qId] = {
+      const payload: Record<string, unknown> = {
         type: q.type,
         instructions: q.instructions,
-        ...(q.criteria ? { criteria: q.criteria } : {}),
       };
+      if (q.criteria) {
+        if (q.type === "noul") {
+          // Google Decisions API 的 NoulCriteria 使用 true_description / false_description；
+          // 同时兼容简写 true / false，避免误传非法键名导致 HTTP 400
+          const trueDesc = (q.criteria.true_description ?? q.criteria.true)?.trim();
+          const falseDesc = (q.criteria.false_description ?? q.criteria.false)?.trim();
+          const noulCriteria: Record<string, string> = {};
+          if (trueDesc) noulCriteria.true_description = trueDesc;
+          if (falseDesc) noulCriteria.false_description = falseDesc;
+          if (Object.keys(noulCriteria).length > 0) {
+            payload.criteria = noulCriteria;
+          }
+        } else {
+          payload.criteria = q.criteria;
+        }
+      }
+      questionsPayload[qId] = payload;
     }
 
     const controller = new AbortController();

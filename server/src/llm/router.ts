@@ -25,8 +25,10 @@ import {
   type ChatStreamRequest,
 } from "./client.ts";
 import { GeminiDecisionClient, isGeminiDecisionModel } from "./decision.ts";
+import { buildEmbeddingClient, isEmbeddingModelId } from "./embedding.ts";
+import { buildRerankerClient, isRerankerModelId } from "./reranker.ts";
 
-export type LlmSlotName = "chat" | "memory_task" | "digest" | "decision";
+export type LlmSlotName = "chat" | "memory_task" | "digest" | "decision" | "embedding" | "reranker";
 
 export type ProviderKind = "anthropic" | "openai" | "google" | "openai-compat";
 
@@ -140,6 +142,7 @@ function resolveModelRef(
  * - memory_task 缺省共用 chat
  * - digest 缺省回落 memory_task -> chat
  * - decision 缺省回落 digest -> memory_task -> chat
+ * - embedding 严格不回落至 chat（未配置即返回 ok: false）
  */
 export function resolveByokSlot(
   config: PsyberConfig,
@@ -147,6 +150,18 @@ export function resolveByokSlot(
   slot: LlmSlotName = "chat",
 ): ResolveSlotResult {
   const slots = config.llm?.slots;
+  if (slot === "embedding") {
+    if (!slots?.embedding?.provider?.trim() || !slots?.embedding?.model?.trim()) {
+      return { ok: false, reason: "尚未配置 embedding 向量模型槽位" };
+    }
+    return resolveModelRef(config, creds, slots.embedding);
+  }
+  if (slot === "reranker") {
+    if (!slots?.reranker?.provider?.trim() || !slots?.reranker?.model?.trim()) {
+      return { ok: false, reason: "尚未配置 reranker 精排模型槽位" };
+    }
+    return resolveModelRef(config, creds, slots.reranker);
+  }
   const ref =
     slot === "decision"
       ? (slots?.decision ?? slots?.digest ?? slots?.memory_task ?? slots?.chat)
@@ -622,6 +637,38 @@ export async function testModelConnection(opts: {
         ok: false,
         latencyMs: Date.now() - start,
         error: err instanceof Error ? err.message : "Decisions API 连通测试失败",
+      };
+    }
+  }
+  if (isEmbeddingModelId(resolved.slot.modelId)) {
+    const embeddingClient = buildEmbeddingClient(resolved.slot, opts.fetchImpl);
+    try {
+      const vec = await embeddingClient.embed("ping", { taskType: "query" });
+      if (vec.length === 0) {
+        return { ok: false, latencyMs: Date.now() - start, error: "Embedding 模型返回空向量" };
+      }
+      return { ok: true, latencyMs: Date.now() - start };
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : "Embedding API 连通测试失败",
+      };
+    }
+  }
+  if (isRerankerModelId(resolved.slot.modelId)) {
+    const rerankerClient = buildRerankerClient(resolved.slot, opts.fetchImpl);
+    try {
+      const items = await rerankerClient.rerank("ping", ["pong"]);
+      if (items.length === 0) {
+        return { ok: false, latencyMs: Date.now() - start, error: "Reranker 模型返回空结果" };
+      }
+      return { ok: true, latencyMs: Date.now() - start };
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : "Rerank API 连通测试失败",
       };
     }
   }

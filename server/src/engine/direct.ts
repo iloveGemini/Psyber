@@ -28,6 +28,7 @@ import {
 import { buildContinuityBlock } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import type { DecisionClient } from "../core/decision.ts";
+import type { RerankerClient } from "../core/reranker.ts";
 import { recallMemories, type EmbeddingClient } from "../memory/recall.ts";
 import { renderCircadianState } from "../mood/circadian.ts";
 import type { ActiveSessionRecord, EventStore, StoredEvent } from "../store/events.ts";
@@ -246,6 +247,8 @@ export interface DirectEngineDeps {
   media?: MediaStore;
   /** 可选 Embedding 客户端（缺省或超时自动降级 FTS5 2-gram） */
   embedding?: EmbeddingClient;
+  /** 可选二阶段精排客户端（如 Qwen3-Reranker-8B；缺省或超时平滑降级） */
+  reranker?: RerankerClient;
   /** 可选决策模型客户端（用于每轮召回门控与候选精排；缺省或超时平滑降级） */
   decisionClient?: DecisionClient;
   /** 429/5xx 指数退避延迟（默认 [1000, 3000] ms，离线测试可传 [0, 0]） */
@@ -900,6 +903,7 @@ export class DirectEngine {
           recentTurns: opts.recentTurns,
           activityHint: opts.activityHint,
           embedding: this.deps.embedding,
+          reranker: this.deps.reranker,
           decisionClient: this.deps.decisionClient,
           promptsDir: this.deps.promptsDir,
           recallConfig: cfg.recall,

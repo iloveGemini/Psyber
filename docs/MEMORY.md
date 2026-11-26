@@ -106,7 +106,7 @@ source: live                      # live | import
    - **每日门控（`reflect_daily`）**：`bedtime` 完成后，对比 `memory/` 自上次日反思 commit 到 `HEAD` 的 Git 变更（忽略 `index.md`、`rf-*.md`、`core/state.md`）。无实质变更则 0 Token 跳过；有实质变更时交由决策槽位（`llm.slots.decision`，原生支持 Google `gemini-decision-1` 的 `POST /v1beta/decisions`，未配时自动降级至 `digest` / `memory_task` / `chat`）判断是否值得启动反思。
    - **周日门控（`reflect_weekly`）**：仅周日 `bedtime` 后额外对比自上周反思 commit 至今的 Git 变更（连同本周已写过的日反思 `rf-*.md` 摘要一起送入决策模型），若新增内容已被日反思充分吸收且无跨天新规律则直接跳过。
    - **自主探索与分流**：反思一旦启动，AI 自主通过 `glob`/`grep`/`read` 扩大查证范围，心路历程写入 `episodes/YYYY/MM/DD/rf-<slug>.md`，成果按作用范围分流至 `core/{self,user,boundaries,mirror,open}.md`、`lessons/*.md`、`threads/` 或 `entities/`。
-3. **极简 3 步召回 + 可选 Decision 门控精排**：
-   - ① 过空档短路后，拼装「当前一句 + 最近 N 轮对话」作为查询窗口，宽召回候选池（命中 `threads/REGISTRY.yaml` 触发词的活跃卡 + Embedding 余弦或 FTS5 2-gram 候选 + 非特定线索闲聊时的近 72h `episodes/`）；
-   - ② 若开启 `recall.gate.enabled` 且 `llm.slots.decision` 可用，经单次 `DecisionClient.decide` 并行判定 `needs_memory`（本轮是否需要翻旧账，防闲聊噪声）与各候选卡相关性（`card_k`，写入 `recall_traces.rerank_score`），仅保留过阈卡片；超时或未配置时平滑降级为现行规则 + FTS 分数门槛；
+3. **极简 3 步召回 + 向量/全卡路由与 Decision 联合门控精排**：
+   - ① 过空档短路后，拼装「当前一句 + 最近 N 轮对话」作为查询窗口与 `<resident_context>` 常驻摘要；
+   - ② 开启 `recall.gate.enabled` 且 `llm.slots.decision` 可用时：若配置了 `llm.slots.embedding`，优先走**纯向量 Top-15 粗筛（1200 字正文语义，关闭 FTS 混合）+ 单次 `DecisionClient.decide` 联合门控与正文摘要精排**；未配置 `embedding` 且活跃卡 ≤250 张时走全卡目录直扫，超限回落 FTS5 候选池精排；超时或异常平滑降级为规则 + FTS 门槛；
    - ③ 2h 本会话去重（续接触发词豁免）并按 3200 字符预算截断。
