@@ -63,11 +63,11 @@ export async function generateAttachmentDigest(
 
   const images: ChatImageContent[] = [];
   for (const hash of uniqueHashes) {
-    const asset = await opts.media.read(hash);
+    const asset = await opts.media.readForLlm(hash);
     if (!asset || asset.expired || !asset.mimeType.startsWith("image/")) continue;
     images.push({
       type: "image",
-      data: Buffer.from(asset.bytes).toString("base64"),
+      data: asset.base64,
       mimeType: asset.mimeType,
     });
   }

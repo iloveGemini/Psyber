@@ -1028,7 +1028,7 @@ export class DirectEngine {
           unavailableAttachmentCount += 1;
           continue;
         }
-        const asset = await this.deps.media.read(hash);
+        const asset = await this.deps.media.readForLlm(hash);
         if (!asset || asset.expired || !asset.mimeType.startsWith("image/")) {
           unavailableAttachmentCount += 1;
           continue;
@@ -1036,7 +1036,7 @@ export class DirectEngine {
         loadedMediaRefs.push(`media:${hash.trim().toLowerCase()}`);
         imageBlocks.push({
           type: "image",
-          data: Buffer.from(asset.bytes).toString("base64"),
+          data: asset.base64,
           mimeType: asset.mimeType,
         });
       }

@@ -59,7 +59,7 @@ export function registerViewMediaTool(
     execute: async (args) => {
       const check = parseMediaIdHash(args.mediaId);
       if (!check.ok) return { ok: false, output: check.reason };
-      const asset = await media.read(check.hash);
+      const asset = await media.readForLlm(check.hash);
       if (!asset) {
         return { ok: false, output: `找不到媒体文件 media:${check.hash}。` };
       }
@@ -78,7 +78,7 @@ export function registerViewMediaTool(
         images: [
           {
             type: "image",
-            data: Buffer.from(asset.bytes).toString("base64"),
+            data: asset.base64,
             mimeType: asset.mimeType,
           },
         ],
