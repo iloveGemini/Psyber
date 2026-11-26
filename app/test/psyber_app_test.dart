@@ -73,6 +73,7 @@ class FakePsyberApiClient implements PsyberApiClient {
   int wrapUpCallCount = 0;
   UserStatus userStatus = UserStatus.initial;
   final List<String> retractedIds = <String>[];
+  final List<String> retriedDigestIds = <String>[];
   final List<String> openedShareIds = <String>[];
   final List<String> openedDoorNoteIds = <String>[];
   UsageStatsSnapshot usageStats = const UsageStatsSnapshot(
@@ -457,6 +458,14 @@ class FakePsyberApiClient implements PsyberApiClient {
   @override
   Future<void> deleteMessage(ConnectionProfile profile, String messageId) async {
     history.removeWhere((e) => e.id == messageId);
+  }
+
+  @override
+  Future<void> retryAttachmentDigest(
+    ConnectionProfile profile,
+    String messageId,
+  ) async {
+    retriedDigestIds.add(messageId);
   }
 
   @override

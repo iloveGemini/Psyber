@@ -578,6 +578,49 @@ export class EventStore {
     this.db.query("UPDATE events SET session_id = ? WHERE id = ?").run(newSessionId, eventId);
   }
 
+  /** 更新用户事件的附件摘要状态与正文（pending / done / failed） */
+  setAttachmentDigestState(
+    eventId: string,
+    state: { status: "pending" | "done" | "failed"; digest?: string | null },
+  ): StoredEvent | null {
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query("SELECT * FROM events WHERE id = ? AND status != 'deleted'")
+        .get(eventId) as EventRow | null;
+      if (!row) return null;
+      let meta: Record<string, unknown> = {};
+      if (row.metadata) {
+        try {
+          const parsed = JSON.parse(row.metadata);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            meta = parsed as Record<string, unknown>;
+          }
+        } catch {
+          meta = {};
+        }
+      }
+      meta.attachmentDigestStatus = state.status;
+      if (typeof state.digest === "string" && state.digest.trim().length > 0) {
+        meta.attachmentDigest = state.digest.trim();
+      } else if (state.digest === null) {
+        delete meta.attachmentDigest;
+      }
+      this.db
+        .query("UPDATE events SET metadata = ? WHERE id = ?")
+        .run(JSON.stringify(meta), eventId);
+      const updated = this.db.query("SELECT * FROM events WHERE id = ?").get(eventId) as EventRow;
+      return mapRow(updated);
+    });
+    return tx();
+  }
+
+  /** 将轻量 digest 模型生成的附件文字摘要回填至用户事件的 metadata.attachmentDigest */
+  setAttachmentDigest(eventId: string, digest: string): boolean {
+    const cleaned = digest.trim();
+    if (!cleaned) return false;
+    return this.setAttachmentDigestState(eventId, { status: "done", digest: cleaned }) !== null;
+  }
+
   /** 冷启动续接原会话时恢复最后一次助手回复的上下文总 Token 占用 */
   getLatestSessionUsageTokens(sessionId: string): number {
     const row = this.db

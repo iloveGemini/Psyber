@@ -1,11 +1,14 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（落地 iOS + macOS 双端 Apple 原生异步语音条与免提实时识别，后端接入 `voiceClip` 与音频媒体仓）。
+> 最后更新：2026-11-26（落地 Ring 1.5 `digest` 并行附件摘要槽位、会话前缀防缓存击穿锁与 Tier 3 `view_media` 原图复看工具）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思、向量+Decision 召回/体检与双端异步语音条已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **附件并行摘要槽位（`digest`）、会话前缀锁与 `view_media` 按需复看（`docs/` + `server/` + `app/`，2026-11-26）**：
+  - 并行摘要与防缓存击穿：新增 `engine/digest.ts`（显式配置 `llm.slots.digest` 时生效，不隐式回落主模型）与 `EventStore.setAttachmentDigestState`/`setAttachmentDigest`；`POST /api/v1/chat/messages` 与 `DirectEngine.executeTurn` 在发图/短视频瞬间与主模型并行起跑摘要（零首字延迟），并实时持久化 `pending` / `done` / `failed` 状态广播 SSE `message.updated`；新增 `POST /api/v1/chat/messages/:id/digest` 支持失败点击重试或手动重生成；`DirectEngine.buildHistoryMessages` 剥除历史 base64 改以 `[图片 media:<hash> · 摘要：...]` 呈现，并加会话级 `historyUserContentCache` 前缀锁杜绝异步晚到击穿 Prompt Cache；`engine/tidy.ts` 冷写整理同步注入 `attachmentDigest`。
+  - 按需复看原图与前端微标：扩展 `ToolResult` 与 `llm/client.ts` `toolResult` 支持临时图片块；新增 Tier 3 只读工具 `extensions/view_media.ts`（`view_media(mediaId)`，仅在当轮工具结果载入原图，跨轮不落盘 base64 自动回收）；客户端时间线附件旁新增淡灰色三态微标（转圈中 / 淡灰勾点击看原文 / 淡灰提醒点击重试），同步更新 `docs/spec/01-engine-tools-prompts.md` §2.3、`app/` 设置页 `digest` 槽位说明与 `tests/attachment_digest.test.ts`（5 组用例）。
 - **异步语音条与 Apple 原生实时识别（适配不方便打字场景，`docs/` + `server/` + `app/`，2026-11-26）**：
   - 契约与后端：更新 `docs/API.md`；`core/media.ts` 新增 `m4a`/`aac`/`wav` 音频映射；`api/app.ts` 与 `engine/direct.ts` 支持 `voiceClip: { mediaHash, durationSec, mimeType }` 校验、落盘、历史透出、重试/编辑/重摇透传及 `[语音 X秒]` 上下文标注（无转写文本亦允许发纯语音条）；新增 `tests/voice_clip.test.ts`。
   - iOS & macOS 原生桥接：`AppDelegate.swift` 与 `MainFlutterWindow.swift` 新增 `psyber/voice` 通道（`AVAudioEngine` 同步录 AAC `.m4a` + `SFSpeechRecognizer` 实时流式识别与长停顿无缝续接 + `AVAudioPlayer` 本地缓存回放）；补齐双端 `Info.plist` 麦克风/语音识别权限说明与 macOS `com.apple.security.device.audio-input` 沙盒权限。
@@ -57,8 +60,8 @@
 
 ### 下一步
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
-- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位。
+- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`PSYBER_DATA_DIR=~/.psyber/test bun test`（24 文件 / 102 用例 / 1411 断言，含 `tests/voice_clip.test.ts`）全部通过。
-- **`app/`（2026-11-26）**：iOS `AppDelegate.swift` 与 macOS `MainFlutterWindow.swift` 均通过 `swiftc -parse`；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（25 文件 / 106 用例 / 1437 断言，含新增 `tests/attachment_digest.test.ts`）全部通过。
+- **`app/`（2026-11-26）**：仅微调设置页 `digest` 槽位说明文案；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

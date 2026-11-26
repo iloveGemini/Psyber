@@ -4128,9 +4128,9 @@ class _ModelAllocationSectionState extends State<_ModelAllocationSection> {
               buildSlotRow(
                 slotKey: 'digest',
                 title: '附件摘要',
-                subtitle: '长文档与附件压缩摘要',
+                subtitle: '发图/短视频时并行生成文字摘要供后续轮次与睡前整理记忆，不破缓存',
                 current: snap?.digestSlot,
-                emptyLabel: '默认跟随主对话模型',
+                emptyLabel: '未配置（不生成附件摘要）',
               ),
               Divider(height: 1, color: colors.hairline),
               buildSlotRow(

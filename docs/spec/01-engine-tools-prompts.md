@@ -144,7 +144,7 @@ export interface ModelRef {
    - 这是保证模型推理逻辑不中断的刚需，也是 Anthropic 协议对带工具思考调用的硬性合规要求（缺失会导致 400 校验报错）。
 2. **跨轮持久化与历史回放（Cross-Turn）：剥除思考，按需摘要历史附件，记录用量**：
    - 单轮生成完毕后，思考全量文本落盘至 `psyber.sqlite` 的 **`events.thinking` 独立列**（与 `MEMORY.md` §7 一致），供客户端展示折叠思考卡；当轮的 `express` 记录、可回放的 `tool_calls` / `tool_results` 以及真实消耗统计 `usage`（`{ model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, estimatedCostUsd }`）完整落盘至 `events.metadata` JSON；
-   - **附件摘要防 Token 爆炸（Ring 1.5）**：若配置了 `slots.digest`，带有图片或短视频抽帧的用户消息仅在**当轮**向主模型发送多模态原件；本轮结束后异步调用 `slots.digest` 生成简洁客观文字描述并回填至该用户事件的 `metadata.attachmentDigest`。在后续跨轮拼装 Segment 2（`Append-Only History`）时，优先用该文字摘要替代原始二进制图片块（未配置 `slots.digest` 或摘要尚未就绪则保留原件）；
+   - **附件并行摘要、会话前缀锁与按需复看（Ring 1.5）**：带有图片或短视频抽帧的用户消息在当轮携带 `[图片引用: media:<hash>]` 与多模态原件发给主模型（当轮多步工具循环内不摘原图，吃满当轮 KV Cache）。若显式配置了 `slots.digest`，则在消息落盘瞬间**与主模型并行**调用轻量 `slots.digest` 生成简洁客观文字描述并回填至 `events.metadata.attachmentDigest`（零额外首字延迟）；在后续跨轮拼装 Segment 2（`Append-Only History`）时，历史消息自动剥离 base64 原件，改以 `[图片 media:<hash> · 摘要：...]` 呈现，并在首次渲染时施加**会话级前缀锁**（若极端秒回时摘要尚未完成，本会话锁定 `[图片 media:<hash>]` 不中途改写防缓存击穿，摘要照常落库供 `bedtime` 整理与换段 `<continuity>` 使用）。若 Psyber 后续需要核对画面细节，可通过 Tier 3 只读工具 `view_media(mediaId)` 在当轮 `toolResult` 中临时重新载入原图，下一轮自动回收；
    - 当开启下一轮对话（或服务重启后重建会话）拼装 Segment 2（`Append-Only History`）时，**必须将历史轮次中的 `thinking` 块剥除**，仅回放最终回复正文、`express` 具身记录与工具调用/结果；
    - 彻底防止历史长程对话被数万 Token 的陈旧思考与重复历史大图污染，大幅节约输入计费并稳固历史缓存。
 

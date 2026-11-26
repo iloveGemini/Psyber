@@ -50,6 +50,7 @@ import { syncStaticStickers } from "./expression/stickers.ts";
 import { registerBashTool } from "./extensions/bash.ts";
 import { registerFsTools } from "./extensions/fs_tools.ts";
 import { registerMemoryHistoryTool } from "./extensions/memory_history.ts";
+import { registerViewMediaTool } from "./extensions/view_media.ts";
 import { registerWebFetchTool } from "./extensions/web_fetch.ts";
 import { McpManager, type McpManagerDeps } from "./extensions/mcp.ts";
 import { ModelCatalogService } from "./llm/catalog.ts";
@@ -94,6 +95,8 @@ export interface BootOptions {
   clock?: Clock;
   /** 可注入对话模型客户端，供离线测试阻断外网调用 */
   chatModel?: ChatModelClient;
+  /** 可注入附件摘要模型客户端（供离线测试验证 digest 槽位） */
+  digestModel?: ChatModelClient;
   /** 整理与反思轮的单步瞬时错误退避延迟（离线测试注入 chatModel 时默认空数组不等待） */
   tidyRetryDelaysMs?: number[];
   /** 可注入决策模型客户端（供离线测试验证反思门控） */
@@ -252,6 +255,9 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   registerMemoryHistoryTool(registry, {
     dataDir,
   });
+  registerViewMediaTool(registry, {
+    media,
+  });
   registerWebFetchTool(registry, {
     fetchImpl: opts.fetchImpl,
   });
@@ -302,6 +308,16 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       slot: "memory_task",
       catalog: modelCatalog,
     });
+  const digestModel: ChatModelClient | undefined =
+    opts.digestModel ??
+    (opts.chatModel
+      ? undefined
+      : new DynamicChatModel({
+          dataDir,
+          getConfig: () => config,
+          slot: "digest",
+          catalog: modelCatalog,
+        }));
   const decisionClient: DecisionClient =
     opts.decisionClient ??
     (opts.chatModel
@@ -715,6 +731,23 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     embedding: embeddingClient,
     reranker: rerankerClient,
     decisionClient: bedtimeDecisionClient,
+    digestModel,
+    forceDigestModel: Boolean(opts.digestModel),
+    onAttachmentDigestUpdated: (ev) => {
+      sse.emit("message.updated", {
+        action: "digest",
+        messageId: ev.id,
+        message: {
+          ...ev,
+          ...(typeof ev.metadata?.attachmentDigest === "string"
+            ? { attachmentDigest: ev.metadata.attachmentDigest }
+            : {}),
+          ...(typeof ev.metadata?.attachmentDigestStatus === "string"
+            ? { attachmentDigestStatus: ev.metadata.attachmentDigestStatus }
+            : {}),
+        },
+      });
+    },
     onBeforeRollover: (ctx) => runSyncDailyWrapup(ctx),
     onRolloverStatus: (ev) => {
       sse.emit("turn.rollover", { ...ev });
@@ -983,11 +1016,11 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   });
 
   const waitForIdle = async (timeoutMs?: number): Promise<boolean> => {
-    if (pendingPromises.size === 0) return true;
     const drain = (async () => {
       while (pendingPromises.size > 0) {
         await Promise.allSettled(Array.from(pendingPromises));
       }
+      await engine.waitForPendingDigests();
       return true;
     })();
     if (timeoutMs === undefined || timeoutMs <= 0) {

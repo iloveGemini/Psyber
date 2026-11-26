@@ -114,6 +114,17 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const videoClip =
     meta.videoClip && typeof meta.videoClip === "object" ? meta.videoClip : undefined;
   const voiceClip = parseVoiceClip(meta.voiceClip);
+  const attachmentDigest =
+    typeof meta.attachmentDigest === "string" && meta.attachmentDigest.trim().length > 0
+      ? meta.attachmentDigest.trim()
+      : undefined;
+  const rawDigestStatus = meta.attachmentDigestStatus;
+  const attachmentDigestStatus =
+    rawDigestStatus === "pending" || rawDigestStatus === "done" || rawDigestStatus === "failed"
+      ? rawDigestStatus
+      : attachmentDigest
+        ? "done"
+        : undefined;
   const urgent = meta.urgent === true ? true : undefined;
   const shares = Array.isArray(meta.shares) ? meta.shares : undefined;
   const openedAt = typeof meta.openedAt === "number" ? meta.openedAt : undefined;
@@ -135,6 +146,8 @@ function toTimelineItem(ev: StoredEvent, events: EventStore) {
     ...(usage !== undefined ? { usage } : {}),
     ...(videoClip !== undefined ? { videoClip } : {}),
     ...(voiceClip !== undefined ? { voiceClip } : {}),
+    ...(attachmentDigest !== undefined ? { attachmentDigest } : {}),
+    ...(attachmentDigestStatus !== undefined ? { attachmentDigestStatus } : {}),
     ...(urgent ? { urgent: true } : {}),
     ...(shares !== undefined ? { shares } : {}),
     ...(openedAt !== undefined ? { openedAt } : {}),
@@ -629,6 +642,14 @@ export function createApp(deps: AppDeps): Hono {
       // 对齐 Spec 04 §2.2：新消息（含门缝纸条）落盘时立即重置连续未回唤醒计数
       deps.onUserMessagePersisted?.();
       deps.sse?.emit("message.created", { message: timelineItem });
+      if ((hasAttachments || videoClip) && deps.engine) {
+        void deps.engine.scheduleAttachmentDigest({
+          eventId: event.id,
+          attachments: hasAttachments ? attachments : undefined,
+          videoClip,
+          userText: content,
+        });
+      }
       if (!deliverAsDoorNote && deps.engine && event.turnId) {
         for (const entry of retryOrigins.values()) {
           entry.checkpoint = undefined;
@@ -799,6 +820,53 @@ export function createApp(deps: AppDeps): Hono {
     }
     deps.sse?.emit("message.updated", { action: "delete", deletedId: id });
     return c.json({ deletedId: id, eventSeq: res.eventSeq });
+  });
+
+  app.post("/api/v1/chat/messages/:id/digest", (c) => {
+    const id = c.req.param("id");
+    if (!VALID_ULID_OR_ID_RE.test(id)) {
+      return c.json({ error: { code: "INVALID_ID", message: "非法消息 ID" } }, 400);
+    }
+    if (!deps.engine || !deps.engine.canRunAttachmentDigest()) {
+      return c.json(
+        { error: { code: "DIGEST_NOT_CONFIGURED", message: "尚未配置附件摘要模型槽位" } },
+        409,
+      );
+    }
+    const target = deps.events.getById(id);
+    if (!target || target.status === "deleted" || target.role !== "user") {
+      return c.json({ error: { code: "NOT_FOUND", message: "找不到对应的用户消息" } }, 404);
+    }
+    const meta = target.metadata ?? {};
+    const attachments = Array.isArray(meta.attachments)
+      ? meta.attachments.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      : [];
+    const rawVc = meta.videoClip;
+    const videoClip =
+      rawVc &&
+      typeof rawVc === "object" &&
+      !Array.isArray(rawVc) &&
+      typeof (rawVc as { durationSec?: unknown }).durationSec === "number" &&
+      Array.isArray((rawVc as { frameHashes?: unknown }).frameHashes)
+        ? {
+            durationSec: (rawVc as { durationSec: number }).durationSec,
+            frameHashes: (rawVc as { frameHashes: string[] }).frameHashes,
+          }
+        : undefined;
+    if (attachments.length === 0 && !videoClip) {
+      return c.json(
+        { error: { code: "NO_MEDIA_ATTACHMENTS", message: "该消息不含图片或短视频附件" } },
+        400,
+      );
+    }
+    void deps.engine.scheduleAttachmentDigest({
+      eventId: target.id,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      videoClip,
+      userText: target.content,
+      force: true,
+    });
+    return c.json({ ok: true, messageId: target.id, status: "pending" }, 202);
   });
 
   app.post("/api/v1/chat/messages/:id/retract", (c) => {

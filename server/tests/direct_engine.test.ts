@@ -355,14 +355,14 @@ describe("Direct Engine + Tier 1 工具循环 + 三明治缓存与 wake 沉默�
       });
     }
 
-    // 23:45 -> 夜间静默窗；且第二轮回放历史应保留 [贴纸: ...] 与 [附带了 1 张图片]
+    // 23:45 -> 夜间静默窗；且第二轮回放历史应保留 [贴纸: ...] 与 [图片 media:<hash>]
     ctx.clock.jumpToWallClock(2026, 11, 20, 23, 45, 0);
     mockChat.queueStream(() => [{ type: "text_delta", delta: "晚安。" }]);
     await engine.runTurn({ mode: "chat", userText: "准备睡了" });
     const req2 = mockChat.requests[1];
     const prevUser = req2.messages.find((m) => m.role === "user");
     expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain("[贴纸: 贴纸表情名字很长编号34]");
-    expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain("[附带了 1 张图片]");
+    expect(prevUser && prevUser.role === "user" && typeof prevUser.content === "string" && prevUser.content).toContain(`[图片 media:${saved.hash}]`);
     const curUser = req2.messages[req2.messages.length - 1];
     expect(curUser.role === "user" && typeof curUser.content === "string" && curUser.content).toContain('circadian="夜间静默窗"');
   });

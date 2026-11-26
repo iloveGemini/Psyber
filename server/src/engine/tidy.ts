@@ -184,13 +184,37 @@ async function readOptional(absPath: string): Promise<string | null> {
   }
 }
 
-function parseAttachmentCount(metadataJson: string | null): number {
-  if (!metadataJson) return 0;
+function formatTidyAttachmentSuffix(metadataJson: string | null): string {
+  if (!metadataJson) return "";
   try {
-    const parsed = JSON.parse(metadataJson) as { attachments?: unknown };
-    return Array.isArray(parsed.attachments) ? parsed.attachments.length : 0;
+    const parsed = JSON.parse(metadataJson) as {
+      attachments?: unknown;
+      videoClip?: { durationSec?: unknown; frameHashes?: unknown };
+      attachmentDigest?: unknown;
+    };
+    const attachments = Array.isArray(parsed.attachments)
+      ? parsed.attachments.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      : [];
+    const videoDuration =
+      parsed.videoClip &&
+      typeof parsed.videoClip.durationSec === "number" &&
+      Number.isFinite(parsed.videoClip.durationSec)
+        ? Math.max(1, Math.round(parsed.videoClip.durationSec))
+        : null;
+    const digest =
+      typeof parsed.attachmentDigest === "string" && parsed.attachmentDigest.trim().length > 0
+        ? parsed.attachmentDigest.trim()
+        : null;
+    if (attachments.length === 0 && videoDuration === null && !digest) return "";
+    const label =
+      videoDuration !== null
+        ? `附带了约 ${videoDuration} 秒短视频`
+        : attachments.length > 0
+          ? `附带了 ${attachments.length} 张图片`
+          : "附带了媒体附件";
+    return digest ? ` [${label} · 摘要：${digest}]` : ` [${label}]`;
   } catch {
-    return 0;
+    return "";
   }
 }
 
@@ -409,8 +433,7 @@ async function executeSingleTidyPass(
 
     const transcriptLines = opts.batch.map((e) => {
       const stamp = `[${localDateTime(e.created_at, clock.timeZone)}]`;
-      const attCount = parseAttachmentCount(e.metadata);
-      const attSuffix = attCount > 0 ? ` [附带了 ${attCount} 张图片]` : "";
+      const attSuffix = formatTidyAttachmentSuffix(e.metadata);
       if (e.status === "retracted") {
         if (e.role === "user") {
           return `${stamp} ${userLabel}: （${userLabel}撤回了一条消息）`;

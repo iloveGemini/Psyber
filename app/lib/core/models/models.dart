@@ -727,6 +727,8 @@ class TimelineItem {
     this.model,
     this.videoClip,
     this.voiceClip,
+    this.attachmentDigest,
+    this.attachmentDigestStatus,
     this.recallCount,
     this.aborted = false,
     this.retracted = false,
@@ -758,6 +760,8 @@ class TimelineItem {
   final String? model;
   final VideoClipInfo? videoClip;
   final VoiceClipInfo? voiceClip;
+  final String? attachmentDigest;
+  final String? attachmentDigestStatus;
   final int? recallCount;
   final bool aborted;
   final bool retracted;
@@ -836,6 +840,17 @@ class TimelineItem {
     final rawModel = json['model'] ?? metaMap['model'];
     final rawVideoClip = json['videoClip'] ?? metaMap['videoClip'];
     final rawVoiceClip = json['voiceClip'] ?? metaMap['voiceClip'];
+    final rawDigest = json['attachmentDigest'] ?? metaMap['attachmentDigest'];
+    final attachmentDigest = rawDigest is String && rawDigest.trim().isNotEmpty
+        ? rawDigest.trim()
+        : null;
+    final rawDigestStatus =
+        json['attachmentDigestStatus'] ?? metaMap['attachmentDigestStatus'];
+    final attachmentDigestStatus = (rawDigestStatus == 'pending' ||
+            rawDigestStatus == 'done' ||
+            rawDigestStatus == 'failed')
+        ? rawDigestStatus as String
+        : (attachmentDigest != null ? 'done' : null);
     final retracted = json['retracted'] == true || json['status'] == 'retracted';
     final retractedBy = (json['retractedBy'] ?? metaMap['retractedBy']) as String?;
     final urgent = json['urgent'] == true || metaMap['urgent'] == true;
@@ -880,6 +895,8 @@ class TimelineItem {
           : (rawVoiceClip is Map<String, dynamic>
               ? VoiceClipInfo.fromJson(rawVoiceClip)
               : null),
+      attachmentDigest: retracted ? null : attachmentDigest,
+      attachmentDigestStatus: retracted ? null : attachmentDigestStatus,
       recallCount: rawRecall is num ? rawRecall.toInt() : null,
       aborted: json['aborted'] == true || metaMap['aborted'] == true,
       retracted: retracted,
@@ -896,6 +913,8 @@ class TimelineItem {
     int? openedAt,
     bool? readByResident,
     List<ShareCardItem>? shares,
+    String? attachmentDigest,
+    String? attachmentDigestStatus,
   }) {
     return TimelineItem(
       id: id,
@@ -920,6 +939,9 @@ class TimelineItem {
       model: model,
       videoClip: videoClip,
       voiceClip: voiceClip,
+      attachmentDigest: attachmentDigest ?? this.attachmentDigest,
+      attachmentDigestStatus:
+          attachmentDigestStatus ?? this.attachmentDigestStatus,
       recallCount: recallCount,
       aborted: aborted,
       retracted: retracted,

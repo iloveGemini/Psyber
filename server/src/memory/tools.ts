@@ -12,9 +12,17 @@ import {
 } from "./frontmatter.ts";
 import { MemoryIndex, validateRegistryYaml } from "./index.ts";
 
+export interface ToolResultImage {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
 export interface ToolResult {
   ok: boolean;
   output: string;
+  /** 可选临时图片块（仅当轮多步工具循环内送给模型，跨轮不落盘 base64） */
+  images?: ToolResultImage[];
 }
 
 const FIXED_WRITABLE_FILES = new Set([

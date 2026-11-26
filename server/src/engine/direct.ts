@@ -40,6 +40,7 @@ import type {
   ToolExecutionContext,
   ToolRegistry,
 } from "../tools/registry.ts";
+import { digestEventAttachments, isDigestSlotConfigured } from "./digest.ts";
 import type { HotTidySessionContext } from "./tidy.ts";
 
 const STATIC_PREFIX_PATHS = new Set([
@@ -131,6 +132,7 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   leave_door_note: "在门缝下留了一张纸条",
   drawer_read: "翻看了上锁抽屉",
   drawer_write: "往抽屉里封存了一篇日记",
+  view_media: "重新查看了历史图片",
 };
 
 const WAKE_TOOL_LABELS: Record<string, string> = {
@@ -148,6 +150,7 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
   leave_door_note: "趁你不在，在门缝下留了一张纸条",
   drawer_read: "趁你不在，翻看了上锁抽屉",
   drawer_write: "趁你不在，往抽屉里封存了一篇日记",
+  view_media: "趁你不在，查看了一张历史图片",
 };
 
 export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
@@ -251,6 +254,14 @@ export interface DirectEngineDeps {
   reranker?: RerankerClient;
   /** 可选决策模型客户端（用于每轮召回门控与候选精排；缺省或超时平滑降级） */
   decisionClient?: DecisionClient;
+  /** 可选附件摘要模型客户端（仅当配置了 llm.slots.digest 或 forceDigestModel=true 时并行触发） */
+  digestModel?: ChatModelClient;
+  /** 单次附件摘要超时（毫秒，默认 15000） */
+  digestTimeoutMs?: number;
+  /** 测试注入 digestModel 时强制启用并行摘要（无需额外配置 slots.digest） */
+  forceDigestModel?: boolean;
+  /** 附件摘要状态变更回调（pending / done / failed，供 SSE 推送 message.updated） */
+  onAttachmentDigestUpdated?: (event: StoredEvent) => void;
   /** 429/5xx 指数退避延迟（默认 [1000, 3000] ms，离线测试可传 [0, 0]） */
   retryDelaysMs?: number[];
   /**
@@ -310,6 +321,10 @@ export class DirectEngine {
   private activeState: ActiveSessionRecord;
   private staticPrefixSnapshot: string | null = null;
   private readonly prefixDelta = new Map<string, string>();
+  /** 当前会话已渲染过的历史用户消息前缀锁（防异步 digest 晚到中途改写历史击穿 Prompt Cache） */
+  private readonly historyUserContentCache = new Map<string, string>();
+  private readonly digestInFlight = new Set<string>();
+  private readonly pendingDigests = new Set<Promise<unknown>>();
   private readonly turnMutex = new AsyncMutex();
   private needsLegacyContinuity = false;
   private rolloverInProgress = false;
@@ -709,7 +724,7 @@ export class DirectEngine {
     return trimmed ? `[语音 ${sec}秒] ${text}` : `[发来一条约 ${sec} 秒的语音，未能识别出文字]`;
   }
 
-  /** 渲染历史事件中的用户消息（含贴纸、语音条与既往图片数量标记，避免重复塞入历史 base64） */
+  /** 渲染历史事件中的用户消息（含贴纸、语音条、media:<hash> 引用与附件文字摘要，避免重复塞入历史 base64） */
   private formatHistoryUserContent(ev: StoredEvent): string {
     const stickerId =
       ev.metadata && typeof ev.metadata.stickerId === "string" ? ev.metadata.stickerId : null;
@@ -725,9 +740,44 @@ export class DirectEngine {
     const withVoice = this.formatUserTextWithVoice(ev.content, voiceClip);
     const base = this.formatUserTextWithSticker(withVoice, stickerId);
     const attachments =
-      ev.metadata && Array.isArray(ev.metadata.attachments) ? ev.metadata.attachments : [];
-    if (attachments.length === 0) return base;
-    const note = `[附带了 ${attachments.length} 张图片]`;
+      ev.metadata && Array.isArray(ev.metadata.attachments)
+        ? ev.metadata.attachments.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+        : [];
+    const rawVideo = ev.metadata?.videoClip;
+    const videoClip =
+      rawVideo &&
+      typeof rawVideo === "object" &&
+      !Array.isArray(rawVideo) &&
+      typeof (rawVideo as { durationSec?: unknown }).durationSec === "number"
+        ? (rawVideo as { durationSec: number; frameHashes?: unknown })
+        : null;
+    const videoFrames = Array.isArray(videoClip?.frameHashes)
+      ? videoClip!.frameHashes.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      : [];
+    const digest =
+      ev.metadata &&
+      typeof ev.metadata.attachmentDigest === "string" &&
+      ev.metadata.attachmentDigest.trim().length > 0
+        ? ev.metadata.attachmentDigest.trim()
+        : null;
+
+    if (attachments.length === 0 && !videoClip && !digest) return base;
+
+    const allRefs = Array.from(new Set([...attachments, ...videoFrames])).map(
+      (h) => `media:${h.trim().toLowerCase()}`,
+    );
+    let head: string;
+    if (videoClip) {
+      const sec = Math.max(1, Math.round(videoClip.durationSec));
+      head = allRefs.length > 0 ? `附带了约 ${sec} 秒短视频（${allRefs.join(", ")}）` : `附带了约 ${sec} 秒短视频`;
+    } else if (attachments.length === 1) {
+      head = `图片 ${allRefs[0]}`;
+    } else if (attachments.length > 1) {
+      head = `附带了 ${attachments.length} 张图片（${allRefs.join(", ")}）`;
+    } else {
+      head = "附带了媒体附件";
+    }
+    const note = digest ? `[${head} · 摘要：${digest}]` : `[${head}]`;
     return base.trim() ? `${base}\n${note}` : note;
   }
 
@@ -765,10 +815,19 @@ export class DirectEngine {
     for (const ev of sessionEvents) {
       if (ev.role === "user" && (ev.kind === "chat" || ev.kind === "door_note")) {
         // 双向社交撤回不对称性：用户撤回后，Psyber上下文只见占位看不到原文
-        const content =
-          ev.status === "retracted"
-            ? `（${userLabel}撤回了一条消息）`
-            : this.formatHistoryUserContent(ev);
+        let content: string;
+        if (ev.status === "retracted") {
+          content = `（${userLabel}撤回了一条消息）`;
+        } else {
+          const cacheKey = `${ev.id}:${ev.status}`;
+          const cached = this.historyUserContentCache.get(cacheKey);
+          if (cached !== undefined) {
+            content = cached;
+          } else {
+            content = this.formatHistoryUserContent(ev);
+            this.historyUserContentCache.set(cacheKey, content);
+          }
+        }
         history.push({
           role: "user",
           content,
@@ -961,6 +1020,7 @@ export class DirectEngine {
     }
 
     const imageBlocks: ChatImageContent[] = [];
+    const loadedMediaRefs: string[] = [];
     let unavailableAttachmentCount = 0;
     if (opts.attachments && opts.attachments.length > 0) {
       for (const hash of opts.attachments) {
@@ -973,6 +1033,7 @@ export class DirectEngine {
           unavailableAttachmentCount += 1;
           continue;
         }
+        loadedMediaRefs.push(`media:${hash.trim().toLowerCase()}`);
         imageBlocks.push({
           type: "image",
           data: Buffer.from(asset.bytes).toString("base64"),
@@ -986,9 +1047,11 @@ export class DirectEngine {
     const videoNote = opts.videoClip
       ? `[附带了一段约 ${Math.max(1, Math.round(opts.videoClip.durationSec))} 秒的短视频，以下是按时间提取的画面帧]`
       : "";
+    const mediaRefNote =
+      loadedMediaRefs.length > 0 ? `[图片引用: ${loadedMediaRefs.join(", ")}]` : "";
     const unavailableNote =
       unavailableAttachmentCount > 0 ? `[附带了 ${unavailableAttachmentCount} 张图片，暂无法读取]` : "";
-    const topText = [displayUserText, videoNote, unavailableNote]
+    const topText = [displayUserText, videoNote, mediaRefNote, unavailableNote]
       .filter((s) => s.trim().length > 0)
       .join("\n");
 
@@ -1079,6 +1142,7 @@ export class DirectEngine {
     this.deps.events.setActiveSessionState(this.activeState);
     this.staticPrefixSnapshot = null;
     this.prefixDelta.clear();
+    this.historyUserContentCache.clear();
     this.lastUsedTokens = 0;
     this.needsLegacyContinuity = false;
     this.rolloverInProgress = false;
@@ -1097,6 +1161,63 @@ export class DirectEngine {
       newSessionId,
       wrapped: opts.runWrapup,
     };
+  }
+
+  /**
+   * 并行触发已落盘用户消息的附件摘要（不阻塞当轮首字；由 digestInFlight 去重）：
+   * - 仅当配置了 llm.slots.digest（或测试显式 forceDigestModel）且存在图片/视频帧时运行；
+   * - 结果异步写入 events.metadata.attachmentDigest，供后续轮次（经会话前缀锁防缓存击穿）与 bedtime 整理读取。
+   */
+  /** 当前是否具备可运行的附件摘要槽位（已显式配置 llm.slots.digest 或测试强制启用） */
+  canRunAttachmentDigest(): boolean {
+    if (!this.deps.digestModel || !this.deps.media) return false;
+    return Boolean(this.deps.forceDigestModel || isDigestSlotConfigured(this.deps.getConfig()));
+  }
+
+  scheduleAttachmentDigest(opts: {
+    eventId: string;
+    attachments?: string[];
+    videoClip?: { durationSec: number; frameHashes: string[] };
+    userText?: string;
+    force?: boolean;
+  }): Promise<string | null> | null {
+    const digestModel = this.deps.digestModel;
+    const media = this.deps.media;
+    if (!digestModel || !media) return null;
+    if (!this.deps.forceDigestModel && !isDigestSlotConfigured(this.deps.getConfig())) {
+      return null;
+    }
+    const hasImages =
+      (Array.isArray(opts.attachments) && opts.attachments.length > 0) ||
+      Boolean(opts.videoClip && opts.videoClip.frameHashes.length > 0);
+    if (!hasImages) return null;
+    if (this.digestInFlight.has(opts.eventId)) return null;
+
+    this.digestInFlight.add(opts.eventId);
+    const job = digestEventAttachments({
+      eventId: opts.eventId,
+      events: this.deps.events,
+      digestModel,
+      media,
+      attachments: opts.attachments,
+      videoClip: opts.videoClip,
+      userText: opts.userText,
+      timeoutMs: this.deps.digestTimeoutMs,
+      force: opts.force,
+      onStateChanged: (ev) => this.deps.onAttachmentDigestUpdated?.(ev),
+    }).finally(() => {
+      this.digestInFlight.delete(opts.eventId);
+      this.pendingDigests.delete(job);
+    });
+    this.pendingDigests.add(job);
+    return job;
+  }
+
+  /** 等待当前所有在途并行附件摘要完成（供优雅停机与测试使用） */
+  async waitForPendingDigests(): Promise<void> {
+    while (this.pendingDigests.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingDigests));
+    }
   }
 
   /**
@@ -1156,6 +1277,16 @@ export class DirectEngine {
     callbacks?: TurnStreamCallbacks;
   }): Promise<RunTurnResult> {
     const turnId = opts.turnId ?? ulid(this.deps.clock.now());
+
+    // 若携带图片或短视频抽帧，立即与主模型并行起跑轻量 digest 摘要（绝不阻塞当轮首字）
+    if (opts.userEventId && ((opts.attachments && opts.attachments.length > 0) || opts.videoClip)) {
+      void this.scheduleAttachmentDigest({
+        eventId: opts.userEventId,
+        attachments: opts.attachments,
+        videoClip: opts.videoClip,
+        userText: opts.userText,
+      });
+    }
 
     // 若该用户消息是在上一轮同步换段期间排队落盘的，重绑到换段后的新 sessionId（绝不跨段错位）
     if (opts.userEventId && !opts.groupId) {
@@ -1684,6 +1815,7 @@ export class DirectEngine {
               toolCallId: tc.id,
               toolName: tc.name,
               content: result.output,
+              ...(result.images && result.images.length > 0 ? { images: result.images } : {}),
               isError: !result.ok,
               timestamp: this.deps.clock.now(),
             });

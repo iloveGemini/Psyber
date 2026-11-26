@@ -161,6 +161,9 @@ abstract class PsyberApiClient {
   /// Ring 1.5：双向社交撤回（用户撤回自己的消息，Psyber 仅见占位不知原文）。
   Future<TimelineItem> retractMessage(ConnectionProfile profile, String messageId);
 
+  /// Ring 1.5：重新触发图片/短视频附件摘要生成。
+  Future<void> retryAttachmentDigest(ConnectionProfile profile, String messageId);
+
   /// Ring 1.5：首次点开 Psyber 分享卡上报拆阅回执。
   Future<int?> openShare(ConnectionProfile profile, String shareId);
 
@@ -784,6 +787,22 @@ class HttpPsyberApiClient implements PsyberApiClient {
     );
     return TimelineItem.fromJson(
       (json['message'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+    );
+  }
+
+  @override
+  Future<void> retryAttachmentDigest(
+    ConnectionProfile profile,
+    String messageId,
+  ) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/chat/messages/$messageId/digest',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: const <String, dynamic>{},
     );
   }
 

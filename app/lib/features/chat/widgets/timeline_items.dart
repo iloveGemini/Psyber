@@ -590,60 +590,194 @@ class _MessageBubbleRowState extends State<MessageBubbleRow> {
       );
     }
 
+    Widget buildDigestStatusIndicator() {
+      final status = item.attachmentDigestStatus;
+      if (status == null || item.retracted) return const SizedBox.shrink();
+      final mutedColor = colors.inkFaint;
+
+      if (status == 'pending') {
+        return Tooltip(
+          message: '正在记下画面摘要…',
+          child: SizedBox(
+            key: Key('digest_status_pending_${item.id}'),
+            width: 18,
+            height: 18,
+            child: Center(
+              child: SizedBox(
+                width: 11,
+                height: 11,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: mutedColor,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (status == 'done') {
+        final digestText = item.attachmentDigest ?? '';
+        return Tooltip(
+          message: digestText.isNotEmpty
+              ? '已记画面摘要：$digestText\n（轻点查看）'
+              : '已生成画面摘要',
+          child: InkWell(
+            key: Key('digest_status_done_${item.id}'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: digestText.isEmpty
+                ? null
+                : () => unawaited(
+                      showDialog<void>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          backgroundColor: colors.letterSurface,
+                          title: Text(
+                            '画面摘要',
+                            style: PsyberTheme.editorialSerif.copyWith(
+                              fontSize: 16,
+                              color: colors.inkDeep,
+                            ),
+                          ),
+                          content: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 380),
+                            child: SelectableText(
+                              digestText,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                height: 1.6,
+                                color: colors.inkDeep,
+                              ),
+                            ),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () {
+                                Navigator.of(ctx).pop();
+                                unawaited(
+                                  widget.controller.retryAttachmentDigest(item.id),
+                                );
+                              },
+                              child: Text(
+                                '重新生成',
+                                style: TextStyle(fontSize: 12.5, color: colors.inkQuiet),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              child: const Text('关闭', style: TextStyle(fontSize: 12.5)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: Icon(
+                PhosphorIconsLight.check,
+                size: 13,
+                color: mutedColor,
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (status == 'failed') {
+        return Tooltip(
+          message: '画面摘要生成失败，轻点重新生成',
+          child: InkWell(
+            key: Key('digest_status_failed_${item.id}'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => unawaited(widget.controller.retryAttachmentDigest(item.id)),
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: Icon(
+                PhosphorIconsLight.warningCircle,
+                size: 13.5,
+                color: mutedColor,
+              ),
+            ),
+          ),
+        );
+      }
+
+      return const SizedBox.shrink();
+    }
+
+    Widget wrapWithDigestIndicator(Widget mediaChild) {
+      final hasStatus = item.attachmentDigestStatus != null && !item.retracted;
+      if (!hasStatus) return mediaChild;
+      final badge = buildDigestStatusIndicator();
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: isUser
+            ? [badge, const SizedBox(width: 5), Flexible(child: mediaChild)]
+            : [Flexible(child: mediaChild), const SizedBox(width: 5), badge],
+      );
+    }
+
     Widget buildAttachmentsWidget({required double bottomGap}) {
       if (item.videoClip != null && profile != null) {
         return Padding(
           padding: EdgeInsets.only(bottom: bottomGap),
-          child: VideoTile(videoClip: item.videoClip!, profile: profile),
+          child: wrapWithDigestIndicator(
+            VideoTile(videoClip: item.videoClip!, profile: profile),
+          ),
         );
       }
       if (item.attachments.isNotEmpty && profile != null) {
         return Padding(
           padding: EdgeInsets.only(bottom: bottomGap),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
-            children: [
-              for (final hash in item.attachments)
-                GestureDetector(
-                  onTap: () => _openLightbox(
-                    context,
-                    profile,
-                    '/api/v1/media/$hash',
-                  ),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: colors.hairline,
-                        width: 0.5,
-                      ),
+          child: wrapWithDigestIndicator(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
+              children: [
+                for (final hash in item.attachments)
+                  GestureDetector(
+                    onTap: () => _openLightbox(
+                      context,
+                      profile,
+                      '/api/v1/media/$hash',
                     ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Image.network(
-                      profile.resolveMediaUrl('/api/v1/media/$hash'),
-                      headers: {'Authorization': 'Bearer ${profile.token}'},
-                      width: 164,
-                      height: 164,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Container(
-                        width: 110,
-                        height: 64,
-                        color: colors.mineralCanvas,
-                        alignment: Alignment.center,
-                        child: Text(
-                          '图片已过期',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: colors.inkQuiet,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: colors.hairline,
+                          width: 0.5,
+                        ),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Image.network(
+                        profile.resolveMediaUrl('/api/v1/media/$hash'),
+                        headers: {'Authorization': 'Bearer ${profile.token}'},
+                        width: 164,
+                        height: 164,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          width: 110,
+                          height: 64,
+                          color: colors.mineralCanvas,
+                          alignment: Alignment.center,
+                          child: Text(
+                            '图片已过期',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: colors.inkQuiet,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         );
       }

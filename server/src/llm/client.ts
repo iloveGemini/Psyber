@@ -55,6 +55,7 @@ export type ChatMessage =
       toolCallId: string;
       toolName: string;
       content: string;
+      images?: ChatImageContent[];
       isError: boolean;
       timestamp: number;
     };
@@ -175,11 +176,15 @@ function toPiAiMessages(messages: ChatMessage[], model: Model<Api>): Message[] {
         timestamp: msg.timestamp,
       });
     } else if (msg.role === "toolResult") {
+      const blocks: Array<ChatTextContent | ChatImageContent> = [
+        { type: "text", text: msg.content },
+        ...(msg.images ?? []),
+      ];
       out.push({
         role: "toolResult",
         toolCallId: msg.toolCallId,
         toolName: msg.toolName,
-        content: [{ type: "text", text: msg.content }],
+        content: blocks,
         isError: msg.isError,
         timestamp: msg.timestamp,
       });

@@ -763,10 +763,13 @@ export class DynamicChatModel implements ChatModelClient {
   }
 
   get modelId(): string | undefined {
+    const slots = this.deps.getConfig().llm?.slots;
     const slotRef =
-      this.slot === "memory_task"
-        ? (this.deps.getConfig().llm?.slots?.memory_task ?? this.deps.getConfig().llm?.slots?.chat)
-        : this.deps.getConfig().llm?.slots?.chat;
+      this.slot === "digest"
+        ? (slots?.digest ?? slots?.memory_task ?? slots?.chat)
+        : this.slot === "memory_task"
+          ? (slots?.memory_task ?? slots?.chat)
+          : slots?.chat;
     return this.activeModelId ?? this.activeClient?.modelId ?? slotRef?.model;
   }
 

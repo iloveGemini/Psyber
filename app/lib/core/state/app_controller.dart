@@ -966,6 +966,34 @@ class AppController {
     }
   }
 
+  /// 重新触发指定消息的附件摘要生成（失败点击提醒图标或主动重生成）。
+  Future<void> retryAttachmentDigest(String messageId) async {
+    final profile = profileNotifier.value;
+    if (profile == null || messageId.isEmpty) return;
+    _setLocalAttachmentDigestStatus(messageId, 'pending');
+    try {
+      await _api.retryAttachmentDigest(profile, messageId);
+    } catch (_) {
+      if (!_disposed) {
+        _setLocalAttachmentDigestStatus(messageId, 'failed');
+      }
+    }
+  }
+
+  void _setLocalAttachmentDigestStatus(String messageId, String status) {
+    var changed = false;
+    final next = timelineNotifier.value.map((item) {
+      if (item.id != messageId || item.attachmentDigestStatus == status) {
+        return item;
+      }
+      changed = true;
+      return item.copyWith(attachmentDigestStatus: status);
+    }).toList(growable: false);
+    if (changed) {
+      timelineNotifier.value = List<TimelineItem>.unmodifiable(next);
+    }
+  }
+
   Future<void> openShare(String shareId) async {
     final profile = profileNotifier.value;
     if (profile == null || shareId.isEmpty) return;
