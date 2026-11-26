@@ -34,6 +34,68 @@ export interface FtsSearchHit {
   updatedAt: number;
 }
 
+export interface ExtractedCardLink {
+  targetRef: string;
+  linkKind: "wiki" | "path";
+}
+
+export interface LinkedNeighbor {
+  row: CardIndexRow;
+  viaAnchorPath: string;
+  viaAnchorTitle: string;
+  direction: "out" | "in";
+  /** 被多少个首跳锚点同时连到（多锚点共指优先级更高） */
+  anchorHitCount: number;
+}
+
+/** 归一化双链短标题（NFKC + 去首尾空白 + 小写），用于与 card_index.title 精确匹配 */
+export function normalizeWikiTitle(raw: string): string {
+  return raw.normalize("NFKC").trim().toLowerCase();
+}
+
+/** 从 Markdown 正文中提取站内 `[[短标题]]` 双链与相对 `.md` 路径链接（忽略外链与 media/ 附件） */
+export function extractMarkdownLinks(body: string, srcPath?: string): ExtractedCardLink[] {
+  const seen = new Set<string>();
+  const out: ExtractedCardLink[] = [];
+  const add = (linkKind: "wiki" | "path", targetRef: string) => {
+    if (!targetRef) return;
+    if (linkKind === "path" && srcPath && targetRef === srcPath) return;
+    const key = `${linkKind}:${targetRef}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ linkKind, targetRef });
+  };
+
+  // 1) [[短标题]] 或 [[短标题|展示别名]]
+  const wikiRe = /\[\[([^\]\r\n|]+?)(?:\|[^\]\r\n]*)?\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = wikiRe.exec(body)) !== null) {
+    const norm = normalizeWikiTitle(m[1]);
+    if (norm) add("wiki", norm);
+  }
+
+  // 2) [文本](relative/path.md)
+  const mdRe = /(?<!!)\[[^\]]*\]\(([^)\s]+)\)/g;
+  while ((m = mdRe.exec(body)) !== null) {
+    let raw = m[1].trim();
+    if (
+      !raw ||
+      /^(?:https?:|mailto:|#)/i.test(raw) ||
+      raw.startsWith("media/") ||
+      raw.startsWith("/api/")
+    ) {
+      continue;
+    }
+    raw = raw.split("#")[0]?.split("?")[0]?.trim() ?? "";
+    if (!raw.endsWith(".md")) continue;
+    raw = raw.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (raw.startsWith("/") || raw.includes("..")) continue;
+    add("path", raw);
+  }
+
+  return out;
+}
+
 const RESERVED_SPACES = new Set([
   "core",
   "episodes",
@@ -188,6 +250,7 @@ export class MemoryIndex {
     const titleTokens = tokenizeForFts(parsed.title);
     const triggerTokens = tokenizeForFts([parsed.whenToRecall ?? "", ...parsed.tags].join(" "));
     const bodyTokens = tokenizeForFts(parsed.body);
+    const links = extractMarkdownLinks(parsed.body, relPath);
 
     const tx = this.db.transaction(() => {
       this.db
@@ -233,6 +296,16 @@ export class MemoryIndex {
           "INSERT INTO card_fts (path, title_tokens, trigger_tokens, body_tokens) VALUES (?, ?, ?, ?)",
         )
         .run(relPath, titleTokens, triggerTokens, bodyTokens);
+
+      this.db.query("DELETE FROM card_links WHERE src_path = ?").run(relPath);
+      if (links.length > 0) {
+        const insertLink = this.db.query(
+          "INSERT OR IGNORE INTO card_links (src_path, target_ref, link_kind) VALUES (?, ?, ?)",
+        );
+        for (const l of links) {
+          insertLink.run(relPath, l.targetRef, l.linkKind);
+        }
+      }
     });
     tx();
   }
@@ -242,6 +315,7 @@ export class MemoryIndex {
       this.db.query("DELETE FROM card_index WHERE path = ?").run(relPath);
       this.db.query("DELETE FROM card_fts WHERE path = ?").run(relPath);
       this.db.query("DELETE FROM card_embeddings WHERE path = ?").run(relPath);
+      this.db.query("DELETE FROM card_links WHERE src_path = ?").run(relPath);
     });
     tx();
   }
@@ -273,8 +347,178 @@ export class MemoryIndex {
         removed++;
       }
     }
+
+    // 兼容从 v1 升级到 v2 的既有库：若 card_links 尚无数据但已有卡片，无损补建链接索引（不碰 card_embeddings）
+    if (found.size > 0 && !this.db.query("SELECT 1 FROM card_links LIMIT 1").get()) {
+      await this.backfillCardLinks(Array.from(found));
+    }
+
     this.expireOverdueStateCards();
     return { indexed: found.size, removed };
+  }
+
+  private async backfillCardLinks(relPaths: readonly string[]): Promise<void> {
+    const extracted: Array<{ srcPath: string; links: ExtractedCardLink[] }> = [];
+    for (const rel of relPaths) {
+      try {
+        const content = await fs.readFile(path.join(this.memoryDir, rel), "utf8");
+        const links = extractMarkdownLinks(content, rel);
+        if (links.length > 0) {
+          extracted.push({ srcPath: rel, links });
+        }
+      } catch {
+        // 忽略读取异常
+      }
+    }
+    if (extracted.length === 0) return;
+    const insertLink = this.db.query(
+      "INSERT OR IGNORE INTO card_links (src_path, target_ref, link_kind) VALUES (?, ?, ?)",
+    );
+    const tx = this.db.transaction(() => {
+      for (const item of extracted) {
+        for (const l of item.links) {
+          insertLink.run(item.srcPath, l.targetRef, l.linkKind);
+        }
+      }
+    });
+    tx();
+  }
+
+  /**
+   * 沿 `card_links` 查找一组锚点卡的 1 跳双向邻接活跃卡片（包含正向引用与反向被引用）：
+   * - 自动过滤常驻区（core/self/user/episode_index）、反思卡（kind='reflection'）及失效卡；
+   * - 统计 `anchorHitCount`（被多张锚点卡共同指向的邻卡优先级更高）。
+   */
+  findLinkedNeighbors(
+    anchorPaths: readonly string[],
+    opts: { excludePaths?: ReadonlySet<string>; maxResults?: number } = {},
+  ): LinkedNeighbor[] {
+    if (anchorPaths.length === 0) return [];
+    this.expireOverdueStateCards();
+    const nowMs = this.clock.now();
+    const exclude = new Set<string>(opts.excludePaths ?? []);
+    for (const p of anchorPaths) exclude.add(p);
+
+    const allRows = this.db.query("SELECT * FROM card_index").all() as CardIndexRow[];
+    const byPath = new Map<string, CardIndexRow>();
+    const byNormTitle = new Map<string, CardIndexRow[]>();
+    for (const r of allRows) {
+      byPath.set(r.path, r);
+      const norm = normalizeWikiTitle(r.title);
+      if (norm) {
+        const arr = byNormTitle.get(norm);
+        if (arr) arr.push(r);
+        else byNormTitle.set(norm, [r]);
+      }
+    }
+
+    const isEligibleNeighbor = (row: CardIndexRow | undefined): row is CardIndexRow => {
+      if (!row) return false;
+      if (exclude.has(row.path)) return false;
+      if (
+        row.space === "self" ||
+        row.space === "user" ||
+        row.space === "core" ||
+        row.space === "episode_index" ||
+        row.kind === "reflection"
+      ) {
+        return false;
+      }
+      const st = effectiveStatus(row, nowMs);
+      return st === "active" || st === "disputed";
+    };
+
+    const neighborMap = new Map<
+      string,
+      {
+        row: CardIndexRow;
+        viaAnchorPath: string;
+        viaAnchorTitle: string;
+        direction: "out" | "in";
+        anchors: Set<string>;
+      }
+    >();
+
+    const record = (
+      row: CardIndexRow,
+      anchor: CardIndexRow,
+      direction: "out" | "in",
+    ) => {
+      const prev = neighborMap.get(row.path);
+      if (prev) {
+        prev.anchors.add(anchor.path);
+        // 若既有反向边又有正向边，优先保留正向语义
+        if (prev.direction === "in" && direction === "out") {
+          prev.direction = "out";
+          prev.viaAnchorPath = anchor.path;
+          prev.viaAnchorTitle = anchor.title;
+        }
+      } else {
+        neighborMap.set(row.path, {
+          row,
+          viaAnchorPath: anchor.path,
+          viaAnchorTitle: anchor.title,
+          direction,
+          anchors: new Set([anchor.path]),
+        });
+      }
+    };
+
+    const outStmt = this.db.query(
+      "SELECT target_ref, link_kind FROM card_links WHERE src_path = ?",
+    );
+    const inStmt = this.db.query(
+      "SELECT src_path FROM card_links WHERE (link_kind = 'path' AND target_ref = ?) OR (link_kind = 'wiki' AND target_ref = ?)",
+    );
+
+    for (const anchorPath of anchorPaths) {
+      const anchor = byPath.get(anchorPath);
+      if (!anchor) continue;
+
+      // 1) 正向出边：锚点正文引用了 [[target]] 或 [x](target.md)
+      const outs = outStmt.all(anchorPath) as Array<{ target_ref: string; link_kind: string }>;
+      for (const edge of outs) {
+        if (edge.link_kind === "path") {
+          const target = byPath.get(edge.target_ref);
+          if (isEligibleNeighbor(target)) record(target, anchor, "out");
+        } else {
+          const targets = byNormTitle.get(edge.target_ref) ?? [];
+          for (const target of targets) {
+            if (isEligibleNeighbor(target)) record(target, anchor, "out");
+          }
+        }
+      }
+
+      // 2) 反向入边：其他活跃卡片引用了当前锚点
+      const normAnchorTitle = normalizeWikiTitle(anchor.title);
+      const ins = inStmt.all(anchorPath, normAnchorTitle) as Array<{ src_path: string }>;
+      for (const edge of ins) {
+        const src = byPath.get(edge.src_path);
+        if (isEligibleNeighbor(src)) record(src, anchor, "in");
+      }
+    }
+
+    const list: LinkedNeighbor[] = Array.from(neighborMap.values()).map((n) => ({
+      row: n.row,
+      viaAnchorPath: n.viaAnchorPath,
+      viaAnchorTitle: n.viaAnchorTitle,
+      direction: n.direction,
+      anchorHitCount: n.anchors.size,
+    }));
+
+    // 默认按：多锚点共指 > 正向引用 > 持久专卡（threads/entities/lessons/favorite）> 更新时间
+    const isDurableSpace = (space: string) => space !== "episodes";
+    list.sort((a, b) => {
+      if (b.anchorHitCount !== a.anchorHitCount) return b.anchorHitCount - a.anchorHitCount;
+      if (a.direction !== b.direction) return a.direction === "out" ? -1 : 1;
+      const da = isDurableSpace(a.row.space) ? 1 : 0;
+      const dbFlag = isDurableSpace(b.row.space) ? 1 : 0;
+      if (dbFlag !== da) return dbFlag - da;
+      return b.row.updated_at - a.row.updated_at;
+    });
+
+    const limit = opts.maxResults ?? 24;
+    return list.slice(0, limit);
   }
 
   /**

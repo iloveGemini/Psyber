@@ -135,6 +135,18 @@ CREATE TABLE IF NOT EXISTS stickers (
 CREATE INDEX IF NOT EXISTS idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 `;
 
+const MIGRATION_002_CARD_LINKS = `
+-- 9. 卡片双向链接可重建派生索引（供 1 跳轻量多跳召回使用，唯一真相仍在 memory/*.md）
+CREATE TABLE IF NOT EXISTS card_links (
+  src_path    TEXT NOT NULL,
+  target_ref  TEXT NOT NULL,
+  link_kind   TEXT NOT NULL,
+  PRIMARY KEY (src_path, target_ref, link_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_card_links_src    ON card_links(src_path);
+CREATE INDEX IF NOT EXISTS idx_card_links_target ON card_links(link_kind, target_ref);
+`;
+
 /**
  * 打开 SQLite 数据库并启用 WAL + 外键 + 忙等待，保证单进程并发读写稳定。
  */
@@ -149,8 +161,13 @@ export function openDatabase(dbPath: string): Database {
 
 export function runMigrations(db: Database, nowMs: number): void {
   db.exec(MIGRATION_001_INIT);
-  const exists = db.query("SELECT 1 FROM _migrations WHERE version = 1").get();
-  if (!exists) {
+  const v1 = db.query("SELECT 1 FROM _migrations WHERE version = 1").get();
+  if (!v1) {
     db.query("INSERT INTO _migrations (version, applied_at) VALUES (1, ?)").run(nowMs);
+  }
+  db.exec(MIGRATION_002_CARD_LINKS);
+  const v2 = db.query("SELECT 1 FROM _migrations WHERE version = 2").get();
+  if (!v2) {
+    db.query("INSERT INTO _migrations (version, applied_at) VALUES (2, ?)").run(nowMs);
   }
 }

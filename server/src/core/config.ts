@@ -35,6 +35,19 @@ export interface RecallRerankConfig {
   threshold: number;
 }
 
+export interface RecallMultiHopConfig {
+  /** 是否启用基于 [[短标题]] 与相对 Markdown 双链的 1 跳扩展及证据充分性早停（默认 true） */
+  enabled: boolean;
+  /** 单轮 1 跳最多送审的邻接卡片数（默认 6；调大覆盖更宽但增加单次门控输入） */
+  maxNeighbors: number;
+  /** 证据充分性早停门槛（0..1，默认 0.75；首跳已选卡片被判定足够接话且分数 >= 此值时立即早停不补卡；调低更克制、调高更积极补卡） */
+  sufficientThreshold: number;
+  /** 1 跳邻接卡入选的最低相关性门槛（0..1，默认 0.40；高于首跳 rerank.threshold 以严控多跳噪声，仅放行高置信度补全卡） */
+  neighborThreshold?: number;
+  /** 1 跳扩展单次硬超时（单位：毫秒，默认 2500；超时仅保留首跳结果不报错） */
+  timeoutMs?: number;
+}
+
 export interface RecallConfig {
   /** 单轮注入记忆卡片的字符总预算（单位：字符，默认 3200；调大可塞入更多历史细节但增加单轮上下文开销，调小更精简但可能截断长卡） */
   charBudget: number;
@@ -64,6 +77,8 @@ export interface RecallConfig {
   hybridFtsWithEmbedding?: boolean;
   /** 二阶段独立精排模型（reranker）单次超时阈值（单位：毫秒，默认 3000；超时自动降级） */
   rerankTimeoutMs?: number;
+  /** 基于 [[短标题]] 与 Markdown 双链的 1 跳扩展及证据充分性早停配置 */
+  multiHop?: RecallMultiHopConfig;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallConfig = {
@@ -85,6 +100,13 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   catalogScanMaxCards: 250,
   ftsMinScore: 0.25,
   hybridFtsWithEmbedding: false,
+  multiHop: {
+    enabled: true,
+    maxNeighbors: 6,
+    sufficientThreshold: 0.75,
+    neighborThreshold: 0.4,
+    timeoutMs: 2500,
+  },
 };
 
 /** 作息与主动心跳可调参数（集中维护于 config.json 的 circadian 节点） */

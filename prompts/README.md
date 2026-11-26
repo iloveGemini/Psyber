@@ -30,7 +30,7 @@
 | [`revision.md`](revision.md) | `memory_task` | Psyber 复核修订轮（Ring 1.5 可选） | C2.7 Psyber 复核修订 Prompt（Ring 1.5 启用）：原写作 Psyber 根据复核 issues 自主决定修改或驳回，并输出 `{fixed, rejected, summary}` 用于 Git Commit 留痕 |
 | [`genesis.md`](genesis.md) | `dynamic_tail` | Dynamic Tail（`self.md` `name` 为空时） | 创世中性开局：第一次正式相遇，不带刻板标签，中性打招呼并在互动中慢慢认识；定名后由 Psyber `edit` 填上 `name`（自定代词可写 `pronoun`）退出 |
 | [`wake.md`](wake.md) | `dynamic_tail` | Dynamic Tail（`wake` 模式） | 主动唤醒：由定时心跳/边际感知驱动主动破冰开口，自主掌握开口节奏与边界；选择保持安静时仅输出 `[SILENT]` |
-| [`recall-gate.md`](recall-gate.md) | `decision` | 召回管线门控与精排 | 系统分类器指令（v2 含 `## true` / `## false` 双边判据）：单次 `DecisionClient.decide` 并行判定本轮是否需要召回记忆（`needs_memory`）及各候选卡相关性（`card_k`），不进入 Psyber 对话上下文 |
+| [`recall-gate.md`](recall-gate.md) | `decision` | 召回管线门控、精排与 1 跳早停 | 系统分类器指令（v3 含 `## true` / `## false` 双边判据）：首跳并行判定 `needs_memory` 与候选卡相关性；存在双链邻卡时按 `evidence_sufficient` 早停并筛查 `hop_neighbor_relevance`，不进入 Psyber 对话上下文 |
 
 ---
 

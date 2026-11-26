@@ -1,11 +1,14 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（双协议向量客户端 `llm/embedding.ts`、独立精排客户端 `llm/reranker.ts` 与三路线回放盲测收官；召回门控 `recall-gate.md` v2 双边判据落地）。
+> 最后更新：2026-11-26（新增 `card_links` 双向双链派生索引与轻量 1 跳扩展 + 证据充分性早停；双协议向量/精排客户端与回放盲测收官）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与 Decision 召回门控已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思与向量+Decision 召回管线已落地
 
 ### 已完成
+- **基于 `[[短标题]]` 双链的轻量 1 跳扩展与证据充分性早停（`prompts/` + `docs/` + `server/`，2026-11-26）**：
+  - 数据库迁移 v2 新增可重建派生表 `card_links`；`MemoryIndex` 新增 `extractMarkdownLinks`（解析 `[[短标题]]` 与相对 `.md` 链接）与 `findLinkedNeighbors`（双向出/入边查询、多锚点共指优先、兼容 v1 库无损回填）。
+  - `prompts/recall-gate.md` 升级至 v3，保留原两节不变以复用首跳缓存，新增 `# evidence_sufficient` 早停与 `# hop_neighbor_relevance` 邻卡双边判据；`memory/recall.ts` 新增 `linked_hop` 轨道（`[关联延伸]`），在首跳未满 5 张且存在邻卡时至多发起 1 次受预算约束的并行判断（`sufficientThreshold=0.75`、`neighborThreshold=0.40`、`maxNeighbors=6`），超时/异常绝不丢弃首跳结果。
 - **向量嵌入 + 独立精排客户端与三路线回放盲测（`server/`，2026-11-26）**：
   - 新增 `core/embedding.ts`、`llm/embedding.ts`（Google 原生 `:embedContent`/`:batchEmbedContents` + OpenAI 兼容 `/embeddings` 与 Qwen3 查询指令）、`core/reranker.ts`、`llm/reranker.ts`（标准 `/rerank` HTTP 客户端）；`router.ts` 新增 `embedding`/`reranker` 槽位解析（不回落 `chat`）与连通测试，`index.ts`/`direct.ts` 接入 `DirectEngine`。
   - `memory/recall.ts` 升级批量卡片嵌入、自动分流路由（配置 `slots.embedding` 时默认走纯向量 Top-15 粗筛 + Decision 联合门控精排，`hybridFtsWithEmbedding=false`；未配置时沿用 ≤250 张全卡直扫）及独立 `reranker` 并行门控路径；默认阈值调整为 `gate.threshold=0.35`、`rerank.threshold=0.30`、`candidatePool=15`；同步更新 `docs/MEMORY.md` 与 `docs/spec/02-memory-execution.md` §7。
@@ -44,5 +47,5 @@
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 推送通道、观影伴看（`cinema`）插件、`digest` 附件摘要槽位；大记忆库（>250 张活跃卡）阶段再按数据评估接入 Embedding 粗筛。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（22 文件 / 91 用例 / 1231 断言）全部通过。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（22 文件 / 92 用例 / 1253 断言）全部通过。
 - **`app/`**：`2026-11-23` `AppDelegate.swift` 已通过 `swiftc -parse`；`1104b64` 与 `392d5c0` 前端改动待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

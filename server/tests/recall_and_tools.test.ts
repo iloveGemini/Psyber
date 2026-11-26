@@ -4,6 +4,7 @@ import { createApp } from "../src/api/app.ts";
 import { saveConfig } from "../src/core/config.ts";
 import { DirectEngine } from "../src/engine/direct.ts";
 import { SseHub, type SseFrame } from "../src/engine/sse.ts";
+import { extractMarkdownLinks } from "../src/memory/index.ts";
 import {
   parseRecallGatePrompt,
   recallMemories,
@@ -675,5 +676,152 @@ describe("Ring 1 切片 2: 极简 3 步召回、三层工具注册中心与 SSE 
     expect(vectorGateInput).not.toContain("<memory_catalog>");
     expect(vectorGateInput).toContain("凌晨两点");
     expect(autoVecRes.items.map((i) => i.path)).toEqual(["episodes/2026/11/19/ep-semantic.md"]);
+  });
+
+  test("[[短标题]] 双链派生索引（card_links）与轻量 1 跳扩展 + 证据充分性早停", async () => {
+    ctx = await createTestContext();
+
+    // 1) 提取 [[短标题]]（含别名）与相对 .md 链接，忽略外链与 media/
+    const extracted = extractMarkdownLinks(
+      "提到 [[抓bug积分账本]] 和 [[雾里灯塔|灯塔故事]]，以及 [原话](favorite/quote.md) 与 ![图](media/abc.png) 与 [外链](https://example.com)。",
+      "episodes/2026/11/20/ep-src.md",
+    );
+    expect(extracted).toEqual([
+      { linkKind: "wiki", targetRef: "抓bug积分账本" },
+      { linkKind: "wiki", targetRef: "雾里灯塔" },
+      { linkKind: "path", targetRef: "favorite/quote.md" },
+    ]);
+
+    // 2) 构造互链卡片：ep-anchor --[[原话收藏]]--> favorite/quote.md，且 ep-backlink --[[深夜复盘]]--> ep-anchor
+    await ctx.tools.write(
+      "episodes/2026/11/20/ep-anchor.md",
+      "---\ntitle: 深夜复盘\nkind: episode\ncreated: 2026-11-20\n---\n那天聊起承诺，具体原话收在 [[约定原话]]。\n",
+    );
+    await ctx.tools.write(
+      "favorite/2026-11-20-promise.md",
+      "---\ntitle: 约定原话\nkind: note\n---\n原话：「不管过多久，重要的事我们都当面说清。」\n",
+    );
+    await ctx.tools.write(
+      "episodes/2026/11/21/ep-backlink.md",
+      "---\ntitle: 次日跟进\nkind: episode\ncreated: 2026-11-21\n---\n顺着 [[深夜复盘]] 的话题继续把约定写进了清单。\n",
+    );
+    await ctx.tools.write(
+      "episodes/2026/11/20/rf-hidden.md",
+      "---\ntitle: 反思不该被跳入\nkind: reflection\n---\n反思引用了 [[深夜复盘]]。\n",
+    );
+
+    const neighbors = ctx.index.findLinkedNeighbors(["episodes/2026/11/20/ep-anchor.md"]);
+    expect(neighbors.map((n) => n.row.path)).toEqual([
+      "favorite/2026-11-20-promise.md",
+      "episodes/2026/11/21/ep-backlink.md",
+    ]);
+    expect(neighbors[0]?.direction).toBe("out");
+    expect(neighbors[1]?.direction).toBe("in");
+
+    // 仅 ep-anchor 与查询向量高度相似，favorite/quote 向量正交（首跳搜不到，只能靠 1 跳双链翻出）
+    const hopEmbed: EmbeddingClient = {
+      modelKey: "mock:hop-2d",
+      async embed(text) {
+        if (text.includes("复盘") || text.includes("承诺")) return new Float32Array([1, 0]);
+        return new Float32Array([0, 1]);
+      },
+      async embedBatch(texts) {
+        return texts.map((t) =>
+          t.includes("深夜复盘") ? new Float32Array([1, 0]) : new Float32Array([0, 1]),
+        );
+      },
+    };
+
+    // 3) 场景 A：证据不充分（evidence_sufficient=0.22 < 0.75）-> 触发 1 跳补入 favorite/2026-11-20-promise.md
+    let hopMode: "expand" | "sufficient" | "timeout" = "expand";
+    let decCalls = 0;
+    const hopDecision = {
+      async decide(req: { input: string; questions: Record<string, DecisionQuestion> }) {
+        decCalls++;
+        if ("needs_memory" in req.questions) {
+          const answers: Record<string, { noul: number }> = { needs_memory: { noul: 0.9 } };
+          for (const k of Object.keys(req.questions)) {
+            if (k === "needs_memory") continue;
+            const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+            answers[k] = { noul: block?.includes("ep-anchor.md") ? 0.88 : 0.05 };
+          }
+          return { answers, backend: "mock-hop0" };
+        }
+        // Hop 1 请求
+        if (hopMode === "timeout") {
+          throw new Error("AbortError: hop1 timed out");
+        }
+        expect(req.input).toContain("<selected_evidence>");
+        expect(req.input).toContain("<linked_neighbors>");
+        expect(req.questions.evidence_sufficient?.criteria?.true_description).toBeTruthy();
+        const answers: Record<string, { noul: number }> = {
+          evidence_sufficient: { noul: hopMode === "sufficient" ? 0.91 : 0.22 },
+        };
+        for (const k of Object.keys(req.questions)) {
+          if (k === "evidence_sufficient") continue;
+          const block = req.input.split("\n\n").find((b) => b.includes(`[${k}]`));
+          answers[k] = { noul: block?.includes("2026-11-20-promise.md") ? 0.93 : 0.08 };
+        }
+        return { answers, backend: "mock-hop1" };
+      },
+    };
+
+    const expanded = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-hop-a",
+      turnId: "t-hop-expand",
+      query: "我们深夜复盘时立的承诺原话是什么来着",
+      embedding: hopEmbed,
+      decisionClient: hopDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(decCalls).toBe(2);
+    expect(expanded.hopCount).toBe(1);
+    expect(expanded.hopStoppedReason).toBe("expanded");
+    expect(expanded.sufficiencyScore).toBeCloseTo(0.22, 2);
+    expect(expanded.items.map((i) => i.path)).toEqual([
+      "episodes/2026/11/20/ep-anchor.md",
+      "favorite/2026-11-20-promise.md",
+    ]);
+    expect(expanded.items[1]?.track).toBe("linked_hop");
+    expect(expanded.renderedBlock).toContain("[关联延伸]");
+
+    // 4) 场景 B：证据已充分（evidence_sufficient=0.91 >= 0.75）-> 早停不补邻卡
+    hopMode = "sufficient";
+    const stopped = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-hop-b",
+      turnId: "t-hop-stop",
+      query: "我们深夜复盘那件事",
+      embedding: hopEmbed,
+      decisionClient: hopDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(stopped.hopCount).toBe(1);
+    expect(stopped.hopStoppedReason).toBe("evidence_sufficient");
+    expect(stopped.items.map((i) => i.path)).toEqual(["episodes/2026/11/20/ep-anchor.md"]);
+
+    // 5) 场景 C：1 跳超时降级 -> 绝不丢弃首跳结果
+    hopMode = "timeout";
+    const safeFallback = await recallMemories({
+      db: ctx.db,
+      dataDir: ctx.dataDir,
+      index: ctx.index,
+      clock: ctx.clock,
+      sessionId: "sess-hop-c",
+      turnId: "t-hop-timeout",
+      query: "我们深夜复盘那件事",
+      embedding: hopEmbed,
+      decisionClient: hopDecision,
+      promptsDir: PROMPTS_DIR,
+    });
+    expect(safeFallback.hopStoppedReason).toBe("timeout_or_error");
+    expect(safeFallback.items.map((i) => i.path)).toEqual(["episodes/2026/11/20/ep-anchor.md"]);
   });
 });

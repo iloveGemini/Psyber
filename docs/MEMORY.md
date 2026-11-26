@@ -7,7 +7,7 @@
 
 | 层级 | 载体 | 存储内容 | 修改方式 |
 | :--- | :--- | :--- | :--- |
-| **原始账本 + 派生索引** | SQLite (`psyber.sqlite`) | `events`（只追加对话、具身表达与系统事件）、`card_index`（卡片元信息缓存）、`card_embeddings`（分模型向量缓存）、`card_fts`（FTS5 全文）、`recall_traces`、`recall_feedback`、`task_cursors` | 系统程序确定性维护；除 `events` 与 `recall_feedback` 外，其余索引表随时可删可全量重建 |
+| **原始账本 + 派生索引** | SQLite (`psyber.sqlite`) | `events`（只追加对话、具身表达与系统事件）、`card_index`（卡片元信息缓存）、`card_embeddings`（分模型向量缓存）、`card_fts`（FTS5 全文）、`card_links`（`[[短标题]]` 与相对路径双向链接缓存）、`recall_traces`、`recall_feedback`、`task_cursors` | 系统程序确定性维护；除 `events` 与 `recall_feedback` 外，其余索引表随时可删可全量重建 |
 | **记忆卡片唯一真相** | 磁盘 Markdown (`memory/`) | 常驻成果（`core/`）、情景时间树与反思（`episodes/`）、跨天内容线（`threads/`）、有条件经验（`lessons/`）、实体档案（`entities/`）、逐字原话收藏（`favorite/`） | **仅由主 AI 通过原生 5 文件工具直接读写**，每次整理任务结束及主对话当轮即时写卡自动 `git commit` 留痕 |
 | **用户自定义系统提示词（规划）** | 配置文件 (`config.json`) | 用户显式设定的硬规则或系统偏好注入槽（独立于 `memory/`） | 由用户在设置中维护，不混入 AI 自主书写的 `memory/` 记忆库 |
 
@@ -106,7 +106,8 @@ source: live                      # live | import
    - **每日门控（`reflect_daily`）**：`bedtime` 完成后，对比 `memory/` 自上次日反思 commit 到 `HEAD` 的 Git 变更（忽略 `index.md`、`rf-*.md`、`core/state.md`）。无实质变更则 0 Token 跳过；有实质变更时交由决策槽位（`llm.slots.decision`，原生支持 Google `gemini-decision-1` 的 `POST /v1beta/decisions`，未配时自动降级至 `digest` / `memory_task` / `chat`）判断是否值得启动反思。
    - **周日门控（`reflect_weekly`）**：仅周日 `bedtime` 后额外对比自上周反思 commit 至今的 Git 变更（连同本周已写过的日反思 `rf-*.md` 摘要一起送入决策模型），若新增内容已被日反思充分吸收且无跨天新规律则直接跳过。
    - **自主探索与分流**：反思一旦启动，AI 自主通过 `glob`/`grep`/`read` 扩大查证范围，心路历程写入 `episodes/YYYY/MM/DD/rf-<slug>.md`，成果按作用范围分流至 `core/{self,user,boundaries,mirror,open}.md`、`lessons/*.md`、`threads/` 或 `entities/`。
-3. **极简 3 步召回 + 向量/全卡路由与 Decision 联合门控精排**：
+3. **极简 3 步召回 + 向量/全卡路由、Decision 联合门控精排与 1 跳双链早停扩展**：
    - ① 过空档短路后，拼装「当前一句 + 最近 N 轮对话」作为查询窗口与 `<resident_context>` 常驻摘要；
    - ② 开启 `recall.gate.enabled` 且 `llm.slots.decision` 可用时：若配置了 `llm.slots.embedding`，优先走**纯向量 Top-15 粗筛（1200 字正文语义，关闭 FTS 混合）+ 单次 `DecisionClient.decide` 联合门控与正文摘要精排**；未配置 `embedding` 且活跃卡 ≤250 张时走全卡目录直扫，超限回落 FTS5 候选池精排；超时或异常平滑降级为规则 + FTS 门槛；
-   - ③ 2h 本会话去重（续接触发词豁免）并按 3200 字符预算截断。
+   - ③ **轻量 1 跳双链扩展 + 证据充分性早停**：若门控放行且 Top-5 尚有空位，从派生表 `card_links` 查锚点卡的双向 `[[短标题]]`/相对路径邻卡（无邻卡则 0 额外调用直接结束）；有邻卡时在严格预算内发起至多 1 次并行 `DecisionClient.decide` 判定 `evidence_sufficient`（足够接话则早停）与邻卡增量价值 `hop_neighbor_relevance`，按预算追加 `linked_hop` 轨道卡片；
+   - ④ 2h 本会话去重（续接触发词豁免）并按 3200 字符预算截断。

@@ -399,6 +399,50 @@ async function main() {
               catalogScanMaxCards: 0,
               embedMinScore: 0.25,
               hybridFtsWithEmbedding: false,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
+            },
+          };
+        case "embed_gate_nohop":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              decisionTimeoutMs: 10_000,
+              gate: { enabled: true, threshold: 0.35 },
+              rerank: { threshold: 0.3 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+              multiHop: { enabled: false, maxNeighbors: 6, sufficientThreshold: 0.75 },
+            },
+          };
+        case "embed_gate_hop":
+          return {
+            name,
+            useDecisionClient: true,
+            useEmbeddingClient: true,
+            recallConfig: {
+              ...baseCfg,
+              embedTimeoutMs: 15_000,
+              decisionTimeoutMs: 10_000,
+              gate: { enabled: true, threshold: 0.35 },
+              rerank: { threshold: 0.3 },
+              queryWindowTurns: 4,
+              candidatePool: 15,
+              catalogScanMaxCards: 0,
+              embedMinScore: 0.25,
+              hybridFtsWithEmbedding: false,
+              multiHop: {
+                enabled: true,
+                maxNeighbors: 6,
+                sufficientThreshold: 0.75,
+                timeoutMs: 10_000,
+              },
             },
           };
         default:

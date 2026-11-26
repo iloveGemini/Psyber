@@ -14,7 +14,7 @@ import type { CardIndexRow, MemoryIndex } from "./index.ts";
 
 export type { EmbeddingClient, RerankerClient };
 
-export type RecallTrack = "same_activity" | "cross_vector" | "daily_recent";
+export type RecallTrack = "same_activity" | "cross_vector" | "daily_recent" | "linked_hop";
 
 export interface RecallTurnContext {
   role: "user" | "assistant";
@@ -45,6 +45,12 @@ export interface RecallResult {
   timedOut?: boolean;
   /** 本轮是否实际执行了决策门控与精排 */
   usedDecisionGate?: boolean;
+  /** 本轮双链 1 跳扩展的跳数（0 或 1） */
+  hopCount?: number;
+  /** 本轮双链扩展的终止原因（供评测与观测） */
+  hopStoppedReason?: string;
+  /** 证据充分性早停得分（0..1，未触发早停检查时为 null） */
+  sufficiencyScore?: number | null;
 }
 
 const CONTINUE_TRIGGERS = /(接着讲|继续讲|接着说|继续|后来呢|然后呢|再讲一遍|刚才说的)/;
@@ -79,6 +85,8 @@ export interface RecallGateQuestionSpec {
 export interface RecallGatePromptSpec {
   needsMemory: RecallGateQuestionSpec;
   cardRelevance: RecallGateQuestionSpec;
+  evidenceSufficient: RecallGateQuestionSpec;
+  hopNeighborRelevance: RecallGateQuestionSpec;
 }
 
 const DEFAULT_GATE_NEEDS_MEMORY: RecallGateQuestionSpec = {
@@ -100,6 +108,28 @@ const DEFAULT_GATE_CARD_RELEVANCE: RecallGateQuestionSpec = {
       "卡片 `{{card_id}}` 的主题、经历、原话或触发条件（`when_to_recall`）直接回应最后一条 `user` 消息的回指、续接当前讨论的线索，或为当下话题补充常驻记忆里没有的关键背景与教训。",
     false_description:
       "卡片 `{{card_id}}` 的信息已被 `<resident_context>` 充分覆盖；或只是与对话出现偶然的字面撞词、泛泛话题沾边；或属于无关旧事，强行带入会让回复显得刻意翻旧账。",
+  },
+};
+
+const DEFAULT_GATE_EVIDENCE_SUFFICIENT: RecallGateQuestionSpec = {
+  instructions:
+    "结合 `<resident_context>`、`<conversation>` 与首跳已选中的 `<selected_evidence>`，判断现有记忆信息是否已经足以自然且准确地接住最后一条 `user` 消息，无需再顺着双链展开更多关联卡片。",
+  criteria: {
+    true_description:
+      "`<selected_evidence>` 与 `<resident_context>` 已完整覆盖最后一条 `user` 消息回指的事件、人物、原话或线索进度，没有明显缺漏的关键背景，继续补充关联卡片只会增加冗余或喧宾夺主。",
+    false_description:
+      "`<selected_evidence>` 只给出了线索入口、概述或片段（例如提到了某张专卡、原话、故事或前因但缺少具体内容），或者还缺少回应最后一条 `user` 消息所需的关键细节，顺着双链再翻 1 跳有明显补全价值。",
+  },
+};
+
+const DEFAULT_GATE_HOP_NEIGHBOR_RELEVANCE: RecallGateQuestionSpec = {
+  instructions:
+    "结合 `<resident_context>`、`<conversation>` 与首跳已选中的 `<selected_evidence>`，判断经由双链找到的邻接卡片 `{{card_id}}`（来自 `<linked_neighbors>`）是否能补上 `<selected_evidence>` 中缺失的关键细节、原话、前因后果或长期线索，值得追加进本轮参考。",
+  criteria: {
+    true_description:
+      "邻接卡片 `{{card_id}}` 提供了 `<selected_evidence>` 与 `<resident_context>` 里没有的具体细节、逐字原话、故事/项目进展或直接相关的前因教训，能明显帮上最后一条 `user` 消息的回应。",
+    false_description:
+      "邻接卡片 `{{card_id}}` 的内容与 `<selected_evidence>` 重复、已被 `<resident_context>` 覆盖，或只是因为人物/主题泛泛相连而与当下这句对话无关，强行追加会显得扯远或翻旧账。",
   },
 };
 
@@ -221,13 +251,31 @@ function parseQuestionSection(
 }
 
 export function parseRecallGatePrompt(body: string): RecallGatePromptSpec {
-  const needsMatch = /(?:^|\r?\n)#\s*needs_memory\s*\r?\n([\s\S]*?)(?=\r?\n#\s*card_relevance(?:\s|$)|$)/.exec(
-    body,
-  );
-  const cardMatch = /(?:^|\r?\n)#\s*card_relevance\s*\r?\n([\s\S]*)$/.exec(body);
+  const topHeadingRe =
+    /(?:^|\r?\n)#\s+(needs_memory|card_relevance|evidence_sufficient|hop_neighbor_relevance)\s*\r?\n/g;
+  const sections = new Map<string, string>();
+  const matches: Array<{ name: string; start: number; contentStart: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = topHeadingRe.exec(body)) !== null) {
+    matches.push({ name: m[1], start: m.index, contentStart: m.index + m[0].length });
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    const nextStart = i + 1 < matches.length ? matches[i + 1].start : body.length;
+    sections.set(cur.name, body.slice(cur.contentStart, nextStart));
+  }
+
   return {
-    needsMemory: parseQuestionSection(needsMatch?.[1], DEFAULT_GATE_NEEDS_MEMORY),
-    cardRelevance: parseQuestionSection(cardMatch?.[1], DEFAULT_GATE_CARD_RELEVANCE),
+    needsMemory: parseQuestionSection(sections.get("needs_memory"), DEFAULT_GATE_NEEDS_MEMORY),
+    cardRelevance: parseQuestionSection(sections.get("card_relevance"), DEFAULT_GATE_CARD_RELEVANCE),
+    evidenceSufficient: parseQuestionSection(
+      sections.get("evidence_sufficient"),
+      DEFAULT_GATE_EVIDENCE_SUFFICIENT,
+    ),
+    hopNeighborRelevance: parseQuestionSection(
+      sections.get("hop_neighbor_relevance"),
+      DEFAULT_GATE_HOP_NEIGHBOR_RELEVANCE,
+    ),
   };
 }
 
@@ -250,20 +298,18 @@ function buildNoulQuestion(spec: RecallGateQuestionSpec, cardId?: string): Decis
 }
 
 async function loadRecallGateInstructions(promptsDir?: string): Promise<RecallGatePromptSpec> {
-  if (!promptsDir) {
-    return {
-      needsMemory: DEFAULT_GATE_NEEDS_MEMORY,
-      cardRelevance: DEFAULT_GATE_CARD_RELEVANCE,
-    };
-  }
+  const defaults: RecallGatePromptSpec = {
+    needsMemory: DEFAULT_GATE_NEEDS_MEMORY,
+    cardRelevance: DEFAULT_GATE_CARD_RELEVANCE,
+    evidenceSufficient: DEFAULT_GATE_EVIDENCE_SUFFICIENT,
+    hopNeighborRelevance: DEFAULT_GATE_HOP_NEIGHBOR_RELEVANCE,
+  };
+  if (!promptsDir) return defaults;
   try {
     const loaded = await readPrompt(promptsDir, "recall-gate.md");
     return parseRecallGatePrompt(loaded.body);
   } catch {
-    return {
-      needsMemory: DEFAULT_GATE_NEEDS_MEMORY,
-      cardRelevance: DEFAULT_GATE_CARD_RELEVANCE,
-    };
+    return defaults;
   }
 }
 
@@ -313,6 +359,10 @@ export async function recallMemories(opts: {
     rerank: {
       ...DEFAULT_RECALL_CONFIG.rerank!,
       ...(opts.recallConfig?.rerank ?? {}),
+    },
+    multiHop: {
+      ...DEFAULT_RECALL_CONFIG.multiHop!,
+      ...(opts.recallConfig?.multiHop ?? {}),
     },
   };
   const budget = opts.charBudget ?? cfg.charBudget;
@@ -404,6 +454,12 @@ export async function recallMemories(opts: {
   let gateScore: number | null = null;
   let timedOut = false;
   let usedDecisionGate = false;
+  let hopCount = 0;
+  let hopStoppedReason: string | undefined;
+  let sufficiencyScore: number | null = null;
+  let hopQueryVec: Float32Array | null = null;
+  let hopCardVecs: Map<string, Float32Array> | null = null;
+  let hop0PoolAnchors: string[] = [];
 
   const eligibleForCatalog = allActive.filter((r) => !recentPaths.has(r.path));
   // 配置了向量模型时，直接走「纯向量 Top-15（含 1200 字正文语义）+ Decision 联合精排」，不被全卡目录直扫截胡；
@@ -554,6 +610,8 @@ export async function recallMemories(opts: {
         });
 
         const vecByPath = new Map<string, Float32Array>();
+        hopQueryVec = qVec;
+        hopCardVecs = vecByPath;
         const missing: Array<{ row: CardIndexRow; text: string }> = [];
         const modelKey = opts.embedding.modelKey;
 
@@ -947,6 +1005,7 @@ export async function recallMemories(opts: {
         }
         passed.sort((a, b) => b.finalScore - a.finalScore);
         selected = passed.slice(0, 5);
+        hop0PoolAnchors = poolSlice.slice(0, 2).map((c) => c.row.path);
       } catch (err) {
         timedOut = true;
         console.warn(
@@ -958,6 +1017,169 @@ export async function recallMemories(opts: {
     } else {
       selected = applyRuleFallback(candidates);
     }
+  }
+
+  // Step 2.8: 轻量 1 跳双链扩展 + 证据充分性早停（基于 card_links 双向 [[短标题]]/路径邻卡，严格受预算与早停约束，绝不丢弃首跳结果）
+  const multiHopCfg = cfg.multiHop ?? DEFAULT_RECALL_CONFIG.multiHop!;
+  if (
+    multiHopCfg.enabled &&
+    usedDecisionGate &&
+    !timedOut &&
+    opts.decisionClient &&
+    gateScore !== null &&
+    gateScore >= gateThreshold &&
+    selected.length < 5
+  ) {
+    const anchorPaths =
+      selected.length > 0 ? selected.slice(0, 3).map((s) => s.row.path) : hop0PoolAnchors;
+    if (anchorPaths.length === 0) {
+      hopStoppedReason = "no_anchors";
+    } else {
+      const excludePaths = new Set<string>(recentPaths);
+      for (const s of selected) excludePaths.add(s.row.path);
+      const maxNeighbors = Math.max(1, multiHopCfg.maxNeighbors ?? 6);
+      const rawNeighbors = index.findLinkedNeighbors(anchorPaths, {
+        excludePaths,
+        maxResults: maxNeighbors * 4,
+      });
+
+      if (rawNeighbors.length === 0) {
+        hopStoppedReason = "no_neighbors";
+      } else {
+        // 若已有查询向量与卡片向量缓存，优先按语义相似度 + 多锚点共指 + 正向边排序挑出最相关邻卡
+        const rankedNeighbors = rawNeighbors
+          .map((nb) => {
+            let sem = 0;
+            if (hopQueryVec && hopCardVecs) {
+              const nv = hopCardVecs.get(nb.row.path);
+              if (nv) sem = cosineSimilarity(hopQueryVec, nv);
+            }
+            const priority =
+              sem +
+              0.12 * Math.max(0, nb.anchorHitCount - 1) +
+              (nb.direction === "out" ? 0.05 : 0) +
+              (nb.row.space !== "episodes" ? 0.03 : 0);
+            return { nb, sem, priority };
+          })
+          .sort((a, b) => b.priority - a.priority || b.nb.row.updated_at - a.nb.row.updated_at)
+          .slice(0, maxNeighbors);
+
+        try {
+          const [promptInst, residentBlock] = await Promise.all([
+            loadRecallGateInstructions(opts.promptsDir),
+            loadResidentContextForGate(memoryDir),
+          ]);
+          const convLines = [
+            ...recentSlice.map((m) => `${m.role}: ${clipForGate(m.content, 200)}`),
+            `user: ${clipForGate(query, 400)}`,
+          ];
+
+          const selectedSummaries: string[] = [];
+          for (let i = 0; i < selected.length; i++) {
+            const s = selected[i];
+            let body = "";
+            try {
+              const rawMd = await fs.readFile(path.join(memoryDir, s.row.path), "utf8");
+              body = clipForGate(stripFrontmatter(rawMd), 260);
+            } catch {
+              body = "";
+            }
+            selectedSummaries.push(`[s${i}] ${s.row.path} | 标题：${s.row.title}\n摘要：${body}`);
+          }
+
+          const neighborSummaries: string[] = [];
+          const questions: Record<string, DecisionQuestion> = {};
+          const checkSufficiency = selected.length > 0;
+          if (checkSufficiency) {
+            questions.evidence_sufficient = buildNoulQuestion(promptInst.evidenceSufficient);
+          }
+
+          for (let i = 0; i < rankedNeighbors.length; i++) {
+            const { nb } = rankedNeighbors[i];
+            let body = "";
+            try {
+              const rawMd = await fs.readFile(path.join(memoryDir, nb.row.path), "utf8");
+              body = clipForGate(stripFrontmatter(rawMd), 260);
+            } catch {
+              body = "";
+            }
+            const dirLabel = nb.direction === "out" ? "正文引用自" : "反向关联到";
+            const hint = nb.row.when_to_recall
+              ? ` | 何时想起：${clipForGate(nb.row.when_to_recall, 80)}`
+              : "";
+            neighborSummaries.push(
+              `[n${i}] ${nb.row.path} | 标题：${nb.row.title}（${dirLabel} [[${nb.viaAnchorTitle}]]）${hint}\n摘要：${body}`,
+            );
+            questions[`n${i}`] = buildNoulQuestion(promptInst.hopNeighborRelevance, `[n${i}]`);
+          }
+
+          const hopInput = [
+            ...(residentBlock ? [residentBlock] : []),
+            "<conversation>",
+            convLines.join("\n"),
+            "</conversation>",
+            ...(selectedSummaries.length > 0
+              ? ["<selected_evidence>", selectedSummaries.join("\n\n"), "</selected_evidence>"]
+              : []),
+            "<linked_neighbors>",
+            neighborSummaries.join("\n\n"),
+            "</linked_neighbors>",
+          ].join("\n");
+
+          const hopTimeoutMs = multiHopCfg.timeoutMs ?? 2500;
+          const hopRes = await opts.decisionClient.decide({
+            input: hopInput,
+            questions,
+            signal: AbortSignal.timeout(hopTimeoutMs),
+          });
+          hopCount = 1;
+
+          const sufficientThreshold = multiHopCfg.sufficientThreshold ?? 0.75;
+          if (checkSufficiency) {
+            sufficiencyScore = hopRes.answers.evidence_sufficient?.noul ?? 0.5;
+          }
+
+          if (checkSufficiency && sufficiencyScore !== null && sufficiencyScore >= sufficientThreshold) {
+            hopStoppedReason = "evidence_sufficient";
+          } else {
+            const neighborThreshold = multiHopCfg.neighborThreshold ?? Math.max(0.4, rerankThreshold);
+            const addedNeighbors: CandidateEntry[] = [];
+            for (let i = 0; i < rankedNeighbors.length; i++) {
+              const { nb, sem } = rankedNeighbors[i];
+              const score = hopRes.answers[`n${i}`]?.noul ?? 0;
+              if (score >= neighborThreshold) {
+                addedNeighbors.push({
+                  row: nb.row,
+                  track: "linked_hop",
+                  semScore: sem,
+                  kwScore: 0,
+                  rerankScore: score,
+                  finalScore: score,
+                });
+              }
+            }
+            addedNeighbors.sort((a, b) => b.finalScore - a.finalScore);
+            const slotsLeft = Math.max(0, 5 - selected.length);
+            if (addedNeighbors.length > 0 && slotsLeft > 0) {
+              selected = [...selected, ...addedNeighbors.slice(0, slotsLeft)];
+              hopStoppedReason = "expanded";
+            } else {
+              hopStoppedReason = "no_new_hits";
+            }
+          }
+        } catch (err) {
+          hopStoppedReason = "timeout_or_error";
+          console.warn(
+            `[psyber] recall 1-hop link expansion failed/timed out, keeping hop-0 results:`,
+            (err as Error).message,
+          );
+        }
+      }
+    }
+  } else if (!multiHopCfg.enabled) {
+    hopStoppedReason = "disabled";
+  } else if (selected.length >= 5) {
+    hopStoppedReason = "full";
   }
 
   // Step 3: 字符预算裁剪与留痕落库
@@ -983,7 +1205,9 @@ export async function recallMemories(opts: {
         ? "同活动"
         : cand.track === "daily_recent"
           ? "近期日常"
-          : "相关记忆";
+          : cand.track === "linked_hop"
+            ? "关联延伸"
+            : "相关记忆";
     const statusFlag = cand.row.status === "disputed" ? " · [待确认/有分歧]" : "";
     const dateFlag = cand.row.date_kind === "gentle" ? " · [敏感忌日·轻声对待]" : "";
     const header = `- [${trackLabel}] ${cand.row.path}（${whenLabel} · kind: ${cand.row.kind}${statusFlag}${dateFlag}）\n  标题：${cand.row.title}\n  `;
@@ -1049,6 +1273,9 @@ export async function recallMemories(opts: {
     gateScore,
     timedOut,
     usedDecisionGate,
+    hopCount,
+    hopStoppedReason,
+    sufficiencyScore,
   };
 }
 
