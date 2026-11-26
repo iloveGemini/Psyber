@@ -488,6 +488,132 @@ export interface BashToolConfig {
   maxOutputChars?: number;
 }
 
+export type MemoryMcpAccessMode = "read_only" | "read_write";
+
+/**
+ * 第三方客户端访问 Psyber 记忆 MCP 服务的专属令牌元数据（绝不存明文，仅存 SHA-256 哈希）。
+ */
+export interface MemoryMcpToken {
+  /** 令牌唯一标识（如 mcp_a1b2c3d4e5f6） */
+  id: string;
+  /** 客户端展示名称（如 claude-code、cursor） */
+  name: string;
+  /** Bearer Token 的 SHA-256 十六进制哈希 */
+  tokenHash: string;
+  /** 可选单令牌权限上限：设为 read_only 时即使全局开了 read_write 也仅允许只读 */
+  accessMode?: MemoryMcpAccessMode;
+  /** 创建时间戳（Unix 毫秒） */
+  createdAt: number;
+  /** 最近一次调用时间戳（Unix 毫秒） */
+  lastUsedAt?: number;
+}
+
+/**
+ * 对外记忆 MCP 服务配置（落盘于 <dataDir>/config.json 的 memoryMcp 节点）。
+ * 开启后进入「出差互斥模式」：暂停内部对话与作息心跳，防止两个 Psyber 同时写记忆分叉。
+ */
+export interface MemoryMcpConfig {
+  /** 总开关（默认 false；开启后开放 /mcp 并暂停内部 Psyber 活动，关闭立即恢复） */
+  enabled: boolean;
+  /** 读写权限模式（默认 "read_only"；切换为 "read_write" 才暴露写入/编辑工具） */
+  accessMode: MemoryMcpAccessMode;
+  /** 是否允许非本机回环 IP 访问 /mcp（默认 false；跨机访问建议配合 HTTPS 或 Tailscale） */
+  allowRemote: boolean;
+  /** 写入模式下是否禁止外部 MCP 修改 core/* 常驻身份与边界文件（默认 true，强烈建议开启） */
+  protectCoreFiles: boolean;
+  /** 单次 MCP 工具返回的最大字符数（单位：字符，默认 12000，范围 1000..50000；调大保留更多长文细节，调小省客户端上下文） */
+  maxOutputChars: number;
+  /** 按需单独停用的暴露工具名列表（默认 []） */
+  disabledTools: string[];
+  /** 已签发的外部 MCP 客户端令牌列表（仅存哈希） */
+  tokens: MemoryMcpToken[];
+}
+
+export const DEFAULT_MEMORY_MCP_CONFIG: MemoryMcpConfig = {
+  enabled: false,
+  accessMode: "read_only",
+  allowRemote: false,
+  protectCoreFiles: true,
+  maxOutputChars: 12_000,
+  disabledTools: [],
+  tokens: [],
+};
+
+function sanitizeMemoryMcpTokens(raw: unknown): MemoryMcpToken[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const seen = new Set<string>();
+  const out: MemoryMcpToken[] = [];
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue;
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    const tokenHash = typeof item.tokenHash === "string" ? item.tokenHash.trim() : "";
+    if (!id || !name || !tokenHash || seen.has(id)) continue;
+    seen.add(id);
+    const accessMode: MemoryMcpAccessMode | undefined =
+      item.accessMode === "read_only" || item.accessMode === "read_write"
+        ? item.accessMode
+        : undefined;
+    out.push({
+      id,
+      name: name.slice(0, 64),
+      tokenHash,
+      ...(accessMode ? { accessMode } : {}),
+      createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : 0,
+      ...(typeof item.lastUsedAt === "number" && Number.isFinite(item.lastUsedAt)
+        ? { lastUsedAt: item.lastUsedAt }
+        : {}),
+    });
+  }
+  return out;
+}
+
+/** 深度合并对外记忆 MCP 配置（防 undefined/null 污染；patch 未提供 tokens 时保留既有令牌） */
+export function mergeMemoryMcpConfig(
+  base?: Partial<MemoryMcpConfig>,
+  patch?: Partial<MemoryMcpConfig>,
+): MemoryMcpConfig {
+  const b = isPlainRecord(base) ? (base as Partial<MemoryMcpConfig>) : undefined;
+  const p = isPlainRecord(patch) ? (patch as Partial<MemoryMcpConfig>) : undefined;
+  const accessMode: MemoryMcpAccessMode =
+    p?.accessMode === "read_only" || p?.accessMode === "read_write"
+      ? p.accessMode
+      : b?.accessMode === "read_only" || b?.accessMode === "read_write"
+        ? b.accessMode
+        : DEFAULT_MEMORY_MCP_CONFIG.accessMode;
+  const rawMax = pickFinite(b?.maxOutputChars, p?.maxOutputChars, DEFAULT_MEMORY_MCP_CONFIG.maxOutputChars);
+  const maxOutputChars = Math.max(1_000, Math.min(50_000, Math.floor(rawMax)));
+  const rawDisabled = Array.isArray(p?.disabledTools)
+    ? p!.disabledTools
+    : Array.isArray(b?.disabledTools)
+      ? b!.disabledTools
+      : DEFAULT_MEMORY_MCP_CONFIG.disabledTools;
+  const disabledTools = Array.from(
+    new Set(
+      rawDisabled
+        .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+        .map((t) => t.trim()),
+    ),
+  );
+  const tokens =
+    sanitizeMemoryMcpTokens(p?.tokens) ??
+    sanitizeMemoryMcpTokens(b?.tokens) ??
+    [];
+  return {
+    enabled: pickBool(b?.enabled, p?.enabled, DEFAULT_MEMORY_MCP_CONFIG.enabled),
+    accessMode,
+    allowRemote: pickBool(b?.allowRemote, p?.allowRemote, DEFAULT_MEMORY_MCP_CONFIG.allowRemote),
+    protectCoreFiles: pickBool(
+      b?.protectCoreFiles,
+      p?.protectCoreFiles,
+      DEFAULT_MEMORY_MCP_CONFIG.protectCoreFiles,
+    ),
+    maxOutputChars,
+    disabledTools,
+    tokens,
+  };
+}
+
 /**
  * 单 Psyber 实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
@@ -537,6 +663,8 @@ export interface PsyberConfig {
   llm?: LlmConfig;
   /** 外部 MCP 服务器清单（Tier 3 工具池，敏感令牌经 ${cred:<key>} 引用 credentials.json） */
   mcpServers?: McpServerConfig[];
+  /** 对外暴露记忆工具的 MCP 服务端配置（开启时进入出差互斥模式，默认关闭） */
+  memoryMcp?: MemoryMcpConfig;
   /** 内置 bash 工具安全边界配置（允许目录、超时与输出上限） */
   bash?: BashToolConfig;
   /** 用户手动停用的非核心扩展工具名列表（Tier 1 元工具不可停用） */
@@ -643,6 +771,7 @@ export async function loadOrCreateConfig(
       radar: mergeRadarConfig(),
       circadian: { ...DEFAULT_CIRCADIAN_CONFIG },
       notifications: { ...DEFAULT_NOTIFICATIONS_CONFIG },
+      memoryMcp: mergeMemoryMcpConfig(),
       genesisCompleted: false,
     };
     await saveConfig(dataDir, cfg);
@@ -704,6 +833,7 @@ export async function loadOrCreateConfig(
       : undefined,
     llm: cfg.llm,
     mcpServers: Array.isArray(cfg.mcpServers) ? cfg.mcpServers : [],
+    memoryMcp: mergeMemoryMcpConfig(cfg.memoryMcp),
     bash: cfg.bash
       ? {
           ...(Array.isArray(cfg.bash.allowedDirs)

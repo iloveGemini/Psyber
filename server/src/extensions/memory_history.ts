@@ -1,67 +1,19 @@
-import path from "node:path";
-import { readMemoryGitLog, readMemoryGitShow } from "../core/git.ts";
+import {
+  normalizeMemoryHistoryPath,
+  readMemoryGitLog,
+  readMemoryGitShow,
+  validateCommitRef,
+  validateSinceFilter,
+} from "../core/git.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
+
+export { normalizeMemoryHistoryPath, validateCommitRef, validateSinceFilter };
 
 export const DEFAULT_MEMORY_HISTORY_LIMIT = 10;
 export const MAX_MEMORY_HISTORY_LIMIT = 50;
 export const DEFAULT_MEMORY_HISTORY_MAX_CHARS = 8_000;
 export const MIN_MEMORY_HISTORY_MAX_CHARS = 500;
 export const MAX_MEMORY_HISTORY_MAX_CHARS = 20_000;
-
-const SAFE_COMMIT_REF_RE = /^(?:[0-9a-fA-F]{4,40}|HEAD(?:~\d{1,3})?)$/;
-
-export function normalizeMemoryHistoryPath(
-  raw: unknown,
-): { ok: true; relPath?: string } | { ok: false; reason: string } {
-  if (raw === undefined || raw === null) return { ok: true };
-  if (typeof raw !== "string") {
-    return { ok: false, reason: "path 必须为字符串。" };
-  }
-  const trimmed = raw.trim().replace(/\\/g, "/");
-  if (!trimmed) return { ok: true };
-  if (trimmed.includes("\0") || trimmed.includes("\n") || trimmed.includes("\r")) {
-    return { ok: false, reason: "path 包含非法控制字符。" };
-  }
-  if (trimmed.startsWith("-") || trimmed.startsWith("/") || trimmed.startsWith("~")) {
-    return { ok: false, reason: `path 必须是 memory/ 内的相对路径：${raw}` };
-  }
-
-  const normalized = path.posix.normalize(trimmed).replace(/\/+$/, "");
-  if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
-    return { ok: false, reason: `禁止访问 memory/ 之外的路径：${raw}` };
-  }
-  const segments = normalized.split("/");
-  if (segments.some((seg) => seg === ".git" || seg === "..")) {
-    return { ok: false, reason: `禁止直接访问受保护路径：${raw}` };
-  }
-  return { ok: true, relPath: normalized };
-}
-
-export function validateCommitRef(raw: unknown): { ok: true; commit: string } | { ok: false; reason: string } {
-  if (typeof raw !== "string" || !raw.trim()) {
-    return { ok: false, reason: "action=show 时必须提供 commit（如短哈希或 HEAD / HEAD~1）。" };
-  }
-  const trimmed = raw.trim();
-  if (!SAFE_COMMIT_REF_RE.test(trimmed)) {
-    return { ok: false, reason: `非法的提交标识：${trimmed}（仅支持 4-40 位十六进制哈希或 HEAD / HEAD~N）。` };
-  }
-  return { ok: true, commit: trimmed };
-}
-
-export function validateSinceFilter(
-  raw: unknown,
-): { ok: true; since?: string } | { ok: false; reason: string } {
-  if (raw === undefined || raw === null) return { ok: true };
-  if (typeof raw !== "string") {
-    return { ok: false, reason: "since 必须为字符串。" };
-  }
-  const trimmed = raw.trim();
-  if (!trimmed) return { ok: true };
-  if (trimmed.length > 64 || trimmed.startsWith("-") || /[\0\r\n]/.test(trimmed)) {
-    return { ok: false, reason: `非法的 since 时间过滤参数：${trimmed}` };
-  }
-  return { ok: true, since: trimmed };
-}
 
 function clampMaxChars(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MEMORY_HISTORY_MAX_CHARS;

@@ -1,9 +1,11 @@
 import crypto from "node:crypto";
 import type { Database } from "bun:sqlite";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Clock } from "../core/clock.ts";
-import type { PsyberConfig } from "../core/config.ts";
+import { saveConfig, type PsyberConfig } from "../core/config.ts";
+import type { EmbeddingClient } from "../core/embedding.ts";
 import type { MediaStore } from "../core/media.ts";
+import { AsyncMutex } from "../core/mutex.ts";
 import { ulid } from "../core/ulid.ts";
 import type { DirectEngine, TurnCheckpoint } from "../engine/direct.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
@@ -15,11 +17,13 @@ import { isValidDrawerId, type DrawerStore } from "../memory/drawer.ts";
 import { readIdentityProfile } from "../memory/genesis.ts";
 import type { MemoryIndex } from "../memory/index.ts";
 import { getTurnRecallTraces, saveRecallFeedback } from "../memory/recall.ts";
+import type { MemoryTools } from "../memory/tools.ts";
 import type { NotificationHub } from "../notifications/hub.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import { registerAdminRoutes } from "./admin_routes.ts";
-import type { PairingManager } from "./pairing.ts";
+import { registerMemoryMcpRoutes } from "./memory_mcp.ts";
+import { hashBearerToken, type PairingManager } from "./pairing.ts";
 
 const VALID_ULID_OR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -50,10 +54,7 @@ function parseVoiceClip(raw: unknown): VoiceClipMeta | undefined {
   };
 }
 
-/** 对 Bearer Token 做 SHA-256 哈希，确保 config.json 绝不存明文令牌 */
-export function hashBearerToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
+export { hashBearerToken };
 
 function toTimelineItem(ev: StoredEvent, events: EventStore) {
   const meta = ev.metadata ?? {};
@@ -165,6 +166,9 @@ export interface AppDeps {
   dataDir?: string;
   db?: Database;
   memoryIndex?: MemoryIndex;
+  memoryTools?: MemoryTools;
+  embedding?: EmbeddingClient;
+  memoryGitMutex?: AsyncMutex;
   drawer?: DrawerStore;
   sse?: SseHub;
   engine?: DirectEngine;
@@ -174,6 +178,8 @@ export interface AppDeps {
   toolRegistry?: ToolRegistry;
   modelCatalog?: ModelCatalogService;
   notifications?: NotificationHub;
+  /** 记忆 MCP 开关切换回调（用于出差互斥交接：停/启心跳与刷新索引） */
+  onMemoryMcpTransition?: (prevEnabled: boolean, nextEnabled: boolean) => Promise<void> | void;
   /** 同步高风险工具审批超时（毫秒，默认 120_000） */
   approvalTimeoutMs?: number;
   /** 用户新消息（chat / door_note）落盘时回调，用于立即重置 consecutiveUnansweredWakes = 0 */
@@ -429,8 +435,23 @@ export function createApp(deps: AppDeps): Hono {
       version: deps.version,
       instanceId: cfg.instanceId,
       serverTimeMs: deps.clock.now(),
+      memoryMcpEnabled: Boolean(cfg.memoryMcp?.enabled),
     });
   });
+
+  const rejectIfMemoryMcpActive = (c: Context) => {
+    if (!deps.getConfig().memoryMcp?.enabled) return null;
+    return c.json(
+      {
+        error: {
+          code: "MCP_ACTIVE",
+          message:
+            "当前已开启对外记忆 MCP（出差模式），内部对话已暂停以防记忆分叉。请先关闭 MCP 模式后再聊天。",
+        },
+      },
+      409,
+    );
+  };
 
   // 跨站 Origin 守卫：拦截恶意网页静默探测 /auth/pair、/auth/local-pair 或发起跨站写请求
   app.use("/api/v1/*", async (c, next) => {
@@ -598,6 +619,8 @@ export function createApp(deps: AppDeps): Hono {
         410,
       );
     }
+    const mcpBlocked = rejectIfMemoryMcpActive(c);
+    if (mcpBlocked) return mcpBlocked;
     if (doorState === "cooling_off" && urgentRequested) {
       return c.json(
         { error: { code: "DOOR_COOLING_OFF", message: "冷静期期间严禁紧急打扰，请先写门缝纸条" } },
@@ -687,6 +710,8 @@ export function createApp(deps: AppDeps): Hono {
         410,
       );
     }
+    const mcpBlocked = rejectIfMemoryMcpActive(c);
+    if (mcpBlocked) return mcpBlocked;
     if (!deps.engine) {
       return c.json({ error: { code: "ENGINE_UNAVAILABLE", message: "对话引擎尚未就绪" } }, 503);
     }
@@ -725,6 +750,8 @@ export function createApp(deps: AppDeps): Hono {
         410,
       );
     }
+    const mcpBlocked = rejectIfMemoryMcpActive(c);
+    if (mcpBlocked) return mcpBlocked;
     if (cfg.door.state === "closed" || (cfg.door.state as string) === "cooling_off") {
       return c.json(
         { error: { code: "DOOR_CLOSED", message: "门正关着，暂不打扰" } },
@@ -924,6 +951,8 @@ export function createApp(deps: AppDeps): Hono {
         410,
       );
     }
+    const mcpBlocked = rejectIfMemoryMcpActive(c);
+    if (mcpBlocked) return mcpBlocked;
     for (const ac of activeAborts.values()) {
       ac.abort();
     }
@@ -990,6 +1019,8 @@ export function createApp(deps: AppDeps): Hono {
         410,
       );
     }
+    const mcpBlocked = rejectIfMemoryMcpActive(c);
+    if (mcpBlocked) return mcpBlocked;
     if (activeAborts.size > 0) {
       return c.json(
         { error: { code: "TURN_IN_PROGRESS", message: "当前已有正在生成的回复，请稍后再试" } },
@@ -1353,6 +1384,27 @@ export function createApp(deps: AppDeps): Hono {
       },
     });
   });
+
+  if (deps.dataDir && deps.db && deps.memoryIndex && deps.memoryTools) {
+    registerMemoryMcpRoutes(app, {
+      version: deps.version,
+      dataDir: deps.dataDir,
+      db: deps.db,
+      clock: deps.clock,
+      getConfig: deps.getConfig,
+      memoryIndex: deps.memoryIndex,
+      memoryTools: deps.memoryTools,
+      embedding: deps.embedding,
+      gitMutex: deps.memoryGitMutex ?? new AsyncMutex(),
+      getClientIp: deps.getClientIp,
+      allowedOrigins: deps.allowedOrigins,
+      onTokenUsed: async () => {
+        if (deps.dataDir) {
+          await saveConfig(deps.dataDir, deps.getConfig());
+        }
+      },
+    });
+  }
 
   return app;
 }

@@ -622,6 +622,25 @@ export class DirectEngine {
     return this.rolloverInProgress;
   }
 
+  /** 等待当前正在执行的对话轮或换段锁释放（用于开启记忆 MCP 出差模式前的安全交接） */
+  waitForTurnIdle(): Promise<void> {
+    return this.turnMutex.runExclusive(async () => {});
+  }
+
+  /** 主动失效当前会话静态前缀缓存（用于关闭记忆 MCP 出差模式后重新读入最新记忆） */
+  invalidateStaticPrefix(): Promise<void> {
+    return this.turnMutex.runExclusive(async () => {
+      this.staticPrefixSnapshot = null;
+      if (this.activeState.fresh && !this.deps.events.hasMessagesInSession(this.activeState.sessionId)) {
+        this.activeState = {
+          ...this.activeState,
+          continuity: null,
+        };
+        this.deps.events.setActiveSessionState(this.activeState);
+      }
+    });
+  }
+
   private computeEffectiveRolloverLimit(mode: "chat" | "wake" = "chat"): number {
     const baseLimit = Math.max(1, Math.floor(this.deps.chatModel.contextWindow * ROLLOVER_RATIO));
     const limits = this.deps.getConfig().llm?.contextLimits;

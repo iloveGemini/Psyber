@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（落地 Ring 1.5 `digest` 并行附件摘要槽位、会话前缀防缓存击穿锁与 Tier 3 `view_media` 原图复看工具）。
+> 最后更新：2026-11-26（落地对外可开关记忆 MCP 工具层第一阶段：Streamable HTTP `/mcp`、读写模式切换、出差互斥休眠与 CLI 启停）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一阶段）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **对外可开关记忆 MCP 工具层 · 第一阶段（`docs/` + `server/`，2026-11-26）**：
+  - 契约与配置：更新 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/API.md](docs/API.md)；`core/config.ts` 新增 `memoryMcp` 配置与 `mergeMemoryMcpConfig`（`enabled`、`accessMode: read_only|read_write`、`allowRemote`、`protectCoreFiles`、`maxOutputChars`、`disabledTools`、仅存 `SHA-256` 哈希的专属 `tokens`）。
+  - Streamable HTTP 服务端与工具：`api/memory_mcp.ts` 落地 `POST/DELETE /mcp`（开关关闭 `404` + 回环 IP 守卫 + `Origin` 防跨站 + 专属令牌鉴权）；暴露 `memory_context`、`memory_search`（向量/FTS5 + 1 跳双链邻居，零 LLM 费用）、`memory_glob`、`memory_grep`、`memory_read`（`countAccess: false`）、`memory_history`，以及 `read_write` 下受 `protectCoreFiles` 与共享 `memoryGitMutex` 保护的 `memory_write`/`memory_edit`（自动提交 `memory(mcp:<name>): ...`）；严禁触碰 `private/` 与 `events` 原始聊天库。
+  - 出差互斥与 CLI 启停：`app.ts`/`admin_routes.ts`/`index.ts`/`engine/direct.ts` 实现开启 `memoryMcp` 后内部心跳与整理休眠、内部聊天写接口返 `409 MCP_ACTIVE`，关闭回家时自动 `reindexAll()` 并失效旧静态前缀；新增 `POST/DELETE /api/v1/memory-mcp/tokens`、`bun run start --mcp-only`（`PSYBER_MEMORY_MCP=1`）、`SIGUSR2` 热重载、CLI `server/scripts/memory_mcp.ts`（`bun run mcp`，支持 `--save-stdio` 写入 `0600` 令牌）与 `stdio` 转发桥 `server/scripts/mcp_stdio.ts`（`bun run mcp:stdio`）；补充 `tests/memory_mcp.test.ts`（6 组用例）。
 - **附件并行摘要槽位（`digest`）、会话前缀锁与 `view_media` 按需复看（`docs/` + `server/` + `app/`，2026-11-26）**：
   - 并行摘要与防缓存击穿：新增 `engine/digest.ts`（显式配置 `llm.slots.digest` 时生效，不隐式回落主模型）与 `EventStore.setAttachmentDigestState`/`setAttachmentDigest`；`POST /api/v1/chat/messages` 与 `DirectEngine.executeTurn` 在发图/短视频瞬间与主模型并行起跑摘要（零首字延迟），并实时持久化 `pending` / `done` / `failed` 状态广播 SSE `message.updated`；新增 `POST /api/v1/chat/messages/:id/digest` 支持失败点击重试或手动重生成；`DirectEngine.buildHistoryMessages` 剥除历史 base64 改以 `[图片 media:<hash> · 摘要：...]` 呈现，并加会话级 `historyUserContentCache` 前缀锁杜绝异步晚到击穿 Prompt Cache；`engine/tidy.ts` 冷写整理同步注入 `attachmentDigest`。
   - 按需复看原图与前端微标：扩展 `ToolResult` 与 `llm/client.ts` `toolResult` 支持临时图片块；新增 Tier 3 只读工具 `extensions/view_media.ts`（`view_media(mediaId)`，仅在当轮工具结果载入原图，跨轮不落盘 base64 自动回收）；客户端时间线附件旁新增淡灰色三态微标（转圈中 / 淡灰勾点击看原文 / 淡灰提醒点击重试），同步更新 `docs/spec/01-engine-tools-prompts.md` §2.3、`app/` 设置页 `digest` 槽位说明与 `tests/attachment_digest.test.ts`（5 组用例）。
@@ -59,9 +63,10 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
+- 对外记忆 MCP 第二阶段（按需）：新增 `replay_status` / `replay_next_batch` / `replay_complete_batch` 搬家任务工具及订阅 CLI 无人值守批处理驱动脚本；在 Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI。
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（25 文件 / 106 用例 / 1437 断言，含新增 `tests/attachment_digest.test.ts`）全部通过。
+- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（27 文件 / 117 用例 / 1575 断言，含新增 `tests/memory_mcp.test.ts`）全部通过。
 - **`app/`（2026-11-26）**：仅微调设置页 `digest` 槽位说明文案；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。

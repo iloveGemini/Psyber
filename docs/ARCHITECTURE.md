@@ -40,7 +40,7 @@ Psyber/
 │       ├── mood/                  # Ring 1 扁平作息/心跳实现（circadian.ts）；Ring 2 抽离多态 MoodProvider
 │       ├── notifications/         # Ring 1 桌面本地/Webhook 实现（Ring 1.5 补 Bark/ntfy；Ring 2 扩展 APNs/FCM）
 │       ├── extensions/            # Ring 1.5: ActivityPlugin + cinema + 外部 MCP 桥接；Ring 2: bash/browser/creative/music/rp/perception
-│       └── api/                   # Hono HTTP + SSE 路由、Token 鉴权、静态媒体流
+│       └── api/                   # Hono HTTP + SSE 路由、Token 鉴权、静态媒体流、对外记忆 MCP 服务端（memory_mcp.ts）
 └── app/                           # Flutter 全端客户端（Dart）
     └── lib/
         ├── core/                  # Ring 1 单地址配置与静默重连（Ring 1.5 补多地址竞速与 streamSeq 续传）、Token 存储、REST + SSE 客户端
@@ -67,6 +67,12 @@ api ──► engine ──► tools ──► memory ──► store ──► 
 
 - `memory/` **绝不依赖** `mood/`、`engine/`、`expression/` 或任何具体扩展，仅通过纯字符串 `activity_hint` 协作。
 - `mood/` **绝不直接读写** `memory/` 磁盘文件，仅通过只读快照产出心境摘要与心跳动作。
+- 入站对外记忆 MCP 服务端适配层（`api/memory_mcp.ts`）位于最外圈 `api/`，**仅调用 `memory/` 与 `core/`**，绝不反向侵入 `memory/`、`tools/` 或 `engine/`。
+
+### 对外记忆 MCP（出差互斥模式）
+- **默认关闭与零外网泄漏**：`config.json` 中 `memoryMcp.enabled` 默认 `false`（关闭时 `/mcp` 返回 `404`）；开启后默认 `read_only` 且 `allowRemote: false`（仅允许本机回环访问），配合 `Origin` 防跨站守卫与专属 Bearer 令牌（`SHA-256` 哈希存储，不与客户端配对 Token 混用）。
+- **单身互斥（绝不记忆分叉）**：开启 `memoryMcp.enabled = true` 进入「出差模式」时，系统等待内部在途任务收尾后立即暂停内部作息心跳与自动整理，并对内部聊天写接口返回 `409 MCP_ACTIVE`；关闭返回时先全量 `memoryIndex.reindexAll()` 并失效 `DirectEngine` 旧静态前缀快照，确保醒来认知连续一致。
+- **第一人称主权与隐私铁律**：严禁暴露 `<dataDir>/private/`（上锁抽屉）或直接裸露 `events` 原始聊天库；开启 `read_write` 后默认启用 `protectCoreFiles: true` 保护 `core/*`，所有 MCP 写入复用 `MemoryTools` 沙箱校验与共享 `memoryGitMutex`，并自动记录 `memory(mcp:<name>): ...` Git 提交。
 
 ---
 

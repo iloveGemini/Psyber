@@ -18,6 +18,7 @@ import {
   DEFAULT_CIRCADIAN_CONFIG,
   initDataDir,
   loadOrCreateConfig,
+  mergeMemoryMcpConfig,
   saveConfig,
   type PsyberConfig,
 } from "./core/config.ts";
@@ -137,6 +138,8 @@ export interface BootOptions {
   writeLocalPairFile?: boolean;
   /** 可选：额外写入用户级活跃实例指针（如 ~/.psyber/active_local_pair.json），供自定义 PSYBER_DATA_DIR 切换实例时本机桌面端自动识别 */
   activeLocalPairPath?: string;
+  /** 纯记忆 MCP 模式（仅本次进程强制开启 /mcp 并暂停内部 Psyber 活动，不覆写磁盘 config.json 开关） */
+  mcpOnly?: boolean;
 }
 
 export interface PsyberRuntime {
@@ -164,6 +167,8 @@ export interface PsyberRuntime {
   triggerBackup: () => Promise<string | null>;
   /** 等待当前队列中的异步整理与备份任务收尾（可选超时毫秒，避免停机无限阻塞） */
   waitForIdle: (timeoutMs?: number) => Promise<boolean>;
+  /** 从磁盘 config.json 重新加载 memoryMcp 配置并应用出差/回家状态交接（供 CLI 热重载使用） */
+  reloadMemoryMcpConfigFromDisk: () => Promise<void>;
   /** 优雅停机：停心跳、断 SSE、删本机凭证、等后台收尾、关数据库连接 */
   stop: (opts?: { waitTimeoutMs?: number }) => Promise<void>;
 }
@@ -187,6 +192,10 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
 
   const bootClock = opts.clock ?? new SystemClock();
   const config = await loadOrCreateConfig(dataDir, bootClock.now());
+  if (opts.mcpOnly) {
+    config.memoryMcp = mergeMemoryMcpConfig(config.memoryMcp, { enabled: true });
+  }
+  const isMemoryMcpActive = () => Boolean(opts.mcpOnly || config.memoryMcp?.enabled);
   // 未注入测试时钟时使用动态读取 config.timezone 的 SystemClock，避免业务层裸调 Date.now()
   const clock: Clock = opts.clock ?? new SystemClock(() => config.timezone);
 
@@ -270,7 +279,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     void modelCatalog.syncFromRemote({ fetchImpl: opts.fetchImpl, nowMs: clock.now() });
   }
 
-  // Stage 7b: 异步非阻塞挂载外部 MCP 桥接（强制 Tier 3，单服宕机绝不阻塞启动）
+  // Stage 7b: 异步非阻塞挂载外部 MCP 桥接（强制 Tier 3，单服宕机绝不阻塞启动；出差模式开启时不连外部 MCP）
   const mcp = new McpManager({
     registry,
     loadCredentials: () => loadCredentials(dataDir),
@@ -279,7 +288,9 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     reconnectDelaysMs: opts.mcpReconnectDelaysMs,
     clientFactory: opts.mcpClientFactory,
   });
-  mcp.connectAllAsync(config.mcpServers ?? []);
+  if (!isMemoryMcpActive()) {
+    mcp.connectAllAsync(config.mcpServers ?? []);
+  }
 
   const sse = new SseHub();
   const notifications = new NotificationHub({
@@ -355,6 +366,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   let stopped = false;
 
   const tidyMutex = new AsyncMutex();
+  const memoryGitMutex = new AsyncMutex();
   const pendingPromises = new Set<Promise<unknown>>();
   let dailyWrapupQueued = false;
   let queuedBedtimeNightDate: string | null = null;
@@ -503,7 +515,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     nightDate?: string,
     maxSeq?: number | null,
   ): Promise<TidyTaskOutcome | null> => {
-    if (stopped) return Promise.resolve(null);
+    if (stopped || isMemoryMcpActive()) return Promise.resolve(null);
     if (taskType === "daily_wrapup") {
       if (dailyWrapupQueued) return Promise.resolve(null);
       dailyWrapupQueued = true;
@@ -835,7 +847,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   let heartbeatInFlight = false;
 
   const tickHeartbeat = async (): Promise<HeartbeatDecision> => {
-    if (stopped || heartbeatInFlight) {
+    if (stopped || heartbeatInFlight || isMemoryMcpActive()) {
       return { action: "idle" };
     }
     heartbeatInFlight = true;
@@ -958,7 +970,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
-    if (stopped || opts.startHeartbeatTimer === false) return;
+    if (stopped || opts.startHeartbeatTimer === false || isMemoryMcpActive()) return;
     const intervalMin =
       config.circadian?.heartbeatIntervalMin ?? DEFAULT_CIRCADIAN_CONFIG.heartbeatIntervalMin;
     const intervalMs = Math.max(60_000, intervalMin * 60_000);
@@ -970,8 +982,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   };
   rescheduleHeartbeatTimer();
 
-  // 若此前因关机错过了睡眠窗 bedtime，白天开机时按真实未结算日期异步补跑（不阻塞前台第一轮对话，也不对空日子误跑）
-  if (opts.catchUpMissedBedtime !== false) {
+  // 若此前因关机错过了睡眠窗 bedtime，白天开机时按真实未结算日期异步补跑（不阻塞前台第一轮对话，也不对空日子误跑；出差模式暂停）
+  if (opts.catchUpMissedBedtime !== false && !isMemoryMcpActive()) {
     const sleepStatus = getSleepWindowStatus(clock.now(), config.timezone, config.circadian);
     if (!sleepStatus.inSleepWindow) {
       const today = localDay(clock.now(), config.timezone);
@@ -983,6 +995,45 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     }
   }
 
+  const handleMemoryMcpTransition = async (prevEnabled: boolean, nextEnabled: boolean): Promise<void> => {
+    if (stopped || prevEnabled === nextEnabled) return;
+    if (!prevEnabled && nextEnabled) {
+      rescheduleHeartbeatTimer();
+      await waitForIdle(5_000);
+      await engine.waitForTurnIdle();
+      sse.emit("memory_mcp.updated", {
+        enabled: true,
+        accessMode: config.memoryMcp?.accessMode ?? "read_only",
+      });
+      return;
+    }
+    await memoryIndex.reindexAll();
+    await engine.invalidateStaticPrefix();
+    if (mcp.getStatusList().length === 0 && (config.mcpServers?.length ?? 0) > 0) {
+      mcp.connectAllAsync(config.mcpServers ?? []);
+    }
+    rescheduleHeartbeatTimer();
+    sse.emit("memory_mcp.updated", {
+      enabled: false,
+      accessMode: config.memoryMcp?.accessMode ?? "read_only",
+    });
+  };
+
+  const reloadMemoryMcpConfigFromDisk = async (): Promise<void> => {
+    if (stopped) return;
+    const prevEnabled = isMemoryMcpActive();
+    const diskCfg = await loadOrCreateConfig(dataDir, clock.now());
+    const nextMemoryMcp = mergeMemoryMcpConfig(
+      diskCfg.memoryMcp,
+      opts.mcpOnly ? { enabled: true } : undefined,
+    );
+    config.memoryMcp = nextMemoryMcp;
+    const nextEnabled = isMemoryMcpActive();
+    if (prevEnabled !== nextEnabled) {
+      await handleMemoryMcpTransition(prevEnabled, nextEnabled);
+    }
+  };
+
   const app = createApp({
     version,
     clock,
@@ -992,6 +1043,9 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     dataDir,
     db,
     memoryIndex,
+    memoryTools,
+    embedding: embeddingClient,
+    memoryGitMutex,
     drawer,
     sse,
     engine,
@@ -1008,6 +1062,8 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     onSettingsUpdated: () => {
       rescheduleHeartbeatTimer();
     },
+    onMemoryMcpTransition: (prevEnabled, nextEnabled) =>
+      handleMemoryMcpTransition(prevEnabled, nextEnabled),
     getClientIp: opts.getClientIp,
     getPairUrls: opts.getPairUrls,
     allowedOrigins: opts.allowedOrigins,
@@ -1106,11 +1162,14 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       ),
     triggerBackup,
     waitForIdle,
+    reloadMemoryMcpConfigFromDisk,
     stop,
   };
 }
 
 async function main(): Promise<void> {
+  const mcpOnly =
+    process.argv.includes("--mcp-only") || process.env.PSYBER_MEMORY_MCP === "1";
   const port = Number(process.env.PSYBER_PORT || 3721);
   // Spec 05 §5.3：默认监听 0.0.0.0 供局域网移动端扫码直连，仅本机使用可设 127.0.0.1
   const host = process.env.PSYBER_HOST || "0.0.0.0";
@@ -1134,6 +1193,7 @@ async function main(): Promise<void> {
     writeLocalPairFile: true,
     activeLocalPairPath: path.join(os.homedir(), ".psyber", "active_local_pair.json"),
     allowedOrigins,
+    mcpOnly,
     getClientIp: (req) => requestIps.get(req) ?? "unknown",
     getPairUrls: resolvePairUrls,
   });
@@ -1156,6 +1216,11 @@ async function main(): Promise<void> {
   });
 
   console.log(`Psyber server listening on ${protocol}://${host}:${port} (dataDir=${runtime.dataDir})`);
+  if (mcpOnly || runtime.config.memoryMcp?.enabled) {
+    console.log(
+      `[psyber] 记忆 MCP 出差模式已开启（mode=${runtime.config.memoryMcp?.accessMode ?? "read_only"}, endpoint=${protocol}://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}/mcp），内部对话与作息心跳已暂停以防记忆分叉。`,
+    );
+  }
   if (protocol === "http" && !isLoopbackIp(host)) {
     console.log(
       "[psyber] 安全提示：当前局域网以明文 HTTP 监听，请仅在可信 Wi-Fi 或 Tailscale 下配对；如需加密可配置 PSYBER_TLS_CERT 与 PSYBER_TLS_KEY。",
@@ -1273,6 +1338,11 @@ async function main(): Promise<void> {
   });
   process.on("SIGTERM", () => {
     void shutdown("SIGTERM");
+  });
+  process.on("SIGUSR2", () => {
+    void runtime.reloadMemoryMcpConfigFromDisk().catch((err) => {
+      console.error("[psyber] 重载 memoryMcp 配置失败：", err);
+    });
   });
 }
 

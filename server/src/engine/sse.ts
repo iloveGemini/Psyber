@@ -6,6 +6,7 @@ export type Ring1SseEventName =
   | "door_note.opened"
   | "identity.updated"
   | "user_status.updated"
+  | "memory_mcp.updated"
   | "share.opened"
   | "turn.start"
   | "turn.thinking"

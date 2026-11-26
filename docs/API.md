@@ -20,7 +20,7 @@
 
 | 方法与路径 | 分期 | 说明 |
 | :--- | :--- | :--- |
-| `GET /api/v1/health` | **Ring 1** | 非阻塞探活与服务端版本（要求 `< 20ms`） |
+| `GET /api/v1/health` | **Ring 1** | 非阻塞探活与服务端版本（要求 `< 20ms`；含可选 `memoryMcpEnabled` 出差状态标识） |
 | `POST /api/v1/auth/pair` | **Ring 1** | 新设备使用桌面端/CLI 生成的一次性配对码兑换长期 Bearer Token（按真实客户端 IP 限流 + Origin 防跨站） |
 | `POST /api/v1/auth/local-pair` | **Ring 1.5** | 仅限本机桌面端免码配对（严格校验回环 IP、无浏览器 Origin 头及 `0600` `local_pair.json` 启动密钥） |
 | `POST /api/v1/auth/pair-code` | **Ring 1.5** | 已配对设备签发 5 分钟一次性配对码与扫码二维码 JSON 载荷 `{ v: 1, urls, code }` |
@@ -62,7 +62,7 @@
   - `turn.done` — 本轮结束（含 `messageId`、`recallCount`、`aborted?`）
   - `turn.error` — 结构化异常（`AUTH_EXPIRED` / `RATE_LIMITED` / `PROVIDER_ERROR` / `CONTEXT_OVERFLOW`）
   - `ping` — 每 25 秒保活心跳
-- **Ring 1.5 / Ring 2 扩展事件**：`message.updated`（版本切换/编辑/软删/社交撤回）、`turn.tool`（同轮手账聚合工具进度）、`turn.rollover`（同步换段收尾中/完成/失败状态提示）、`turn.silence`（独处/唤醒主动沉默极轻痕迹）、`turn.model_switched`（主备模型切换点提示）、`turn.approval_required` / `turn.approval_resolved`、`share.opened`、`user_status.updated`、`request.created` / `request.decided`、`activity.updated`、`sync.reset`。
+- **Ring 1.5 / Ring 2 扩展事件**：`message.updated`（版本切换/编辑/软删/社交撤回）、`turn.tool`（同轮手账聚合工具进度）、`turn.rollover`（同步换段收尾中/完成/失败状态提示）、`turn.silence`（独处/唤醒主动沉默极轻痕迹）、`turn.model_switched`（主备模型切换点提示）、`turn.approval_required` / `turn.approval_resolved`、`share.opened`、`user_status.updated`、`memory_mcp.updated`（出差互斥模式开关或读写模式变更）、`request.created` / `request.decided`、`activity.updated`、`sync.reset`。
 
 ### 2.4 召回评测与反馈（评测模式专用）
 
@@ -85,8 +85,8 @@
 | :--- | :--- | :--- |
 | `POST /api/v1/media` | **Ring 1** | 上传用户图片/音频/多模态附件（含 `audio/mp4` / `audio/m4a` 等异步语音条音频，SHA-256 去重落盘 `media/`，返回 `{ hash, url, mimeType, size }`） |
 | `GET /api/v1/media/:hash` | **Ring 1** | 按 SHA-256 哈希拉取图片、头像与贴纸（带 `ETag` + `Cache-Control: immutable`） |
-| `GET /api/v1/settings` | **Ring 1** | 读取脱敏配置快照（模型槽位、召回与只读体检雷达 `recall`/`radar`、作息窗、通知与设备概览，严禁返回明文密钥） |
-| `PATCH /api/v1/settings` | **Ring 1** | 更新模型槽位/新 BYOK `apiKey`（落 `credentials.json`）、`recall`/`radar` 召回与体检参数、作息窗与通知配置（Ring 1.5 补 `digest`/主备降级链/思考档位/双上下文上限/`bash`/MCP 与设备吊销） |
+| `GET /api/v1/settings` | **Ring 1** | 读取脱敏配置快照（模型槽位、召回与只读体检雷达 `recall`/`radar`、对外记忆 MCP `memoryMcp`、作息窗、通知与设备概览，严禁返回明文密钥或哈希） |
+| `PATCH /api/v1/settings` | **Ring 1** | 更新模型槽位/新 BYOK `apiKey`（落 `credentials.json`）、`recall`/`radar` 召回与体检参数、`memoryMcp` 开关与权限配置、作息窗与通知配置（Ring 1.5 补 `digest`/主备降级链/思考档位/双上下文上限/`bash`/MCP 与设备吊销） |
 | `GET /api/v1/activities` | Ring 1.5 | 列出已加载的 `ActivityPlugin` 当前状态 + `REGISTRY.yaml` 空间概览 |
 | `GET /api/v1/stickers` / `POST /api/v1/stickers` | Ring 1.5 | 动态管理/上传互发表情贴纸包（Ring 1 读静态 `stickers/` 目录） |
 | `POST /api/v1/devices/push-token` | Ring 1.5 | 注册或更新单设备离线推送令牌（Ring 1 用全局 `desktop` + `webhook`） |
@@ -105,6 +105,27 @@
 - `POST /api/v1/activities/cinema/start` — 开启观影会话（片名/来源/集数），激活 `activityHint: "cinema"`
 - `POST /api/v1/activities/cinema/frame` — 上报当前进度、可选字幕、单帧或 **2×2 四宫格分镜图**（存 `media/` 返回 hash）及可选角色定妆小抄同步
 - `POST /api/v1/activities/cinema/end` — 结束观影，自动触发 `activities/cinema/` 独立整理任务
+
+---
+
+## 3.5 对外记忆 MCP 服务（Streamable HTTP · 可开关出差模式）
+
+用于向外部第三方客户端（如 Cursor、Claude Code 等）按需暴露记忆检索与受控读写能力。默认关闭且支持零重启热切换：
+
+- **传输端点**：`POST /mcp`（JSON-RPC 2.0，Streamable HTTP，`initialize` 签发 `mcp-session-id`；`notifications/*` 返回 `202`）、`DELETE /mcp`（关闭会话返 `204`）、`GET /mcp`（返回 `405`）。非 `initialize` 请求若携带 `mcp-session-id`，须命中当前令牌对应的活跃会话（已关闭、伪造或跨令牌返回 `404`）；未携带 `mcp-session-id` 时兼容无状态调用。
+- **本地 `stdio` 薄代理入口（`bun run mcp:stdio`）**：[server/scripts/mcp_stdio.ts](file:///Users/joy/workspace/Psyber/server/scripts/mcp_stdio.ts) 将标准输入输出 JSON-RPC 2.0 行流透明转发至本机 `/mcp`，不直连 SQLite 或 `memory/.git`；主服务关闭 `memoryMcp` 后立即失效。
+- **四道安全防线**：
+  1. `memoryMcp.enabled === false` 时统一返回 `404`；
+  2. `memoryMcp.allowRemote === false`（默认）仅放行本机回环 IP，非回环返回 `403`；
+  3. 携带 `Origin` 头时执行同源 / 白名单防跨站校验，非法返回 `403`；
+  4. 仅接受 `Authorization: Bearer <token>` 中的专属 MCP 令牌（`psbm_...`），不接受 Query 参数或设备配对 Token；无效返回 `401`。MCP 令牌亦不可访问 `/api/v1/*`。
+- **出差互斥保护**：当 `memoryMcp.enabled = true` 时，内部作息心跳与整理暂停，`POST /api/v1/chat/messages`、`POST /api/v1/chat/wrap-up`、`POST /api/v1/turns/:turnId/retry`、`POST /api/v1/chat/messages/:id/edit`、`POST /api/v1/chat/messages/:id/reroll` 统一返回 `409 MCP_ACTIVE`。
+- **令牌管理端点（需设备配对 Bearer Token）**：
+  - `POST /api/v1/memory-mcp/tokens` — 签发新外部客户端令牌（`{ name, accessMode? }`，响应一次性返回明文 `token` 与脱敏 `tokenInfo`）
+  - `DELETE /api/v1/memory-mcp/tokens/:id` — 立即吊销指定 MCP 令牌
+- **暴露工具**：
+  - 只读（`read_only` / `read_write`）：`memory_context`、`memory_search`（向量/FTS5 + 1 跳双链邻居，零额外 LLM 成本）、`memory_glob`、`memory_grep`、`memory_read`（`countAccess: false`）、`memory_history`；
+  - 写入（仅 `read_write` 且令牌未降权时在 `tools/list` 暴露）：`memory_write`、`memory_edit`（受 `protectCoreFiles` 与 `MemoryTools` 沙箱保护，写后自动提交带来源标记的 Git Commit）。
 
 ---
 

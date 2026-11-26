@@ -5,6 +5,7 @@ import {
   DEFAULT_CIRCADIAN_CONFIG,
   DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_RECALL_CONFIG,
+  mergeMemoryMcpConfig,
   mergeRadarConfig,
   mergeRecallConfig,
   saveConfig,
@@ -12,6 +13,8 @@ import {
   type CircadianConfig,
   type LlmConfig,
   type McpServerConfig,
+  type MemoryMcpAccessMode,
+  type MemoryMcpConfig,
   type ModelMetadataOverride,
   type NotificationsConfig,
   type PsyberConfig,
@@ -44,7 +47,7 @@ import {
 } from "../memory/genesis.ts";
 import type { AppDeps } from "./app.ts";
 import { hashBearerToken } from "./app.ts";
-import { buildPairQrPayload, normalizeClientIp } from "./pairing.ts";
+import { buildPairQrPayload, issueMemoryMcpToken, normalizeClientIp } from "./pairing.ts";
 
 const HH_MM_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
 
@@ -109,7 +112,24 @@ function sanitizeSettings(
 
   const catalogStatus = deps.modelCatalog?.getStatus();
   const effectiveLevel = resolveEffectiveThinkingLevel(cfg);
-  return {
+    const rawMemoryMcp = mergeMemoryMcpConfig(cfg.memoryMcp);
+    const memoryMcp = {
+      enabled: rawMemoryMcp.enabled,
+      accessMode: rawMemoryMcp.accessMode,
+      allowRemote: rawMemoryMcp.allowRemote,
+      protectCoreFiles: rawMemoryMcp.protectCoreFiles,
+      maxOutputChars: rawMemoryMcp.maxOutputChars,
+      disabledTools: rawMemoryMcp.disabledTools,
+      tokens: rawMemoryMcp.tokens.map((t) => ({
+        id: t.id,
+        name: t.name,
+        ...(t.accessMode ? { accessMode: t.accessMode } : {}),
+        createdAt: t.createdAt,
+        ...(t.lastUsedAt !== undefined ? { lastUsedAt: t.lastUsedAt } : {}),
+      })),
+    };
+
+    return {
     timezone: cfg.timezone,
     llm: {
       providers,
@@ -156,6 +176,7 @@ function sanitizeSettings(
       ...(deps.dataDir ? { workspaceDir: path.join(deps.dataDir, "workspace") } : {}),
     },
     mcpServers,
+    memoryMcp,
     tools: deps.toolRegistry?.listAllTools() ?? [],
     disabledTools: cfg.disabledTools ?? [],
     system: {
@@ -182,6 +203,37 @@ function sanitizeSettings(
       lastSeenAt: d.lastSeenAt,
     })),
   };
+}
+
+function validateMemoryMcpPatch(patch: Partial<MemoryMcpConfig>): string | null {
+  if (patch.enabled !== undefined && typeof patch.enabled !== "boolean") {
+    return "memoryMcp.enabled 须为布尔值";
+  }
+  if (
+    patch.accessMode !== undefined &&
+    patch.accessMode !== "read_only" &&
+    patch.accessMode !== "read_write"
+  ) {
+    return "memoryMcp.accessMode 须为 read_only 或 read_write";
+  }
+  if (patch.allowRemote !== undefined && typeof patch.allowRemote !== "boolean") {
+    return "memoryMcp.allowRemote 须为布尔值";
+  }
+  if (patch.protectCoreFiles !== undefined && typeof patch.protectCoreFiles !== "boolean") {
+    return "memoryMcp.protectCoreFiles 须为布尔值";
+  }
+  if (patch.maxOutputChars !== undefined && !isNumInRange(patch.maxOutputChars, 1_000, 50_000)) {
+    return "memoryMcp.maxOutputChars 须在 1000..50000 之间";
+  }
+  if (patch.disabledTools !== undefined) {
+    if (!Array.isArray(patch.disabledTools) || patch.disabledTools.some((t) => typeof t !== "string")) {
+      return "memoryMcp.disabledTools 须为字符串数组";
+    }
+  }
+  if ((patch as Record<string, unknown>).tokens !== undefined) {
+    return "memoryMcp.tokens 不可通过 /settings 直接覆盖，请使用 /api/v1/memory-mcp/tokens 管理令牌";
+  }
+  return null;
 }
 
 function validateCircadianPatch(patch: Partial<CircadianConfig>): string | null {
@@ -767,6 +819,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       bash?: Partial<BashToolConfig>;
       mcpServers?: McpServerConfig[];
       mcpSecrets?: Record<string, string>;
+      memoryMcp?: Partial<MemoryMcpConfig>;
       disabledTools?: string[];
       revokeDeviceIds?: string[];
       recallEvalNoticeResident?: boolean;
@@ -824,8 +877,16 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       }
       validatedMcpServers = checked.servers;
     }
+    if (body.memoryMcp !== undefined) {
+      if (!body.memoryMcp || typeof body.memoryMcp !== "object" || Array.isArray(body.memoryMcp)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "memoryMcp 配置必须为对象" } }, 400);
+      }
+      const err = validateMemoryMcpPatch(body.memoryMcp);
+      if (err) return c.json({ error: { code: "INVALID_SETTINGS", message: err } }, 400);
+    }
 
     const cfg = deps.getConfig();
+    const prevMemoryMcpEnabled = Boolean(cfg.memoryMcp?.enabled);
     if (typeof body.timezone === "string" && body.timezone.trim()) {
       cfg.timezone = body.timezone.trim();
     }
@@ -941,6 +1002,10 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (validatedMcpServers !== null) {
       cfg.mcpServers = validatedMcpServers;
     }
+    if (body.memoryMcp && typeof body.memoryMcp === "object" && !Array.isArray(body.memoryMcp)) {
+      const { tokens: _ignoredTokens, ...patchWithoutTokens } = body.memoryMcp;
+      cfg.memoryMcp = mergeMemoryMcpConfig(cfg.memoryMcp, patchWithoutTokens);
+    }
     if (Array.isArray(body.disabledTools)) {
       const sanitizedDisabled = body.disabledTools
         .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
@@ -1031,6 +1096,11 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
 
     if (validatedMcpServers !== null && deps.mcp) {
       await deps.mcp.reload(validatedMcpServers);
+    }
+
+    const nextMemoryMcpEnabled = Boolean(cfg.memoryMcp?.enabled);
+    if (prevMemoryMcpEnabled !== nextMemoryMcpEnabled) {
+      await deps.onMemoryMcpTransition?.(prevMemoryMcpEnabled, nextMemoryMcpEnabled);
     }
 
     deps.onSettingsUpdated?.();
@@ -1233,5 +1303,74 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       hash: saved.hash,
       url: saved.url,
     });
+  });
+
+  // 对外记忆 MCP 专属访问令牌签发与吊销（明文仅创建时返回一次，落盘仅存 SHA-256 哈希）
+  app.post("/api/v1/memory-mcp/tokens", async (c) => {
+    let body: { name?: unknown; accessMode?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+    }
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name || name.length > 48) {
+      return c.json(
+        { error: { code: "INVALID_REQUEST", message: "令牌名称 name 须为 1..48 字符" } },
+        400,
+      );
+    }
+    let accessMode: MemoryMcpAccessMode | undefined;
+    if (body.accessMode !== undefined) {
+      if (body.accessMode !== "read_only" && body.accessMode !== "read_write") {
+        return c.json(
+          { error: { code: "INVALID_REQUEST", message: "accessMode 须为 read_only 或 read_write" } },
+          400,
+        );
+      }
+      accessMode = body.accessMode;
+    }
+
+    const createdAt = deps.clock.now();
+    const { rawToken, entry: tokenEntry } = issueMemoryMcpToken(name, createdAt, accessMode);
+
+    const cfg = deps.getConfig();
+    const current = mergeMemoryMcpConfig(cfg.memoryMcp);
+    cfg.memoryMcp = mergeMemoryMcpConfig(current, {
+      tokens: [...current.tokens, tokenEntry],
+    });
+    if (deps.dataDir) {
+      await saveConfig(deps.dataDir, cfg);
+    }
+
+    return c.json(
+      {
+        ok: true,
+        token: rawToken,
+        tokenInfo: {
+          id: tokenEntry.id,
+          name: tokenEntry.name,
+          ...(tokenEntry.accessMode ? { accessMode: tokenEntry.accessMode } : {}),
+          createdAt: tokenEntry.createdAt,
+        },
+        endpoint: "/mcp",
+      },
+      201,
+    );
+  });
+
+  app.delete("/api/v1/memory-mcp/tokens/:id", async (c) => {
+    const id = c.req.param("id").trim();
+    const cfg = deps.getConfig();
+    const current = mergeMemoryMcpConfig(cfg.memoryMcp);
+    const nextTokens = current.tokens.filter((t) => t.id !== id);
+    if (nextTokens.length === current.tokens.length) {
+      return c.json({ error: { code: "NOT_FOUND", message: `未找到记忆 MCP 令牌: ${id}` } }, 404);
+    }
+    cfg.memoryMcp = mergeMemoryMcpConfig(current, { tokens: nextTokens });
+    if (deps.dataDir) {
+      await saveConfig(deps.dataDir, cfg);
+    }
+    return c.json({ ok: true, revokedId: id });
   });
 }

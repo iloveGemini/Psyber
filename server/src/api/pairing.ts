@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Clock } from "../core/clock.ts";
+import type { MemoryMcpAccessMode, MemoryMcpToken } from "../core/config.ts";
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CODE_TTL_MS = 5 * 60_000;
@@ -28,7 +29,7 @@ function generateCode(): string {
 }
 
 /** 常量时间字符串比对，避免长度与字节级时序侧信道泄露 */
-function timingSafeEqualString(a: string, b: string): boolean {
+export function timingSafeEqualString(a: string, b: string): boolean {
   const bufA = Buffer.from(a, "utf-8");
   const bufB = Buffer.from(b, "utf-8");
   if (bufA.length !== bufB.length) {
@@ -37,6 +38,31 @@ function timingSafeEqualString(a: string, b: string): boolean {
     return false;
   }
   return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/** 对 Bearer Token 做 SHA-256 哈希，确保 config.json 绝不存明文令牌 */
+export function hashBearerToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+/** 签发对外记忆 MCP 专属访问令牌（返回一次性明文与仅含 SHA-256 哈希的持久化记录） */
+export function issueMemoryMcpToken(
+  name: string,
+  nowMs: number,
+  accessMode?: MemoryMcpAccessMode,
+): { rawToken: string; entry: MemoryMcpToken } {
+  const rawToken = `psbm_${crypto.randomBytes(32).toString("hex")}`;
+  const id = `mcp_${crypto.randomUUID().slice(0, 12)}`;
+  return {
+    rawToken,
+    entry: {
+      id,
+      name,
+      tokenHash: hashBearerToken(rawToken),
+      ...(accessMode ? { accessMode } : {}),
+      createdAt: nowMs,
+    },
+  };
 }
 
 /** 归一化客户端 IP（剥离 IPv6-mapped IPv4 前缀 ::ffff:） */
