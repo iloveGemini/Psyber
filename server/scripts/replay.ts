@@ -798,17 +798,53 @@ function countMemoryCards(dataDir: string): number {
   }
 }
 
-function getPendingTidyStats(db: Database, cursorId: string): { count: number; chars: number } {
-  const row = db
-    .query(
-      `SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(content)), 0) AS chars
-       FROM events
-       WHERE status IN ('active', 'retracted')
-         AND role IN ('user', 'assistant')
-         AND kind IN ('chat', 'wake', 'door_note')
-         AND id > ?`,
-    )
-    .get(cursorId) as { cnt: number; chars: number } | null;
+function resolveLogicalDayMaxSeq(
+  db: Database,
+  fonds: string,
+  dayRows: NormalizedMessage[],
+): number | null {
+  const lastRow = dayRows[dayRows.length - 1];
+  if (!lastRow) return null;
+  const exact = db
+    .query("SELECT seq FROM events WHERE client_message_id = ?")
+    .get(`import:${fonds}:${lastRow.id}`) as { seq: number } | null;
+  if (exact && Number.isFinite(exact.seq)) return exact.seq;
+  // 兜底按该逻辑作息日末条消息时间戳（而非自然日 23:59:59）截断
+  const byAt = db
+    .query("SELECT MAX(seq) AS max_seq FROM events WHERE created_at <= ?")
+    .get(lastRow.at) as { max_seq: number | null } | null;
+  return typeof byAt?.max_seq === "number" && Number.isFinite(byAt.max_seq) ? byAt.max_seq : null;
+}
+
+function getPendingTidyStats(
+  db: Database,
+  cursorId: string,
+  maxSeq?: number | null,
+): { count: number; chars: number } {
+  const row = (
+    typeof maxSeq === "number" && Number.isFinite(maxSeq)
+      ? db
+          .query(
+            `SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(content)), 0) AS chars
+             FROM events
+             WHERE status IN ('active', 'retracted')
+               AND role IN ('user', 'assistant')
+               AND kind IN ('chat', 'wake', 'door_note')
+               AND id > ?
+               AND seq <= ?`,
+          )
+          .get(cursorId, maxSeq)
+      : db
+          .query(
+            `SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(content)), 0) AS chars
+             FROM events
+             WHERE status IN ('active', 'retracted')
+               AND role IN ('user', 'assistant')
+               AND kind IN ('chat', 'wake', 'door_note')
+               AND id > ?`,
+          )
+          .get(cursorId)
+  ) as { cnt: number; chars: number } | null;
   return { count: row?.cnt ?? 0, chars: row?.chars ?? 0 };
 }
 
@@ -993,7 +1029,8 @@ async function main(): Promise<void> {
     if (opts.importOnly) continue;
 
     if (!tidiedSet.has(day)) {
-      const pendingStats = getPendingTidyStats(db, events.getCursor("daily_wrapup") ?? "");
+      const dayMaxSeq = resolveLogicalDayMaxSeq(db, opts.fonds || "jsonl-import", dayRows);
+      const pendingStats = getPendingTidyStats(db, events.getCursor("daily_wrapup") ?? "", dayMaxSeq);
       const alreadyHasEpisodes = await hasEpisodeCardsForDay(opts.dataDir, day);
       // 仅对尚未开始消化的真正低量日攒批顺延；若游标已排空（count===0）或当天已落盘 ep-*.md，说明仅缺 bedtime 收尾，绝不跳过
       if (
@@ -1049,7 +1086,7 @@ async function main(): Promise<void> {
           embedding,
           getConfig: () => config,
         },
-        { taskType: "bedtime", nightDate: day },
+        { taskType: "bedtime", nightDate: day, maxSeq: dayMaxSeq },
       );
       const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
 
