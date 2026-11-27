@@ -11,6 +11,7 @@
     "replay": "bun run scripts/replay.ts",
     "eval:recall-replay": "bun run scripts/eval_recall_replay.ts",
     "radar:dryrun": "bun run scripts/dryrun_radar.ts",
+    "audit:secrets": "bun run scripts/audit_secrets.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

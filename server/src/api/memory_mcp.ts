@@ -22,6 +22,7 @@ import {
 } from "../core/git.ts";
 import type { AsyncMutex } from "../core/mutex.ts";
 import { stripFrontmatter } from "../core/prompts.ts";
+import { redactSecrets } from "../core/redact.ts";
 import type { McpReplayRunner } from "../engine/replay_runner.ts";
 import { cosineSimilarity, ensureCardEmbeddings } from "../memory/embeddings.ts";
 import { effectiveStatus, filterActiveStateMarkdown } from "../memory/frontmatter.ts";
@@ -557,7 +558,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
             : `提交 ${commitCheck.commit} 无文本差异。`,
         };
       }
-      return { ok: true, output: truncateMcpText(res.stdout, maxChars) };
+      return { ok: true, output: truncateMcpText(redactSecrets(res.stdout).text, maxChars) };
     }
 
     const sinceCheck = validateSinceFilter(args.since);
@@ -577,7 +578,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
           : "记忆仓目前还没有任何历史提交记录。",
       };
     }
-    return { ok: true, output: truncateMcpText(res.stdout, maxChars) };
+    return { ok: true, output: truncateMcpText(redactSecrets(res.stdout).text, maxChars) };
   };
 
   const runWriteOrEdit = async (

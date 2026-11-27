@@ -12,6 +12,10 @@
 
 - **`<dataDir>/config.json`**（不含明文密钥与 OAuth Token，可安全排障/导出）：存放模型槽位映射、Provider 端点、超时与降级策略。
 - **`<dataDir>/credentials.json`**（文件权限强制 `0600`，严禁写入 Git、日志或 SSE）：存放 BYOK API Key 与 `pi-ai` OAuth `access_token` / `refresh_token` / `expires_at`。
+- **对话与工具全链路源头凭证脱敏（`server/src/core/redact.ts`）**：
+  - 用户发送/编辑消息当轮在内存中向主对话模型传原文，但落盘 `events`、生成召回查询（避免写入 `recall_traces` 或外发给 Embedding/Decision/Reranker）、以及发起 `digest` 附件摘要前统一脱敏为 `[已隐藏:<类别>]`；若多步工具中途失败构造 `TurnCheckpoint` 断点快照，构造前同步清洗快照中的全部消息与思考，绝不把明文带入重试；
+  - 助手回复正文、`thinking`、`metadata`（含 `toolCalls`/`journalSteps`/`shares`/`attachmentDigest`）、导入回放与整理话单在入库/喂稿前统一脱敏；实时 SSE 流式分片（`turn.text`/`turn.thinking`）面向当前发消息的用户屏幕不做跨分片滑动窗口脱敏以保零首字延迟，但若当轮涉及脱敏，落盘/出错结束时自动从 `SseHub` 500 帧断线重放缓冲清除该轮流式分片（重连端直接消费已脱敏的 `message.created`）；
+  - `ToolRegistry.invoke()` 对非 Tier 1 记忆读取类工具（`bash`、`fs_*`、`web_fetch`、外部 `mcp.*`、`memory_history` 等）的 `output` 以及对外 `/mcp` 的 `memory_history` 输出在返回前即时脱敏。
 
 ```ts
 export interface LlmConfig {
@@ -411,8 +415,8 @@ export interface RegisteredTool {
 
 | 文件 | 版本 | 内容 | 载入位置 |
 | :--- | :--- | :--- | :--- |
-| `prompts/main.md` | v7 | 主对话 Static System Prompt | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
-| `prompts/tidy.md` | v11 | 静默整理轮（含目录分工、路径/Frontmatter 规范、`<memory_radar>` 线索核实与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/main.md` | v9 | 主对话 Static System Prompt（含不记明文凭证规则） | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
+| `prompts/tidy.md` | v12 | 静默整理轮（含目录分工、路径/Frontmatter 规范、不记明文凭证护栏、`<memory_radar>` 线索核实与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
 | `prompts/reflect.md` | v3 | 每日睡前合流反思与周日独立反思（含 `<memory_radar>` 线索核实与 `rf-*.md`/四区沉淀） | memory_task 反思轮（或合流进 `bedtime` Step 2） |
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（Ring 1.5 可选非阻塞） | memory_task 复核轮（无历史只读，Ring 1 不调用） |
 | `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |

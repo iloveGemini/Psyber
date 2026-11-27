@@ -13,6 +13,7 @@
 
 - **零双写漂移**：系统绝不在 SQLite 维护另一份需要强双向同步的记忆正文；只要 `memory/` 下文件被 `write`/`edit`（或用户在磁盘外部修改），按文件 `mtime/hash` 增量刷新 `card_index`、`card_fts` 与 `card_embeddings`。
 - **多模态与大产物分离**：观影抽帧、互发表情、轻量生图/生视频的二进制资产全部落盘在 `<dataDir>/media/`（SHA-256 寻址）并记在 `events.metadata` 中；Markdown 记忆卡片仅写第一人称文字感受与 `[照片](media/<hash>)` 引用。
+- **源头凭证脱敏与记忆写盘防线（`core/redact.ts`）**：高置信度结构化凭证（厂商前缀 API Key / Token、PEM 私钥块、带账密 URL、JWT、Bearer/Basic 认证头、高熵密钥配置键值）在进入持久化存储前统一拦截处理——① 用户发送/编辑的消息当轮在内存中保留明文给主对话模型（便于即时排障），但写入 `events`、进入召回检索查询（`recall_traces` / 外部向量与决策接口）与附件摘要前立即脱敏；② AI 回复与思考落盘、附件摘要（`digest`）、导入/回放（`replay`）、静默整理喂稿及所有外部读取工具（`bash`、`fs_*`、`web_fetch`、外部 `mcp.*`、`memory_history`）返回结果一律立即替换为可读占位符 `[已隐藏:<类别>]`；③ `memory/` 的 `write`/`edit` 落盘前硬拦截疑似明文凭证并返回可读原因，由 Psyber 以第一人称改写为不含明文的事实描述后再保存（绝不静默篡改其正文）。
 
 ## 2. 目录结构、链接引用与 `REGISTRY.yaml`
 

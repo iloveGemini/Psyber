@@ -8,6 +8,7 @@ import { commitMemoryPaths } from "../core/git.ts";
 import type { MediaStore } from "../core/media.ts";
 import { AsyncMutex } from "../core/mutex.ts";
 import { readPrompt } from "../core/prompts.ts";
+import { redactSecrets, redactUnknownJson } from "../core/redact.ts";
 import { ulid } from "../core/ulid.ts";
 import type {
   ChatImageContent,
@@ -987,8 +988,8 @@ export class DirectEngine {
       ctxBlocks.push(`<prefix_delta>\n${deltas.join("\n\n")}\n</prefix_delta>`);
     }
 
-    // Ring 1 极简 3 步召回注入（chat 模式且非空文本输入）
-    const recallQuery = opts.userText.trim();
+    // Ring 1 极简 3 步召回注入（chat 模式且非空文本输入；查询先脱敏，绝不把明文凭证写入 recall_traces 或发往外部向量/决策接口）
+    const recallQuery = redactSecrets(opts.userText).text.trim();
     let recallCount = 0;
     if (opts.mode === "chat" && recallQuery.length > 0) {
       if (this.deps.db) {
@@ -1297,13 +1298,13 @@ export class DirectEngine {
   }): Promise<RunTurnResult> {
     const turnId = opts.turnId ?? ulid(this.deps.clock.now());
 
-    // 若携带图片或短视频抽帧，立即与主模型并行起跑轻量 digest 摘要（绝不阻塞当轮首字）
+    // 若携带图片或短视频抽帧，立即与主模型并行起跑轻量 digest 摘要（绝不阻塞当轮首字；附言先脱敏再发往摘要模型）
     if (opts.userEventId && ((opts.attachments && opts.attachments.length > 0) || opts.videoClip)) {
       void this.scheduleAttachmentDigest({
         eventId: opts.userEventId,
         attachments: opts.attachments,
         videoClip: opts.videoClip,
-        userText: opts.userText,
+        userText: opts.userText ? redactSecrets(opts.userText).text : undefined,
       });
     }
 
@@ -1516,6 +1517,39 @@ export class DirectEngine {
     } | undefined;
     let lastError: { code: LlmErrorCode; message: string; retryable: boolean } | undefined;
 
+    const sanitizeCheckpointMessage = (msg: ChatMessage): ChatMessage => {
+      if (msg.role === "user") {
+        if (typeof msg.content === "string") {
+          return { ...msg, content: redactSecrets(msg.content).text };
+        }
+        return {
+          ...msg,
+          content: msg.content.map((part) =>
+            part.type === "text" ? { ...part, text: redactSecrets(part.text).text } : part,
+          ),
+        };
+      }
+      if (msg.role === "assistant") {
+        return {
+          ...msg,
+          content: redactSecrets(msg.content).text,
+          ...(msg.thinking ? { thinking: redactSecrets(msg.thinking).text } : {}),
+          ...(msg.toolCalls
+            ? {
+                toolCalls: msg.toolCalls.map((tc) => ({
+                  ...tc,
+                  arguments: redactUnknownJson(tc.arguments).value,
+                })),
+              }
+            : {}),
+        };
+      }
+      return {
+        ...msg,
+        content: redactSecrets(msg.content).text,
+      };
+    };
+
     const buildCheckpoint = (): TurnCheckpoint | undefined => {
       if (completedToolSteps <= 0 || overflowCheckpointDisabled) return undefined;
       return {
@@ -1524,19 +1558,27 @@ export class DirectEngine {
         mode: opts.mode,
         userEventId: opts.userEventId,
         systemPrompt,
-        messages: [...messages],
-        fullText: committedText,
-        fullThinking: committedThinking,
-        recordedToolCalls: [...recordedToolCalls],
+        messages: messages.map(sanitizeCheckpointMessage),
+        fullText: redactSecrets(committedText).text,
+        fullThinking: redactSecrets(committedThinking).text,
+        recordedToolCalls: recordedToolCalls.map((tc) => ({
+          ...tc,
+          arguments: redactUnknownJson(tc.arguments).value,
+          output: redactSecrets(tc.output).text,
+        })),
         toolSummary: [...toolSummary],
         toolProgress: [...toolProgress],
         journalSteps: journalSteps.map((s) => ({
           step: s.step,
-          ...(s.thinking ? { thinking: s.thinking } : {}),
+          ...(s.thinking ? { thinking: redactSecrets(s.thinking).text } : {}),
           tools: [...s.tools],
         })),
         expressions: [...toolCtx.expressions],
-        shares: [...(toolCtx.shares ?? [])],
+        shares: (toolCtx.shares ?? []).map((sh) => ({
+          ...sh,
+          title: redactSecrets(sh.title).text,
+          content: redactSecrets(sh.content).text,
+        })),
         touchedMemoryPaths: Array.from(toolCtx.touchedMemoryPaths),
         injectedDoorNoteMaxId,
         injectedNoticeMaxId,

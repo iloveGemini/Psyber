@@ -241,6 +241,8 @@ export function createApp(deps: AppDeps): Hono {
   const dispatchChatTurn = (opts: {
     turnId: string;
     userEvent: StoredEvent;
+    /** 仅当轮内存中向主模型传递用户原文（数据库与后续历史已脱敏，绝不落盘或保留至重试） */
+    liveUserText?: string;
     stickerId?: string;
     attachments?: string[];
     videoClip?: { durationSec: number; frameHashes: string[] };
@@ -258,10 +260,12 @@ export function createApp(deps: AppDeps): Hono {
     const activeTurnId = opts.turnId;
     activeAborts.set(activeTurnId, ac);
     let persistedInTurn = false;
+    const turnHadSecretInput =
+      opts.liveUserText !== undefined && opts.liveUserText !== opts.userEvent.content;
     void deps.engine
       .runTurn({
         mode: "chat",
-        userText: opts.userEvent.content,
+        userText: opts.liveUserText ?? opts.userEvent.content,
         userEventId: opts.userEvent.id,
         stickerId: opts.stickerId,
         attachments: opts.attachments,
@@ -301,6 +305,13 @@ export function createApp(deps: AppDeps): Hono {
             }),
           onAssistantPersisted: (ev) => {
             persistedInTurn = true;
+            if (
+              turnHadSecretInput ||
+              ev.content.includes("[已隐藏:") ||
+              Boolean(ev.thinking && ev.thinking.includes("[已隐藏:"))
+            ) {
+              deps.sse?.purgeTurnStreamFrames(activeTurnId);
+            }
             const item = toTimelineItem(ev, deps.events);
             if (opts.groupId) {
               deps.sse?.emit("message.updated", {
@@ -402,7 +413,12 @@ export function createApp(deps: AppDeps): Hono {
             retryOrigins.delete(activeTurnId);
             deps.sse?.emit("turn.done", info);
           },
-          onTurnError: (err) => deps.sse?.emit("turn.error", err),
+          onTurnError: (err) => {
+            if (turnHadSecretInput) {
+              deps.sse?.purgeTurnStreamFrames(activeTurnId);
+            }
+            deps.sse?.emit("turn.error", err);
+          },
         },
       })
       .then((result) => {
@@ -673,7 +689,7 @@ export function createApp(deps: AppDeps): Hono {
           eventId: event.id,
           attachments: hasAttachments ? attachments : undefined,
           videoClip,
-          userText: content,
+          userText: event.content,
         });
       }
       if (!deliverAsDoorNote && deps.engine && event.turnId) {
@@ -685,6 +701,7 @@ export function createApp(deps: AppDeps): Hono {
         dispatchChatTurn({
           turnId: event.turnId,
           userEvent: event,
+          liveUserText: content,
           stickerId: hasSticker ? stickerId : undefined,
           attachments: hasAttachments ? attachments : undefined,
           videoClip,
@@ -998,6 +1015,7 @@ export function createApp(deps: AppDeps): Hono {
       dispatchChatTurn({
         turnId: res.event.turnId,
         userEvent: res.event,
+        liveUserText: content,
         stickerId,
         attachments: attachments && attachments.length > 0 ? attachments : undefined,
         voiceClip,

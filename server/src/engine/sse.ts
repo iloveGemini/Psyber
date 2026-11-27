@@ -57,6 +57,8 @@ export class SseHub {
   private readonly subscriptions = new Set<SubscriptionMeta>();
   private readonly replayBuffer: Array<SseFrame & { id: number }> = [];
   private nextSeq = 0;
+  /** 因超过 MAX_SSE_REPLAY_FRAMES 真实淘汰的最大帧 id（与按轮清除敏感流式分片解耦，避免误报 buffer_overflow） */
+  private evictedUntilSeq = 0;
 
   subscribe(
     listener: Listener,
@@ -122,7 +124,10 @@ export class SseHub {
       const buffered: SseFrame & { id: number } = { id, event, data };
       this.replayBuffer.push(buffered);
       if (this.replayBuffer.length > MAX_SSE_REPLAY_FRAMES) {
-        this.replayBuffer.shift();
+        const dropped = this.replayBuffer.shift();
+        if (dropped) {
+          this.evictedUntilSeq = Math.max(this.evictedUntilSeq, dropped.id);
+        }
       }
       frame = buffered;
     }
@@ -134,6 +139,25 @@ export class SseHub {
         // 单个客户端断连不影响其他订阅者
       }
     }
+  }
+
+  /**
+   * 仅当某轮对话涉及凭证脱敏时调用：从 500 帧内存重放缓冲清除该轮的流式分片（turn.text / turn.thinking），
+   * 避免复读明文滞留在断线续传缓冲中（重连端直接消费已脱敏的 message.created）。
+   */
+  purgeTurnStreamFrames(turnId: string): number {
+    let removed = 0;
+    for (let i = this.replayBuffer.length - 1; i >= 0; i--) {
+      const f = this.replayBuffer[i]!;
+      if (
+        (f.event === "turn.text" || f.event === "turn.thinking") &&
+        f.data.turnId === turnId
+      ) {
+        this.replayBuffer.splice(i, 1);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   get latestStreamSeq(): number {
@@ -153,12 +177,11 @@ export class SseHub {
     if (lastEventId === this.nextSeq) {
       return { resetReason: null, latestStreamSeq: this.nextSeq, frames: [] };
     }
-    if (this.replayBuffer.length === 0) {
+    if (this.evictedUntilSeq > 0 && lastEventId < this.evictedUntilSeq) {
       return { resetReason: "buffer_overflow", latestStreamSeq: this.nextSeq, frames: [] };
     }
-    const oldestId = this.replayBuffer[0]!.id;
-    if (lastEventId < oldestId - 1) {
-      return { resetReason: "buffer_overflow", latestStreamSeq: this.nextSeq, frames: [] };
+    if (this.replayBuffer.length === 0) {
+      return { resetReason: null, latestStreamSeq: this.nextSeq, frames: [] };
     }
     return {
       resetReason: null,

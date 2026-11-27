@@ -7,6 +7,7 @@ import { mergeRadarConfig, type PsyberConfig } from "../core/config.ts";
 import type { EmbeddingClient } from "../core/embedding.ts";
 import { commitMemoryPaths, getMemoryHeadCommit } from "../core/git.ts";
 import { readPrompt, stripFrontmatter } from "../core/prompts.ts";
+import { redactSecrets } from "../core/redact.ts";
 import type {
   ChatMessage,
   ChatModelClient,
@@ -206,7 +207,7 @@ export function formatTidyAttachmentSuffix(
         : null;
     const digest =
       typeof parsed.attachmentDigest === "string" && parsed.attachmentDigest.trim().length > 0
-        ? parsed.attachmentDigest.trim()
+        ? redactSecrets(parsed.attachmentDigest.trim()).text
         : null;
     if (attachments.length === 0 && videoDuration === null && !digest) return "";
     const hashHint =
@@ -310,16 +311,17 @@ export function formatTidyTranscriptLine(
 ): string {
   const stamp = `[${localDateTime(e.created_at, timeZone)}]`;
   const attSuffix = formatTidyAttachmentSuffix(e.metadata, opts);
+  const safeContent = redactSecrets(e.content).text;
   if (e.status === "retracted") {
     if (e.role === "user") {
       return `${stamp} ${userLabel}: （${userLabel}撤回了一条消息）`;
     }
-    return `${stamp} 我: ${e.content}${attSuffix}（已撤回，${userLabel}看不到内容）`;
+    return `${stamp} 我: ${safeContent}${attSuffix}（已撤回，${userLabel}看不到内容）`;
   }
   if (e.kind === "door_note") {
-    return `${stamp} [${userLabel}从门缝塞进来的纸条 · 当时门处于关闭状态] ${e.content}${attSuffix}`;
+    return `${stamp} [${userLabel}从门缝塞进来的纸条 · 当时门处于关闭状态] ${safeContent}${attSuffix}`;
   }
-  return `${stamp} ${e.role === "user" ? userLabel : "我"}: ${e.content}${attSuffix}`;
+  return `${stamp} ${e.role === "user" ? userLabel : "我"}: ${safeContent}${attSuffix}`;
 }
 
 function getBedtimeLastRunAt(db: Database, nowMs: number, timeZone: string): number {

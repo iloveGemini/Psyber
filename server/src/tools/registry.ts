@@ -1,4 +1,5 @@
 import type { DoorState } from "../core/config.ts";
+import { redactSecrets } from "../core/redact.ts";
 import type { ExpressionPayload } from "../expression/express.ts";
 import type { ToolResult } from "../memory/tools.ts";
 import type { StoredEvent } from "../store/events.ts";
@@ -255,7 +256,18 @@ export class ToolRegistry {
         };
       }
     }
-    return tool.execute(args, ctx);
+    const result = await tool.execute(args, ctx);
+    // 源头防漏（Spec 01 §1.1）：除 Tier 1 原生记忆工具外，所有外部/本机/MCP/历史工具输出在返回模型前一律脱敏
+    const skipOutputRedact =
+      tool.tier === 1 &&
+      (name === "read" || name === "grep" || name === "glob" || name === "write" || name === "edit");
+    if (!skipOutputRedact && result.output) {
+      const safe = redactSecrets(result.output);
+      if (safe.redacted) {
+        return { ...result, output: safe.text };
+      }
+    }
+    return result;
   }
 }
 

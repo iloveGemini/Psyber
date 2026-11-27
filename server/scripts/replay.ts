@@ -23,6 +23,7 @@ import {
   initMemoryGitRepo,
 } from "../src/core/git.ts";
 import { MediaStore } from "../src/core/media.ts";
+import { redactSecrets } from "../src/core/redact.ts";
 import { ulid } from "../src/core/ulid.ts";
 import { maybeRunReflectAfterBedtime } from "../src/engine/reflect.ts";
 import { runMemoryTidyTask } from "../src/engine/tidy.ts";
@@ -753,6 +754,7 @@ async function importSingleDay(opts: {
         metadata.attachments = attachments;
       }
 
+      const safeText = redactSecrets(row.text).text;
       const res = insertStmt.run(
         newId,
         nextSeq,
@@ -761,7 +763,7 @@ async function importSingleDay(opts: {
         clientMsgId,
         row.role,
         fonds,
-        row.text,
+        safeText,
         JSON.stringify(metadata),
         row.at,
       );

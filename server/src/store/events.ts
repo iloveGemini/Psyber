@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { localDay, type Clock } from "../core/clock.ts";
+import { redactSecrets, redactUnknownJson } from "../core/redact.ts";
 import { ulid } from "../core/ulid.ts";
 
 export type EventRole = "user" | "assistant" | "system" | "task";
@@ -132,6 +133,10 @@ export class EventStore {
         max_seq: number;
       };
       const nextSeq = maxRow.max_seq + 1;
+      // 源头落库脱敏（Spec 01 §1.1）：任何进入 events 的正文、思考与 metadata 均自动替换为占位符
+      const safeContent = redactSecrets(input.content).text;
+      const safeThinking = input.thinking ? redactSecrets(input.thinking).text : null;
+      const safeMetadata = input.metadata ? redactUnknownJson(input.metadata).value : null;
       this.db
         .query(
           `INSERT INTO events (
@@ -151,9 +156,9 @@ export class EventStore {
           input.role,
           input.kind,
           input.activity ?? null,
-          input.content,
-          input.thinking ?? null,
-          input.metadata ? JSON.stringify(input.metadata) : null,
+          safeContent,
+          safeThinking,
+          safeMetadata ? JSON.stringify(safeMetadata) : null,
           nowMs,
         );
       const inserted = this.db.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow;
@@ -601,7 +606,7 @@ export class EventStore {
       }
       meta.attachmentDigestStatus = state.status;
       if (typeof state.digest === "string" && state.digest.trim().length > 0) {
-        meta.attachmentDigest = state.digest.trim();
+        meta.attachmentDigest = redactSecrets(state.digest.trim()).text;
       } else if (state.digest === null) {
         delete meta.attachmentDigest;
       }
@@ -1077,6 +1082,7 @@ export class EventStore {
         .get() as { max_seq: number };
       const nextSeq = maxSeqRow.max_seq + 1;
 
+      const safeNewContent = redactSecrets(newContent).text;
       this.db
         .query(
           `INSERT INTO events (
@@ -1095,7 +1101,7 @@ export class EventStore {
           nextVersion,
           target.kind,
           target.activity,
-          newContent,
+          safeNewContent,
           target.metadata,
           nowMs,
         );

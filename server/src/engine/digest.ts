@@ -1,5 +1,6 @@
 import type { PsyberConfig } from "../core/config.ts";
 import type { MediaStore } from "../core/media.ts";
+import { redactSecrets } from "../core/redact.ts";
 import type { ChatImageContent, ChatModelClient } from "../llm/client.ts";
 import { withTimeoutSignal } from "../llm/router.ts";
 import type { EventStore, StoredEvent } from "../store/events.ts";
@@ -14,7 +15,8 @@ const DIGEST_SYSTEM_PROMPT = [
   "要求：",
   "1. 只陈述客观可见事实：主体/场景、人物或物品特征、清晰可读的关键文字/数字/界面信息、整体氛围；",
   "2. 不要角色扮演、不要寒暄、不要猜测看不清的细节、不要加 Markdown 标题或多余前缀；",
-  "3. 单张图片控制在 1–2 句（≤ 120 字）；多张图片或短视频关键帧按顺序简明串联，总长度不超过 300 字。",
+  "3. 单张图片控制在 1–2 句（≤ 120 字）；多张图片或短视频关键帧按顺序简明串联，总长度不超过 300 字；",
+  "4. 严禁抄录图片中的明文密码、API 密钥、Token、私钥、短信验证码、完整银行卡号或证件号，遇到此类信息仅客观说明其类别（如“显示了一段密钥配置”或“包含验证码界面”）。",
 ].join("\n");
 
 /** 仅当用户在配置中显式设置了 llm.slots.digest 时才自动触发附件摘要（不隐式回落主模型） */
@@ -107,7 +109,7 @@ export async function generateAttachmentDigest(
         text += chunk.delta;
       }
     }
-    const cleaned = text.replace(/\s+/g, " ").trim();
+    const cleaned = redactSecrets(text.replace(/\s+/g, " ").trim()).text;
     if (!cleaned) return null;
     return cleaned.length > MAX_DIGEST_CHARS
       ? `${cleaned.slice(0, MAX_DIGEST_CHARS - 1)}…`

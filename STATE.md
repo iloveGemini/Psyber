@@ -1,11 +1,15 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-26（落地对外可开关记忆 MCP 工具层第二阶段：单工具 `memory_replay` 复用 `replay.ts`/`tidy.ts`/`reflect.ts` 主链路、断点续跑与防回家重跑）。
+> 最后更新：2026-11-27（落地 P0 全链路源头隐私与凭证过滤：`core/redact.ts`、`events` 入库脱敏、工具输出与附件摘要脱敏、`memory/` 写盘硬拦截及只读体检脚本 `audit:secrets`）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、源头隐私凭证过滤（P0）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **P0 源头隐私与凭证过滤（`docs/` + `prompts/` + `server/`，2026-11-27）**：
+  - 契约与提示词：更新 [docs/MEMORY.md](docs/MEMORY.md)、[docs/spec/01-engine-tools-prompts.md](docs/spec/01-engine-tools-prompts.md) §1.1/§5 与 [docs/spec/02-memory-execution.md](docs/spec/02-memory-execution.md) §1.2；升级 `prompts/main.md`（v9）与 `prompts/tidy.md`（v12）补齐软凭证（密码/密钥/验证码/证件与银行卡号）禁记条款。
+  - 脱敏引擎与全链路护栏：新增 `server/src/core/redact.ts`（高置信度结构化凭证识别与幂等占位符 `[已隐藏:<类别>]`，支持带逗号/分号引号密码与通用 `*_token` 键名，规避普通聊天、哈希、分页/用量词与占位符误杀）；`store/events.ts` 在 `append`/`editLatestUserMessage`/`setAttachmentDigestState` 源头落库脱敏（覆盖正文、思考与嵌套 `metadata`）；`api/app.ts`、`engine/direct.ts` 与 `engine/sse.ts` 保留用户当轮内存明文给主对话模型但对 `recall_traces`/外部向量与决策查询/`digest` 附言、`TurnCheckpoint` 断点快照即时脱敏，并在命中脱敏的轮次结束时清除 `SseHub` 500 帧重放缓冲中的流式分片；`tools/registry.ts` 与 `api/memory_mcp.ts` 对非 Tier 1 记忆工具及对外 `memory_history` 输出即时脱敏；`memory/tools.ts` 在 `write`/`edit` 写盘前硬拦截疑似明文凭证（不静默篡改，保留第一人称改写权）；`engine/digest.ts`、`engine/tidy.ts` 与 `scripts/replay.ts` 补齐摘要禁抄、话单兜底与导入脱敏。
+  - 只读体检与回归测试：新增 `server/scripts/audit_secrets.ts`（`bun run audit:secrets`，只读扫描 `memory/` 与 `events`，支持单行+多行 PEM 同文件无漏报与 `metadata` JSON 递归审计，绝不回显明文）与 `server/tests/redact.test.ts`（9 组全离线用例）。
 - **对外记忆 MCP 工具层 · 第二阶段（`docs/` + `server/`，2026-11-26）**：
   - 契约与开关：更新 [docs/API.md](docs/API.md) §3.5 与 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；`core/config.ts` 新增 `memoryMcp.replayToolsEnabled`（默认 `false`），`admin_routes.ts` 补齐 `/settings` 校验与下发；仅 `enabled && read_write && replayToolsEnabled` 三重门控全开时暴露 `memory_replay`。
   - 共享主链路与搬家状态机：逻辑作息日分组 `groupByLogicalNight` 下沉至 `mood/circadian.ts` 与 `scripts/replay.ts` 共用；`engine/tidy.ts` 导出上下文拼装与 `formatTidyTranscriptLine`；新增 `engine/replay_runner.ts`（状态存于 `task_cursors['mcp_replay']`，支持 `start`/`next`/`status`/`abort`、低量日顺延、按 `turn_id` 拆批并豁免全局 `maxOutputChars` 截断、步骤内按历史虚拟时钟写盘暂存、带匹配 `step_id` 调 `next` 统一单次 Git 提交并同步 `daily_wrapup`/`bedtime`/`reflect_daily`/`reflect_weekly` 与 `replay_state.json`，无 `step_id` 重连原样续接防跳步）；`core/git.ts` 新增精准回滚 `rollbackMemoryTouchedPaths`（绝不误删未跟踪杂文件）。
@@ -67,10 +71,12 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
+- P1 记忆分级与缺口补齐：新增明文 Markdown 物理隔离区 `memory/sensitive/`（亲密/创伤/健康等，默认对 `memory_mcp`、外部向量与快脑雷达硬隔离，采用克制按需召回）；补齐 `core/dates.md`（周期纪念日/生日/忌日动态注入）与 `core/glossary.md`（专属暗语/内部梗）及 `threads/lists/` 清单规范。
+- 随内置 `browser`（Ring 2）一起落地安全凭证储存库（复用 `0600` `credentials.json`，域名强绑定 + 盲填工具，AI 读不到密码但能用）。
 - 按需拓展：Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI；如需全自动挂机批量搬家，可在 `memory_replay` 之上薄包一层 CLI 循环驱动脚本。
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
 
 ## 2. 验证结果
-- **`server/`（2026-11-26）**：`bun run typecheck` 零错误；`bun test`（28 文件 / 123 用例 / 1735 断言，含新增 `tests/replay_mcp.test.ts`）全部通过。
-- **`app/`（2026-11-26）**：仅微调设置页 `digest` 槽位说明文案；受沙盒限制 Flutter SDK 缓存写入，待宿主机终端复跑 `cd app && flutter analyze && flutter test`。
+- **`server/`（2026-11-27）**：`bun run typecheck` 零错误；`bun test`（29 文件 / 132 用例 / 1842 断言，含新增 `tests/redact.test.ts` 9 组用例）全部通过。
+- **`app/`（2026-11-26）**：本轮未改动 Flutter 客户端；宿主机终端可按需复跑 `cd app && flutter analyze && flutter test`。

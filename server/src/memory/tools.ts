@@ -4,6 +4,7 @@ import type { Clock } from "../core/clock.ts";
 import { vagueWhen } from "../core/clock.ts";
 import { atomicWriteFile } from "../core/config.ts";
 import { AsyncMutex } from "../core/mutex.ts";
+import { detectSecrets, formatMemorySecretBlockError } from "../core/redact.ts";
 import {
   VALID_CARD_STATUSES,
   effectiveStatus,
@@ -249,6 +250,11 @@ export class MemoryTools {
     content: string,
     clockOverride?: Clock,
   ): { error: string | null; note: string } {
+    const secretHits = detectSecrets(content);
+    if (secretHits.length > 0) {
+      return { error: formatMemorySecretBlockError(secretHits), note: "" };
+    }
+
     if (rel === "threads/REGISTRY.yaml" || rel === "entities/REGISTRY.yaml") {
       const check = validateRegistryYaml(rel, content);
       return { error: check.ok ? null : check.error, note: "" };
