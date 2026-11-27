@@ -185,7 +185,7 @@ const MCP_MEMORY_TOOL_DEFS: McpToolDefinition[] = [
     name: "memory_edit",
     readOnly: false,
     description:
-      "局部精确替换 memory/ 中既有卡片片段（补丁外内容严格不变，编辑后即时刷新索引并自动提交 Git 留痕）。",
+      "局部精确替换 memory/ 中既有卡片片段（参数 path / old_string / new_string；补丁外内容严格不变，编辑后即时刷新索引并自动提交 Git 留痕）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -219,8 +219,12 @@ const MCP_MEMORY_TOOL_DEFS: McpToolDefinition[] = [
           description: "action=next 时传入当前步 step_id 确认交卷；新窗口续接可不传",
         },
         summary: { type: "string", description: "action=next 时的 15 字以内中文摘要（用于 Git 提交说明）" },
-        max_chars: { type: "integer", description: "单批原始对话字符上限（4000..60000，默认 20000）" },
-        min_chars: { type: "integer", description: "低量日攒批顺延阈值（0..20000，默认 500）" },
+        max_chars: { type: "integer", description: "单批原始对话字符上限（4000..100000，默认 40000）" },
+        min_chars: { type: "integer", description: "低量日攒批顺延阈值（0..40000，默认 5000）" },
+        compact_rules: {
+          type: "boolean",
+          description: "同会话连续 next 时是否省略重复的 <tidy_rules>/<self>/<user>（默认 false；start 首步、reflect_weekly 周反思与新窗口续接会自动下发完整规则）",
+        },
         rollback: { type: "boolean", description: "action=abort 时是否安全回滚本步修改的卡片（默认 false）" },
         cancel_plan: { type: "boolean", description: "action=abort 时是否同时清除整个计划（默认 true）" },
       },
@@ -780,6 +784,12 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
         name: t.name,
         description: t.description,
         inputSchema: t.inputSchema,
+        annotations: {
+          readOnlyHint: t.readOnly,
+          destructiveHint: false,
+          ...(t.readOnly ? { idempotentHint: true } : {}),
+          openWorldHint: false,
+        },
       }));
       return { jsonrpc: "2.0", id: rpcId, result: { tools } };
     }

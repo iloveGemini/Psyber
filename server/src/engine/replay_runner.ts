@@ -42,11 +42,11 @@ import {
 } from "./tidy.ts";
 
 const MCP_REPLAY_CURSOR_KEY = "mcp_replay";
-const DEFAULT_MAX_CHARS = 20_000;
+const DEFAULT_MAX_CHARS = 40_000;
 const MIN_MAX_CHARS = 4_000;
-const MAX_MAX_CHARS = 60_000;
-const DEFAULT_MIN_CHARS = 500;
-const MAX_MIN_CHARS = 20_000;
+const MAX_MAX_CHARS = 100_000;
+const DEFAULT_MIN_CHARS = 5_000;
+const MAX_MIN_CHARS = 40_000;
 const MAX_DAYS_PER_PLAN = 365;
 const REPLAY_STATE_FILENAME = "replay_state.json";
 const ELIGIBLE_CHAT_WHERE =
@@ -88,6 +88,8 @@ export interface McpReplayPlan {
   deferredDays: string[];
   maxChars: number;
   minChars: number;
+  compactRules?: boolean;
+  untilDay?: string | null;
   createdAtMs: number;
 }
 
@@ -419,7 +421,7 @@ export class McpReplayRunner {
 
   private async renderActiveStep(
     state: McpReplayState,
-    opts: { protectCoreFiles: boolean; resumed: boolean },
+    opts: { protectCoreFiles: boolean; resumed: boolean; compactRules?: boolean },
   ): Promise<McpReplayExecResult> {
     const step = state.activeStep!;
     const plan = state.plan;
@@ -428,6 +430,8 @@ export class McpReplayRunner {
     const memoryDir = path.join(this.deps.dataDir, "memory");
     const weekday = weekdayOfDay(step.day);
     const stepClock = new VirtualClock(step.bedtimeAtMs, tz);
+    const useCompactRules =
+      Boolean(opts.compactRules) && !opts.resumed && step.phase !== "reflect_weekly";
 
     const dayIdx = plan ? plan.targetDays.indexOf(step.day) + 1 : 1;
     const totalDays = plan ? plan.targetDays.length : 1;
@@ -441,6 +445,11 @@ export class McpReplayRunner {
       this.buildProtectionNotice(step.phase, opts.protectCoreFiles),
       `日期填写硬约束：本步写入或编辑的所有卡片，其 frontmatter 的 created / updated 与标题 MM-DD 必须严格使用历史日期 ${step.day}（严禁写现实今天日期）。`,
     ];
+    if (useCompactRules) {
+      headerLines.push(
+        "规则模式：compact_rules（沿用前文 <tidy_rules>、<self>、<user>；周反思与新窗口续接会自动下发完整规则）。",
+      );
+    }
     if (step.phase === "wrapup" && step.partIndex && step.totalParts) {
       const isFinalPart = step.partIndex >= step.totalParts;
       headerLines.push(
@@ -456,8 +465,8 @@ export class McpReplayRunner {
     }
 
     const [selfMd, userMd, identity] = await Promise.all([
-      readOptional(path.join(memoryDir, "core", "self.md")),
-      readOptional(path.join(memoryDir, "core", "user.md")),
+      useCompactRules ? Promise.resolve(null) : readOptional(path.join(memoryDir, "core", "self.md")),
+      useCompactRules ? Promise.resolve(null) : readOptional(path.join(memoryDir, "core", "user.md")),
       readIdentityProfile(this.deps.dataDir, stepClock.now(), tz),
     ]);
     const userLabel = identity.userName ?? identity.userPronoun ?? "TA";
@@ -468,14 +477,18 @@ export class McpReplayRunner {
 
     if (step.phase === "wrapup") {
       const [tidyPrompt, stateRaw, threadReg, entReg] = await Promise.all([
-        readPrompt(this.deps.promptsDir, "tidy.md", {
-          TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.daily_wrapup,
-        }),
+        useCompactRules
+          ? Promise.resolve(null)
+          : readPrompt(this.deps.promptsDir, "tidy.md", {
+              TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.daily_wrapup,
+            }),
         readOptional(path.join(memoryDir, "core", "state.md")),
         readOptional(path.join(memoryDir, "threads", "REGISTRY.yaml")),
         readOptional(path.join(memoryDir, "entities", "REGISTRY.yaml")),
       ]);
-      sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      if (tidyPrompt) {
+        sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      }
       sections.push(buildTidyContextBlock({ taskType: "daily_wrapup", targetDay: step.day }));
 
       const stateFiltered = stateRaw ? filterActiveStateMarkdown(stateRaw, step.day) : null;
@@ -494,9 +507,11 @@ export class McpReplayRunner {
       );
     } else if (step.phase === "bedtime") {
       const [tidyPrompt, stateRaw, layers] = await Promise.all([
-        readPrompt(this.deps.promptsDir, "tidy.md", {
-          TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.bedtime,
-        }),
+        useCompactRules
+          ? Promise.resolve(null)
+          : readPrompt(this.deps.promptsDir, "tidy.md", {
+              TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.bedtime,
+            }),
         readOptional(path.join(memoryDir, "core", "state.md")),
         selectActiveGistLayers(memoryDir, step.day),
       ]);
@@ -508,7 +523,9 @@ export class McpReplayRunner {
         nearLimit: layers.totalChars >= softWarnChars,
       };
 
-      sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      if (tidyPrompt) {
+        sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      }
       sections.push(
         buildTidyContextBlock({
           taskType: "bedtime",
@@ -588,14 +605,18 @@ export class McpReplayRunner {
       }
     } else {
       const [reflectPrompt, openMd] = await Promise.all([
-        readPrompt(this.deps.promptsDir, "reflect.md", {
-          REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.weekly,
-        }),
+        useCompactRules
+          ? Promise.resolve(null)
+          : readPrompt(this.deps.promptsDir, "reflect.md", {
+              REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.weekly,
+            }),
         readOptional(path.join(memoryDir, "core", "open.md")),
       ]);
-      sections.push(
-        `<reflect_rules>\n${stripPromptCompletionSection(reflectPrompt.body)}\n</reflect_rules>`,
-      );
+      if (reflectPrompt) {
+        sections.push(
+          `<reflect_rules>\n${stripPromptCompletionSection(reflectPrompt.body)}\n</reflect_rules>`,
+        );
+      }
       sections.push(
         buildReflectContextBlock({
           scope: "weekly",
@@ -659,7 +680,7 @@ export class McpReplayRunner {
     state: McpReplayState,
     byDay: Map<string, ReplayDayGroup>,
     allGroups: ReplayDayGroup[],
-    opts: { protectCoreFiles: boolean },
+    opts: { protectCoreFiles: boolean; compactRules?: boolean },
   ): Promise<McpReplayExecResult> {
     const plan = state.plan;
     if (!plan) {
@@ -733,17 +754,28 @@ export class McpReplayRunner {
       const pendingChars = pendingRows.reduce((sum, r) => sum + r.content.length, 0);
       const dayIdx = plan.targetDays.indexOf(nextDay);
       const hasMoreDaysInPlan = dayIdx >= 0 && dayIdx < plan.targetDays.length - 1;
+      const allDayIdx = allGroups.findIndex((g) => g.day === nextDay);
+      const nextGroupInDb =
+        allDayIdx >= 0 && allDayIdx < allGroups.length - 1 ? allGroups[allDayIdx + 1]! : null;
+      const canPullNextDayFromDb =
+        !hasMoreDaysInPlan &&
+        nextGroupInDb !== null &&
+        (!plan.untilDay || nextGroupInDb.day <= plan.untilDay);
+      const canDefer = hasMoreDaysInPlan || canPullNextDayFromDb;
 
-      // 复用 replay.ts lines 1028-1050 低量日攒批顺延逻辑：仅当尚未消化且计划内还有后续日时顺延
+      // 低量日攒批顺延逻辑：若批次末尾刚好是低量日且库中还有后续日（未受 until 截止限制），自动拉入下一日合并消化
       if (
         state.dayPartDone === 0 &&
         plan.minChars > 0 &&
         pendingRows.length > 0 &&
         pendingChars < plan.minChars &&
-        hasMoreDaysInPlan &&
+        canDefer &&
         !(await this.hasEpisodeCardsForDay(nextDay))
       ) {
         plan.deferredDays.push(nextDay);
+        if (canPullNextDayFromDb && nextGroupInDb && !plan.targetDays.includes(nextGroupInDb.day)) {
+          plan.targetDays.push(nextGroupInDb.day);
+        }
         await this.syncReplayStateFile(nextDay, {
           deferredToNext: true,
           processedEvents: 0,
@@ -759,9 +791,9 @@ export class McpReplayRunner {
       }
 
       const baseCommit = await getMemoryHeadCommit(this.deps.dataDir);
-      const stepSeq = state.nextStepSeq++;
 
       if (pendingRows.length > 0) {
+        const stepSeq = state.nextStepSeq++;
         const chunks = splitRowsIntoTurnChunks(pendingRows, plan.maxChars);
         const batch = chunks[0]!;
         const partIndex = state.dayPartDone + 1;
@@ -791,12 +823,14 @@ export class McpReplayRunner {
         return this.renderActiveStep(state, {
           protectCoreFiles: opts.protectCoreFiles,
           resumed: false,
+          compactRules: opts.compactRules,
         });
       }
 
       // 该日所有对话已 wrapup 完毕，判断是否需要进入 bedtime
       const bedtimeDate = this.deps.events.getBedtimeNightDate();
       if (bedtimeDate === null || nextDay > bedtimeDate) {
+        const stepSeq = state.nextStepSeq++;
         state.activeStep = {
           stepId: `${nextDay}:bedtime:1#${stepSeq}`,
           day: nextDay,
@@ -812,6 +846,7 @@ export class McpReplayRunner {
         return this.renderActiveStep(state, {
           protectCoreFiles: opts.protectCoreFiles,
           resumed: false,
+          compactRules: opts.compactRules,
         });
       }
 
@@ -826,6 +861,7 @@ export class McpReplayRunner {
         const substantive = allChanged.filter(isSubstantiveReflectPath);
         const dailyRefs = allChanged.filter(isReflectionCardPath);
         if (substantive.length > 0) {
+          const stepSeq = state.nextStepSeq++;
           state.activeStep = {
             stepId: `${nextDay}:reflect_weekly:1#${stepSeq}`,
             day: nextDay,
@@ -841,6 +877,7 @@ export class McpReplayRunner {
           return this.renderActiveStep(state, {
             protectCoreFiles: opts.protectCoreFiles,
             resumed: false,
+            compactRules: opts.compactRules,
           });
         }
         if (baseCommit) {
@@ -1068,6 +1105,7 @@ export class McpReplayRunner {
 
         const maxChars = clampInt(args.max_chars, MIN_MAX_CHARS, MAX_MAX_CHARS, DEFAULT_MAX_CHARS);
         const minChars = clampInt(args.min_chars, 0, MAX_MIN_CHARS, DEFAULT_MIN_CHARS);
+        const compactRules = args.compact_rules === true;
         const runAll = args.all === true;
         const untilRaw = typeof args.until === "string" ? args.until.trim() : "";
         if (untilRaw && !/^\d{4}-\d{2}-\d{2}$/.test(untilRaw)) {
@@ -1095,6 +1133,8 @@ export class McpReplayRunner {
           deferredDays: [],
           maxChars,
           minChars,
+          compactRules,
+          untilDay: untilRaw || null,
           createdAtMs: this.deps.clock.now(),
         };
         state.currentDay = null;
@@ -1103,26 +1143,42 @@ export class McpReplayRunner {
         state.dayTouchedPaths = [];
         this.saveState(state);
 
-        return this.advanceToNextStep(state, byDay, groups, opts);
+        // start 首步始终下发完整规则，后续 next 按 compact_rules 生效
+        return this.advanceToNextStep(state, byDay, groups, {
+          protectCoreFiles: opts.protectCoreFiles,
+          compactRules: false,
+        });
       }
 
       // action === "next"
+      const nextCompactRules =
+        typeof args.compact_rules === "boolean"
+          ? args.compact_rules
+          : Boolean(state.plan?.compactRules);
+
       if (state.activeStep) {
         const providedStepId = typeof args.step_id === "string" ? args.step_id.trim() : "";
         if (!providedStepId || providedStepId !== state.activeStep.stepId) {
-          // 新窗口或未携带匹配 step_id 时绝不跳过当前步，原样续接重发
+          // 新窗口或未携带匹配 step_id 时绝不跳过当前步，且强制下发完整规则
           return this.renderActiveStep(state, {
             protectCoreFiles: opts.protectCoreFiles,
             resumed: true,
+            compactRules: false,
           });
         }
 
         await this.settleActiveStep(state, args.summary);
-        return this.advanceToNextStep(state, byDay, groups, opts);
+        return this.advanceToNextStep(state, byDay, groups, {
+          protectCoreFiles: opts.protectCoreFiles,
+          compactRules: nextCompactRules,
+        });
       }
 
       if (state.plan) {
-        return this.advanceToNextStep(state, byDay, groups, opts);
+        return this.advanceToNextStep(state, byDay, groups, {
+          protectCoreFiles: opts.protectCoreFiles,
+          compactRules: nextCompactRules,
+        });
       }
 
       return {

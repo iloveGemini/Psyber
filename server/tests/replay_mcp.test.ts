@@ -1018,4 +1018,164 @@ describe("对外记忆 MCP 第二阶段（单工具 memory_replay 搬家工具�
     expect([n1.text, n2.text].some((t) => t.includes("续接上次未提交步骤"))).toBe(true);
     expect(c.events.getBedtimeNightDate()).toBeNull();
   });
+
+  test("工具 annotations、compact_rules（含新窗口自动回退完整规则）、跨批低量顺延与 stepSeq 连续递增", async () => {
+    const c = (ctx = await createTestContext());
+    await c.tools.write(
+      "core/self.md",
+      "---\ntitle: 关于我\nkind: note\nstatus: active\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\n我是 Roy。",
+    );
+    await c.tools.write(
+      "core/user.md",
+      "---\ntitle: 关于TA\nkind: note\nstatus: active\ncreated: 2026-06-01\nupdated: 2026-06-01\nname: Joy\n---\n对方叫 Joy。",
+    );
+    await commitMemoryPaths(c.dataDir, ["core/self.md", "core/user.md"], "memory(genesis): init");
+
+    // 2026-06-23 正常日（> 500 字），2026-06-24 低量日（< 500 字），2026-06-28 周日（验证跨批顺延合并 + compact_rules 下周反思仍完整下发 <reflect_rules>）
+    let seq = 1;
+    const t23 = Date.UTC(2026, 5, 23, 12, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: seq++,
+      atMs: t23,
+      role: "user",
+      turnId: "t-23",
+      content: "第一天正常长度对话。".repeat(60),
+    });
+    const t24 = Date.UTC(2026, 5, 24, 12, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: seq++,
+      atMs: t24,
+      role: "user",
+      turnId: "t-24",
+      content: "第二天很短",
+    });
+    const t28 = Date.UTC(2026, 5, 28, 12, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: seq++,
+      atMs: t28,
+      role: "user",
+      turnId: "t-28",
+      content: "周日正常对话。".repeat(60),
+    });
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: c.clock,
+      getConfig: () => c.config,
+      events: c.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: c.dataDir,
+      promptsDir: PROMPTS_DIR,
+      db: c.db,
+      memoryIndex: c.index,
+      memoryTools: c.tools,
+      memoryGitMutex: new AsyncMutex(),
+    });
+    const authHeaders = { authorization: `Bearer ${c.authToken}`, "content-type": "application/json" };
+    const tokRes = await app.request("/api/v1/memory-mcp/tokens", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ name: "annot-client" }),
+    });
+    const mcpToken = ((await tokRes.json()) as { token: string }).token;
+    await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        memoryMcp: { enabled: true, accessMode: "read_write", replayToolsEnabled: true },
+      }),
+    });
+
+    // 1. 校验 tools/list 所有工具 annotations 均为 destructiveHint: false，且读写标注准确
+    const listRes = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${mcpToken}`, "content-type": "application/json" },
+      body: mcpRpc("tools/list"),
+    });
+    const tools = (
+      (await listRes.json()) as {
+        result: {
+          tools: Array<{
+            name: string;
+            annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; openWorldHint?: boolean };
+          }>;
+        };
+      }
+    ).result.tools;
+    expect(tools).toHaveLength(9);
+    for (const t of tools) {
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.annotations?.openWorldHint).toBe(false);
+      const isWrite = t.name === "memory_write" || t.name === "memory_edit" || t.name === "memory_replay";
+      expect(t.annotations?.readOnlyHint).toBe(!isWrite);
+    }
+
+    // 2. start(days=2, min_chars=500, compact_rules=true)：首步保留完整规则，stepSeq = #1
+    const s1 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "start",
+      days: 2,
+      min_chars: 500,
+      compact_rules: true,
+    });
+    expect(s1.isError).toBe(false);
+    expect(extractStepId(s1.text)).toBe("2026-06-23:wrapup:1#1");
+    expect(s1.text).toContain("<tidy_rules>");
+    expect(s1.text).toContain("<self>");
+
+    // 3. 连续 next 进入 bedtime：compact_rules 生效省略重复规则，stepSeq = #2
+    const s2 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: "2026-06-23:wrapup:1#1",
+      summary: "06-23切片",
+    });
+    expect(s2.isError).toBe(false);
+    expect(extractStepId(s2.text)).toBe("2026-06-23:bedtime:1#2");
+    expect(s2.text).toContain("compact_rules");
+    expect(s2.text).not.toContain("<tidy_rules>\n");
+    expect(s2.text).not.toContain("# 整理原则");
+    expect(s2.text).not.toContain("<self>\n");
+
+    // 4. 新窗口续接（不传 step_id）：自动回退为完整规则
+    const resumed = await callMcpTool(app, mcpToken, "memory_replay", { action: "next" });
+    expect(resumed.isError).toBe(false);
+    expect(extractStepId(resumed.text)).toBe("2026-06-23:bedtime:1#2");
+    expect(resumed.text).toContain("续接上次未提交步骤");
+    expect(resumed.text).toContain("<tidy_rules>");
+    expect(resumed.text).toContain("<self>");
+
+    // 5. 结算 06-23 bedtime 后，窗口末尾的 06-24（低量 < 500）自动顺延并拉入 06-28 合并消化，stepSeq 连续为 #3（无空跳）
+    const s3 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: "2026-06-23:bedtime:1#2",
+      summary: "06-23日梗概",
+    });
+    expect(s3.isError).toBe(false);
+    expect(extractStepId(s3.text)).toBe("2026-06-28:wrapup:1#3");
+    expect(s3.text).toContain("低量顺延 1 天");
+    expect(s3.text).toContain("第二天很短");
+    expect(s3.text).toContain("周日正常对话");
+
+    // 6. 写入一张实质卡片并推进到周反思：即使开启了 compact_rules，reflect_weekly 也必须完整下发 <reflect_rules>、<self>、<user>
+    await callMcpTool(app, mcpToken, "memory_write", {
+      path: "episodes/2026/06/28/ep-sunday.md",
+      content:
+        "---\ntitle: 06-28 周日记录\nkind: episode\nstatus: active\ncreated: 2026-06-28\nupdated: 2026-06-28\n---\n周日对话记录。",
+    });
+    const s4 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: "2026-06-28:wrapup:1#3",
+      summary: "06-28切片",
+    });
+    expect(extractStepId(s4.text)).toBe("2026-06-28:bedtime:1#4");
+    const s5 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: "2026-06-28:bedtime:1#4",
+      summary: "06-28日梗概",
+    });
+    expect(s5.isError).toBe(false);
+    expect(extractStepId(s5.text)).toBe("2026-06-28:reflect_weekly:1#5");
+    expect(s5.text).toContain("<reflect_rules>");
+    expect(s5.text).toContain("<self>");
+    expect(s5.text).not.toContain("规则模式：compact_rules");
+  });
 });

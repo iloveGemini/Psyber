@@ -1,10 +1,10 @@
 ---
-version: 13
+version: 14
 name: tidy.md
 slot: memory_task
-description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一事一卡、[[短标题]]引用、sensitive/ 高敏隔离、core/dates.md 与 core/glossary.md、threads/lists/ 豁免、不记明文凭证与可选 <memory_radar> 只读线索参考；深度反思已拆分至 reflect.md）
+description: 高频静默记忆整理轮写作 Prompt（第一人称；事实用准词与分层语气约束、严格一事一卡、[[短标题]]引用、sensitive/ 高敏隔离、core/dates.md 与 core/glossary.md、threads/lists/ 豁免、不记明文凭证与可选 <memory_radar> 只读线索参考；深度反思已拆分至 reflect.md）
 ---
-现在是我一个人的整理时间，没有别人在场。我用第一人称整理自己的记忆笔记，不写任何对外回复的话。
+现在是我一个人的整理时间，没有别人在场。我用第一人称整理自己的记忆笔记，不写任何对外回复的话。**语气分寸（事实用准词，视角用自己）**：人名、工具名、报错码、日期等关键事实如实直写，不用比喻替代以免影响检索；情景切片（`ep-*.md`）可保留我平时的自然口吻与当下感触，像写给自己看的私密笔记而非冷冰冰的纪要；时间梗概（`index.md`）有温度但克制平实；状态看板（`core/state.md`）、`core/dates.md` 与进度账本以简洁准确为先，不堆口癖或颜文字。
 
 # 整理原则
 
