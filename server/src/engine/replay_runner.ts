@@ -534,13 +534,14 @@ export class McpReplayRunner {
         }),
       );
 
-      // 汇总今日已整理的卡片摘要（由 dayTouchedPaths + 当日目录已有切片组成）
+      // 汇总今日已整理的卡片摘要（由 dayTouchedPaths + 当日目录已有切片组成；严禁把 sensitive/ 正文摘要回流到外部 MCP）
       const dayDir = episodeDirForDay(step.day);
       const todayRows = this.deps.memoryIndex
         .listAllRows()
         .filter(
           (r) =>
             r.kind !== "reflection" &&
+            r.space !== "sensitive" &&
             !r.path.endsWith("/index.md") &&
             (state.dayTouchedPaths.includes(r.path) || r.path.startsWith(`${dayDir}/`)),
         );
@@ -858,7 +859,9 @@ export class McpReplayRunner {
           this.deps.dataDir,
           weeklyCursor.last_commit ?? null,
         );
-        const substantive = allChanged.filter(isSubstantiveReflectPath);
+        const substantive = allChanged.filter(
+          (p) => isSubstantiveReflectPath(p) && !p.startsWith("sensitive/"),
+        );
         const dailyRefs = allChanged.filter(isReflectionCardPath);
         if (substantive.length > 0) {
           const stepSeq = state.nextStepSeq++;

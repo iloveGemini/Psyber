@@ -1178,4 +1178,145 @@ describe("对外记忆 MCP 第二阶段（单工具 memory_replay 搬家工具�
     expect(s5.text).toContain("<self>");
     expect(s5.text).not.toContain("规则模式：compact_rules");
   });
+
+  test("高敏私密区（sensitive/）在搬家期间准写不准读：支持新建与同步改写，禁覆写既有卡、禁编辑读取且不回流 bedtime 摘要", async () => {
+    const c = (ctx = await createTestContext());
+    await c.tools.write(
+      "sensitive/health-existing.md",
+      "---\ntitle: 健康·既有隐私\nkind: note\nstatus: active\ncreated: 2026-06-01\nupdated: 2026-06-01\nwhen_to_recall: 过敏史\n---\nEXISTING_SECRET_DO_NOT_OVERWRITE",
+    );
+    await commitMemoryPaths(c.dataDir, ["sensitive/health-existing.md"], "memory(genesis): sensitive base");
+
+    const t0 = Date.UTC(2026, 5, 29, 14, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: 1,
+      atMs: t0,
+      role: "user",
+      turnId: "t-sens-1",
+      content: "今晚聊了些很私密的事，记得单独收好。",
+    });
+    insertHistoricalEvent(c, {
+      seq: 2,
+      atMs: t0 + 10_000,
+      role: "assistant",
+      turnId: "t-sens-1",
+      content: "嗯，我收进私密抽屉，不在普通日记里写细节。",
+    });
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: c.clock,
+      getConfig: () => c.config,
+      events: c.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: c.dataDir,
+      promptsDir: PROMPTS_DIR,
+      db: c.db,
+      memoryIndex: c.index,
+      memoryTools: c.tools,
+      memoryGitMutex: new AsyncMutex(),
+    });
+    const authHeaders = { authorization: `Bearer ${c.authToken}`, "content-type": "application/json" };
+    const tokRes = await app.request("/api/v1/memory-mcp/tokens", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ name: "sens-client" }),
+    });
+    const mcpToken = ((await tokRes.json()) as { token: string }).token;
+    await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        memoryMcp: { enabled: true, accessMode: "read_write", replayToolsEnabled: true },
+      }),
+    });
+
+    // 1. 非搬家态：仍禁止写入 sensitive/
+    const blockedOutside = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "sensitive/intimacy-outside.md",
+      content:
+        "---\ntitle: 亲密·非搬家写入\nkind: episode\nstatus: active\ncreated: 2026-06-29\nupdated: 2026-06-29\nwhen_to_recall: 测试\n---\n不应成功。",
+    });
+    expect(blockedOutside.isError).toBe(true);
+    expect(blockedOutside.text).toContain("禁止读写");
+
+    // 2. 开启搬家步骤：准写新卡 + 允许同步修订自己刚新建的卡
+    const s1 = await callMcpTool(app, mcpToken, "memory_replay", { action: "start", days: 1 });
+    expect(s1.isError).toBe(false);
+    const step1Id = extractStepId(s1.text);
+
+    const wNew = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "sensitive/intimacy-0629.md",
+      content:
+        "---\ntitle: 亲密·06-29私密记录\nkind: episode\nstatus: active\ncreated: 2026-06-29\nupdated: 2026-06-29\nwhen_to_recall: 聊到私密互动习惯时\n---\nSENSITIVE_BODY_SECRET_V1",
+    });
+    expect(wNew.isError).toBe(false);
+    expect(wNew.text).toContain("已暂存至当前搬家步骤");
+
+    const wSameStepUpdate = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "sensitive/intimacy-0629.md",
+      content:
+        "---\ntitle: 亲密·06-29私密记录\nkind: episode\nstatus: active\ncreated: 2026-06-29\nupdated: 2026-06-29\nwhen_to_recall: 聊到私密互动习惯时\n---\nSENSITIVE_BODY_SECRET_V2",
+    });
+    expect(wSameStepUpdate.isError).toBe(false);
+
+    // 3. 搬家期间仍严禁覆写既有私密卡、严禁 edit / read / glob / grep
+    const blockedOverwrite = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "sensitive/health-existing.md",
+      content:
+        "---\ntitle: 健康·试图覆盖\nkind: note\nstatus: active\ncreated: 2026-06-29\nupdated: 2026-06-29\nwhen_to_recall: 过敏史\n---\nOVERWRITTEN",
+    });
+    expect(blockedOverwrite.isError).toBe(true);
+    expect(blockedOverwrite.text).toContain("禁止覆写已存在文件");
+    expect(
+      await fs.readFile(path.join(c.dataDir, "memory", "sensitive/health-existing.md"), "utf8"),
+    ).toContain("EXISTING_SECRET_DO_NOT_OVERWRITE");
+
+    const blockedEdit = await callMcpTool(app, mcpToken, "memory_edit", {
+      path: "sensitive/intimacy-0629.md",
+      old_string: "SENSITIVE_BODY_SECRET_V2",
+      new_string: "EDITED",
+    });
+    expect(blockedEdit.isError).toBe(true);
+    expect(blockedEdit.text).toContain("仅支持单向新建写入");
+
+    const blockedRead = await callMcpTool(app, mcpToken, "memory_read", {
+      path: "sensitive/intimacy-0629.md",
+    });
+    expect(blockedRead.isError).toBe(true);
+    expect(blockedRead.text).toContain("屏蔽高敏私密区");
+
+    const blockedGlob = await callMcpTool(app, mcpToken, "memory_glob", { pattern: "sensitive/*" });
+    expect(blockedGlob.isError).toBe(true);
+
+    // 4. 结算进入 bedtime：新私密卡已落盘并提交，但 bedtime 今日卡片摘要绝不回流敏感正文
+    const s2 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: step1Id,
+      summary: "记06-29私密卡",
+    });
+    expect(s2.isError).toBe(false);
+    expect(s2.text).toContain("phase: bedtime");
+    expect(s2.text).not.toContain("SENSITIVE_BODY_SECRET_V2");
+    expect(s2.text).not.toContain("sensitive/intimacy-0629.md");
+    expect(
+      await fs.readFile(path.join(c.dataDir, "memory", "sensitive/intimacy-0629.md"), "utf8"),
+    ).toContain("SENSITIVE_BODY_SECRET_V2");
+
+    // 5. 收尾结束搬家后，再次禁止写入 sensitive/
+    const sDone = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s2.text),
+      summary: "06-29日梗概",
+    });
+    expect(sDone.text).toContain("status: finished");
+
+    const blockedAfter = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "sensitive/intimacy-after.md",
+      content:
+        "---\ntitle: 亲密·结束后写入\nkind: episode\nstatus: active\ncreated: 2026-06-29\nupdated: 2026-06-29\nwhen_to_recall: 测试\n---\n不应成功。",
+    });
+    expect(blockedAfter.isError).toBe(true);
+    expect(blockedAfter.text).toContain("禁止读写");
+  });
 });

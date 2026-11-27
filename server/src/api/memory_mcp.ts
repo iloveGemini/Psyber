@@ -627,13 +627,43 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     const norm = normalizeRelPath(rawPath);
     if (!norm.ok) return { ok: false, output: norm.error };
     if (!norm.rel) return { ok: false, output: "path 不能为空。" };
-    if (isSensitiveRelPath(norm.rel)) {
-      return { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/），禁止读写。" };
-    }
 
     return deps.gitMutex.runExclusive(async () => {
       // 在 gitMutex 内读取 activeStep 并校验权限，避免与并发 memory_replay(next/abort) 产生竞态
       const activeStep = deps.replayRunner?.getActiveStep() ?? null;
+
+      let existedBefore = false;
+      if (activeStep) {
+        try {
+          await fs.access(path.join(memoryDir, norm.rel));
+          existedBefore = true;
+        } catch {
+          existedBefore = false;
+        }
+      }
+
+      if (isSensitiveRelPath(norm.rel)) {
+        if (!activeStep) {
+          return { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/），禁止读写。" };
+        }
+        if (kind !== "write") {
+          return {
+            ok: false,
+            output: "搬家期间高敏私密区（sensitive/）仅支持单向新建写入（memory_write），禁止读取或编辑。",
+          };
+        }
+        const createdInThisStep = activeStep.touchedPaths.some(
+          (item) => item.path === norm.rel && !item.existedBefore,
+        );
+        if (existedBefore && !createdInThisStep) {
+          return {
+            ok: false,
+            output:
+              "高敏私密区（sensitive/）在搬家期间处于只写不读模式，为防盲写覆盖已有私密卡，禁止覆写已存在文件；请更换新的文件名（例如带上日期 slug）。",
+          };
+        }
+      }
+
       if (protectCoreFiles && norm.rel.startsWith("core/")) {
         const allowedReplayCore =
           activeStep !== null &&
@@ -649,15 +679,6 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
         }
       }
 
-      let existedBefore = false;
-      if (activeStep) {
-        try {
-          await fs.access(path.join(memoryDir, norm.rel));
-          existedBefore = true;
-        } catch {
-          existedBefore = false;
-        }
-      }
       const writeOpts = activeStep
         ? {
             clockOverride: new VirtualClock(
