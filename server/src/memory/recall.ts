@@ -142,8 +142,9 @@ async function loadResidentContextForGate(memoryDir: string): Promise<string | n
   const specs: Array<{ rel: string; label: string; maxChars: number }> = [
     { rel: "core/open.md", label: "未完挂念", maxChars: 450 },
     { rel: "core/state.md", label: "近期状态", maxChars: 400 },
-    { rel: "core/user.md", label: "对方档案", maxChars: 400 },
-    { rel: "core/self.md", label: "自我档案", maxChars: 250 },
+    { rel: "core/user.md", label: "对方档案", maxChars: 350 },
+    { rel: "core/self.md", label: "自我档案", maxChars: 220 },
+    { rel: "core/glossary.md", label: "专属暗语", maxChars: 220 },
   ];
   const parts: string[] = [];
   for (const sp of specs) {
@@ -356,6 +357,12 @@ export async function recallMemories(opts: {
   const catalogScanMaxCards = cfg.catalogScanMaxCards ?? 250;
   const ftsMinScore = cfg.ftsMinScore ?? 0.25;
   const fallbackMinSemScore = cfg.embedMinScore ?? 0.35;
+  const sensitiveCfg = cfg.sensitive ?? DEFAULT_RECALL_CONFIG.sensitive!;
+  const sensitiveAllowExternalEmbedding = sensitiveCfg.allowExternalEmbedding === true;
+  const sensitiveRerankThreshold = Math.max(rerankThreshold, sensitiveCfg.rerankThreshold ?? 0.55);
+  const sensitiveFtsMinScore = Math.max(ftsMinScore, sensitiveCfg.ftsMinScore ?? 0.45);
+  const effectiveRerankThresholdFor = (row: CardIndexRow): number =>
+    row.space === "sensitive" ? sensitiveRerankThreshold : rerankThreshold;
 
   if (!opts.activityHint && isBlankTurn(query)) {
     return { skipped: true, items: [], renderedBlock: null, gateScore: null, usedDecisionGate: false };
@@ -468,8 +475,33 @@ export async function recallMemories(opts: {
   const rowByPath = new Map<string, CardIndexRow>(allActive.map((r) => [r.path, r]));
   const eligibleForCatalog = allActive.filter((r) => !recentPaths.has(r.path));
 
+  // 默认隔离外部模型时，全卡直扫也不把未命中的 sensitive/ 标题与触发提示发给云端 decisionClient：
+  // 仅当本地 FTS5 先命中高敏卡，才把该卡纳入本次目录直扫参与高门槛精排。
+  const getCatalogRowsForScan = (): CardIndexRow[] => {
+    if (sensitiveAllowExternalEmbedding) return eligibleForCatalog;
+    const hasSensitive = eligibleForCatalog.some((r) => r.space === "sensitive");
+    if (!hasSensitive) return eligibleForCatalog;
+    const localSensHitPaths = new Set<string>();
+    const rawHits = [
+      ...index.searchFts(query, 12),
+      ...(retrievalQuery !== query ? index.searchFts(retrievalQuery, 12) : []),
+    ];
+    for (const hit of rawHits) {
+      const row = rowByPath.get(hit.path);
+      if (!row || row.space !== "sensitive") continue;
+      const kwScore = Math.min(1, Math.max(0.1, -hit.rank / (-hit.rank + 1.2)));
+      if (allActive.length < 10 || kwScore >= sensitiveFtsMinScore) {
+        localSensHitPaths.add(hit.path);
+      }
+    }
+    return eligibleForCatalog.filter(
+      (r) => r.space !== "sensitive" || localSensHitPaths.has(r.path),
+    );
+  };
+
   const runCatalogScan = async (): Promise<RecallResult | null> => {
-    if (!opts.decisionClient || eligibleForCatalog.length === 0) return null;
+    const catalogRows = getCatalogRowsForScan();
+    if (!opts.decisionClient || catalogRows.length === 0) return null;
     try {
       const { promptInst, residentBlock } = await getGateBaseContext();
       const convLines = [
@@ -480,8 +512,8 @@ export async function recallMemories(opts: {
       const questions: Record<string, DecisionQuestion> = {
         needs_memory: buildNoulQuestion(promptInst.needsMemory),
       };
-      for (let i = 0; i < eligibleForCatalog.length; i++) {
-        const row = eligibleForCatalog[i];
+      for (let i = 0; i < catalogRows.length; i++) {
+        const row = catalogRows[i];
         const hint = row.when_to_recall ? `|${clipForGate(row.when_to_recall, 50)}` : "";
         catalogLines.push(`[c${i}] ${clipForGate(row.title, 36)}${hint}`);
         questions[`c${i}`] = buildNoulQuestion(promptInst.cardRelevance, `[c${i}]`);
@@ -519,11 +551,11 @@ export async function recallMemories(opts: {
       const spaceKey = matchedActivitySlug ? `thread:${matchedActivitySlug}` : null;
       const scoredCatalog: Array<{ row: CardIndexRow; score: number }> = [];
       const passed: CandidateEntry[] = [];
-      for (let i = 0; i < eligibleForCatalog.length; i++) {
-        const row = eligibleForCatalog[i];
+      for (let i = 0; i < catalogRows.length; i++) {
+        const row = catalogRows[i];
         const score = res.answers[`c${i}`]?.noul ?? 0;
         scoredCatalog.push({ row, score });
-        if (score >= rerankThreshold) {
+        if (score >= effectiveRerankThresholdFor(row)) {
           passed.push({
             row,
             track: spaceKey && row.space === spaceKey ? "same_activity" : "cross_vector",
@@ -613,12 +645,19 @@ export async function recallMemories(opts: {
         const row = index.getRow(hit.path);
         if (!row || row.kind === "reflection") continue;
         const kwScore = Math.min(1, Math.max(0.1, -hit.rank / (-hit.rank + 1.2)));
+        if (row.space === "sensitive" && allActive.length >= 10 && kwScore < sensitiveFtsMinScore) {
+          continue;
+        }
         list.push({ row, kwScore });
       }
       return list;
     };
 
-    if (embeddingActive && opts.embedding && remaining.length > 0) {
+    const embeddableRemaining = sensitiveAllowExternalEmbedding
+      ? remaining
+      : remaining.filter((r) => r.space !== "sensitive");
+
+    if (embeddingActive && opts.embedding && embeddableRemaining.length > 0) {
       try {
         const qVec = await opts.embedding.embed(retrievalQuery, {
           signal: AbortSignal.timeout(embedTimeoutMs),
@@ -632,7 +671,7 @@ export async function recallMemories(opts: {
         await ensureCardEmbeddings({
           db,
           memoryDir,
-          rows: remaining,
+          rows: embeddableRemaining,
           embedding: opts.embedding,
           nowMs,
           embedTimeoutMs,
@@ -641,7 +680,7 @@ export async function recallMemories(opts: {
         });
 
         const semScored: Array<{ row: CardIndexRow; score: number }> = [];
-        for (const row of remaining) {
+        for (const row of embeddableRemaining) {
           const cVec = vecByPath.get(row.path);
           if (!cVec) continue;
           const sim = cosineSimilarity(qVec, cVec);
@@ -671,6 +710,13 @@ export async function recallMemories(opts: {
           }
           for (let i = 0; i < ftsList.length && i < globalLimit * 2; i++) {
             const item = ftsList[i];
+            if (
+              item.row.space === "sensitive" &&
+              allActive.length >= 10 &&
+              item.kwScore < sensitiveFtsMinScore
+            ) {
+              continue;
+            }
             const prev = fused.get(item.row.path);
             const boost = 1.0 / (rrfK + i + 1);
             if (prev) {
@@ -710,6 +756,28 @@ export async function recallMemories(opts: {
               finalScore: item.score,
             });
             selectedPaths.add(item.row.path);
+          }
+          // 高敏区默认不外发外部 Embedding：仅当本地 FTS5 命中（>=10 张卡时须达 sensitiveFtsMinScore）补充最多 2 条进入高门槛精排
+          if (!sensitiveAllowExternalEmbedding) {
+            const localSensitiveHits = collectFtsHits()
+              .filter(
+                (item) =>
+                  item.row.space === "sensitive" &&
+                  (allActive.length < 10 || item.kwScore >= sensitiveFtsMinScore) &&
+                  !selectedPaths.has(item.row.path),
+              )
+              .slice(0, 2);
+            for (const item of localSensitiveHits) {
+              candidates.push({
+                row: item.row,
+                track: "cross_vector",
+                semScore: 0,
+                kwScore: item.kwScore,
+                rerankScore: null,
+                finalScore: item.kwScore,
+              });
+              selectedPaths.add(item.row.path);
+            }
           }
         }
         usedEmbedding = true;
@@ -779,12 +847,21 @@ export async function recallMemories(opts: {
             actCount++;
           }
         } else if (c.track === "cross_vector") {
-          // 降级模式对放宽进候选池的向量命中恢复 0.35 门槛，并过滤弱字面撞词（<10 张卡小语料豁免 BM25 IDF 塌缩）
-          if (c.semScore > 0 && c.semScore < fallbackMinSemScore) {
-            continue;
-          }
-          if (c.semScore === 0 && ftsMinScore > 0 && allActive.length >= 10 && c.kwScore < ftsMinScore) {
-            continue;
+          // 高敏区在降级模式仍执行严格独立门槛（>=10 张卡时过滤低分 FTS 撞词；小语料库防 BM25 IDF 塌缩）
+          if (c.row.space === "sensitive") {
+            if (c.semScore > 0) {
+              if (c.semScore < Math.max(fallbackMinSemScore, sensitiveRerankThreshold)) continue;
+            } else if (allActive.length >= 10 && c.kwScore < sensitiveFtsMinScore) {
+              continue;
+            }
+          } else {
+            // 降级模式对放宽进候选池的向量命中恢复 0.35 门槛，并过滤弱字面撞词（<10 张卡小语料豁免 BM25 IDF 塌缩）
+            if (c.semScore > 0 && c.semScore < fallbackMinSemScore) {
+              continue;
+            }
+            if (c.semScore === 0 && ftsMinScore > 0 && allActive.length >= 10 && c.kwScore < ftsMinScore) {
+              continue;
+            }
           }
           if (vecCount < 5) {
             out.push(c);
@@ -870,7 +947,7 @@ export async function recallMemories(opts: {
         const c = poolSlice[i];
         const score = res.answers[`c${i}`]?.noul ?? 0;
         scoredPool.push({ entry: c, score });
-        if (score >= rerankThreshold) {
+        if (score >= effectiveRerankThresholdFor(c.row)) {
           passed.push({
             ...c,
             rerankScore: score,
@@ -967,7 +1044,7 @@ export async function recallMemories(opts: {
           for (const item of orderedItems) {
             const c = poolSlice[item.index];
             if (!c) continue;
-            if (item.relevanceScore >= rerankThreshold) {
+            if (item.relevanceScore >= effectiveRerankThresholdFor(c.row)) {
               passed.push({
                 ...c,
                 rerankScore: item.relevanceScore,
@@ -1039,7 +1116,8 @@ export async function recallMemories(opts: {
             : "相关记忆";
     const statusFlag = cand.row.status === "disputed" ? " · [待确认/有分歧]" : "";
     const dateFlag = cand.row.date_kind === "gentle" ? " · [敏感忌日·轻声对待]" : "";
-    const header = `- [${trackLabel}] ${cand.row.path}（${whenLabel} · kind: ${cand.row.kind}${statusFlag}${dateFlag}）\n  标题：${cand.row.title}\n  `;
+    const sensitiveFlag = cand.row.space === "sensitive" ? " · [敏感记录·按需轻声对待]" : "";
+    const header = `- [${trackLabel}] ${cand.row.path}（${whenLabel} · kind: ${cand.row.kind}${statusFlag}${dateFlag}${sensitiveFlag}）\n  标题：${cand.row.title}\n  `;
     const bodyBudget = remainingBudget - header.length - 2;
     if (bodyBudget < 40) return null;
     const excerpt = truncateToBudget(body, bodyBudget);
@@ -1076,10 +1154,13 @@ export async function recallMemories(opts: {
       const excludePaths = new Set<string>(recentPaths);
       for (const s of selected) excludePaths.add(s.row.path);
       const maxNeighbors = Math.max(1, multiHopCfg.maxNeighbors ?? 6);
-      const rawNeighbors = index.findLinkedNeighbors(anchorPaths, {
-        excludePaths,
-        maxResults: maxNeighbors * 4,
-      });
+      const rawNeighbors = index
+        .findLinkedNeighbors(anchorPaths, {
+          excludePaths,
+          maxResults: maxNeighbors * 4,
+        })
+        // 高敏区严禁通过 1 跳双链顺藤摸瓜自动带出
+        .filter((nb) => nb.row.space !== "sensitive");
 
       if (rawNeighbors.length === 0) {
         hopStoppedReason = "no_neighbors";

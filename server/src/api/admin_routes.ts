@@ -338,6 +338,29 @@ function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
       return "recall.multiHop.timeoutMs 须在 200..60000 之间";
     }
   }
+  if (patch.sensitive !== undefined) {
+    if (!patch.sensitive || typeof patch.sensitive !== "object" || Array.isArray(patch.sensitive)) {
+      return "recall.sensitive 须为对象";
+    }
+    if (
+      patch.sensitive.allowExternalEmbedding !== undefined &&
+      typeof patch.sensitive.allowExternalEmbedding !== "boolean"
+    ) {
+      return "recall.sensitive.allowExternalEmbedding 须为布尔值";
+    }
+    if (
+      patch.sensitive.rerankThreshold !== undefined &&
+      !isNumInRange(patch.sensitive.rerankThreshold, 0, 1)
+    ) {
+      return "recall.sensitive.rerankThreshold 须在 0..1 之间";
+    }
+    if (
+      patch.sensitive.ftsMinScore !== undefined &&
+      !isNumInRange(patch.sensitive.ftsMinScore, 0, 1)
+    ) {
+      return "recall.sensitive.ftsMinScore 须在 0..1 之间";
+    }
+  }
   return null;
 }
 

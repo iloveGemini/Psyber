@@ -43,14 +43,22 @@ export interface ParsedCard {
 
 const EPISODE_INDEX_RE = /^episodes\/\d{4}(?:\/\d{2}(?:\/\d{2})?)?\/index\.md$/;
 
-/** 根据相对路径推导卡片所属空间标识 */
+/** 根据相对路径推导卡片所属空间标识（对顶层目录统一做大小写归一化，防止 macOS 大小写不敏感磁盘绕过分区判定） */
 export function inferSpace(relPath: string): string {
-  if (relPath === "core/self.md") return "self";
-  if (relPath === "core/user.md") return "user";
-  if (EPISODE_INDEX_RE.test(relPath)) return "episode_index";
+  const lowerRel = relPath.toLowerCase();
+  if (lowerRel === "core/self.md") return "self";
+  if (lowerRel === "core/user.md") return "user";
+  if (EPISODE_INDEX_RE.test(lowerRel)) return "episode_index";
   const parts = relPath.split("/");
-  const top = parts[0];
-  if (top === "core" || top === "episodes" || top === "lessons" || top === "favorite") {
+  const top = (parts[0] ?? "").toLowerCase();
+  if (
+    top === "core" ||
+    top === "episodes" ||
+    top === "lessons" ||
+    top === "favorite" ||
+    top === "sensitive" ||
+    top === "private"
+  ) {
     return top;
   }
   if (top === "threads" && parts.length >= 3) {

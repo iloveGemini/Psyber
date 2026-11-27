@@ -1,12 +1,16 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-27（落地 P0 全链路源头隐私与凭证过滤：`core/redact.ts`、`events` 入库脱敏、工具输出与附件摘要脱敏、`memory/` 写盘硬拦截及只读体检脚本 `audit:secrets`）。
+> 最后更新：2026-11-27（提交 P0 源头凭证过滤 `eafe7d7`，并落地 P1 高敏隔离区 `memory/sensitive/`、周期重要日子 `core/dates.md`、专属暗语 `core/glossary.md` 与 `threads/lists/` 规范）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、源头隐私凭证过滤（P0）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、源头凭证过滤（P0）、高敏隔离区与记忆补齐（P1）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
-- **P0 源头隐私与凭证过滤（`docs/` + `prompts/` + `server/`，2026-11-27）**：
+- **P1 高敏私密隔离区与记忆补齐（`docs/` + `prompts/` + `server/`，2026-11-27）**：
+  - 契约与提示词：更新 [docs/MEMORY.md](docs/MEMORY.md)（升级为七大目录）、[docs/spec/01-engine-tools-prompts.md](docs/spec/01-engine-tools-prompts.md) §5 与 [docs/spec/02-memory-execution.md](docs/spec/02-memory-execution.md) §1.1；升级 `prompts/main.md`（v10）、`prompts/tidy.md`（v13）与 `prompts/reflect.md`（v4），补齐 `sensitive/` 留白约定、`core/dates.md`、`core/glossary.md`、`threads/lists/` 免“双次成林”与 `workspace/` 边界。
+  - `memory/sensitive/` 物理隔离与高门槛召回：`frontmatter.ts` 与 `memory/tools.ts` 大小写归一化识别 `sensitive`/`private` 分区并支持 `excludeSpaces` 防 macOS APFS 大小写与多级 `./` 绕过；`core/config.ts` 与 `api/admin_routes.ts` 新增 `recall.sensitive` 配置（`allowExternalEmbedding=false`、`rerankThreshold=0.55`、`ftsMinScore=0.45`）；`memory/recall.ts` 默认不外发 `sensitive/` 到外部 Embedding、未配 Embedding 全卡直扫亦先经本地 FTS5 过滤绝不把未命中高敏卡标题外发给云端决策模型，统一小语料库（`<10` 卡）混合/纯向量 FTS 豁免，高门槛精排并标注 `[敏感记录·按需轻声对待]`、严禁 1 跳双链带出；`memory/radar.ts` 与 `memory/recall_eval.ts` 默认排除 `sensitive/`；`api/memory_mcp.ts` 与 `core/git.ts`（`excludePaths`）在全部对外 MCP 工具中硬屏蔽 `sensitive/`，并在 `memory_replay` 搬家步骤放行 `core/{dates,glossary}.md`。
+  - 周期日子与专属暗语：新增 `server/src/memory/dates.ts`（宽容解析 `MM-DD`/`YYYY-MM-DD` 与 `celebrate`/`gentle`/`milestone`/`deadline`，支持跨年 7 天窗口、闰日折算与周年计算）；`engine/direct.ts` 与 `api/memory_mcp.ts` 将 `core/glossary.md` 纳入常驻前缀/上下文，并每日动态抽取 `core/dates.md` 7 天内命中条目注入 `<upcoming_dates>`；新增 `server/tests/memory_p1_zones.test.ts`（4 组全离线集成用例，97 断言）。
+- **P0 源头隐私与凭证过滤（`docs/` + `prompts/` + `server/`，2026-11-27，`eafe7d7`）**：
   - 契约与提示词：更新 [docs/MEMORY.md](docs/MEMORY.md)、[docs/spec/01-engine-tools-prompts.md](docs/spec/01-engine-tools-prompts.md) §1.1/§5 与 [docs/spec/02-memory-execution.md](docs/spec/02-memory-execution.md) §1.2；升级 `prompts/main.md`（v9）与 `prompts/tidy.md`（v12）补齐软凭证（密码/密钥/验证码/证件与银行卡号）禁记条款。
   - 脱敏引擎与全链路护栏：新增 `server/src/core/redact.ts`（高置信度结构化凭证识别与幂等占位符 `[已隐藏:<类别>]`，支持带逗号/分号引号密码与通用 `*_token` 键名，规避普通聊天、哈希、分页/用量词与占位符误杀）；`store/events.ts` 在 `append`/`editLatestUserMessage`/`setAttachmentDigestState` 源头落库脱敏（覆盖正文、思考与嵌套 `metadata`）；`api/app.ts`、`engine/direct.ts` 与 `engine/sse.ts` 保留用户当轮内存明文给主对话模型但对 `recall_traces`/外部向量与决策查询/`digest` 附言、`TurnCheckpoint` 断点快照即时脱敏，并在命中脱敏的轮次结束时清除 `SseHub` 500 帧重放缓冲中的流式分片；`tools/registry.ts` 与 `api/memory_mcp.ts` 对非 Tier 1 记忆工具及对外 `memory_history` 输出即时脱敏；`memory/tools.ts` 在 `write`/`edit` 写盘前硬拦截疑似明文凭证（不静默篡改，保留第一人称改写权）；`engine/digest.ts`、`engine/tidy.ts` 与 `scripts/replay.ts` 补齐摘要禁抄、话单兜底与导入脱敏。
   - 只读体检与回归测试：新增 `server/scripts/audit_secrets.ts`（`bun run audit:secrets`，只读扫描 `memory/` 与 `events`，支持单行+多行 PEM 同文件无漏报与 `metadata` JSON 递归审计，绝不回显明文）与 `server/tests/redact.test.ts`（9 组全离线用例）。
@@ -71,12 +75,11 @@
   - 完成 `tidy.md` v7 与 `<tidy_context>`、`self.md`/`user.md` 身份简化与全仓去「住户」统一、iOS 沙盒存储适配、同步收尾换段与 `<continuity>`、日夜独立色板与无字纸纹（旧书暖纸/岸线·晨/岸线·夜）、SSE `Last-Event-ID` 500 帧环形缓冲与 `TurnCheckpoint` 断点续跑、Ring 1.5 外部 MCP 桥接与同步审批。
 
 ### 下一步
-- P1 记忆分级与缺口补齐：新增明文 Markdown 物理隔离区 `memory/sensitive/`（亲密/创伤/健康等，默认对 `memory_mcp`、外部向量与快脑雷达硬隔离，采用克制按需召回）；补齐 `core/dates.md`（周期纪念日/生日/忌日动态注入）与 `core/glossary.md`（专属暗语/内部梗）及 `threads/lists/` 清单规范。
 - 随内置 `browser`（Ring 2）一起落地安全凭证储存库（复用 `0600` `credentials.json`，域名强绑定 + 盲填工具，AI 读不到密码但能用）。
 - 按需拓展：Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI；如需全自动挂机批量搬家，可在 `memory_replay` 之上薄包一层 CLI 循环驱动脚本。
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
 
 ## 2. 验证结果
-- **`server/`（2026-11-27）**：`bun run typecheck` 零错误；`bun test`（29 文件 / 132 用例 / 1842 断言，含新增 `tests/redact.test.ts` 9 组用例）全部通过。
+- **`server/`（2026-11-27）**：`bun run typecheck` 零错误；`bun test`（30 文件 / 136 用例，含 `tests/memory_p1_zones.test.ts` 4 用例 / 97 断言）全部通过。
 - **`app/`（2026-11-26）**：本轮未改动 Flutter 客户端；宿主机终端可按需复跑 `cd app && flutter analyze && flutter test`。

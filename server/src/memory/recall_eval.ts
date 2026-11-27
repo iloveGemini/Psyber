@@ -738,6 +738,7 @@ function listRecallableRows(index: MemoryIndex, nowMs: number): CardIndexRow[] {
       r.space === "user" ||
       r.space === "core" ||
       r.space === "episode_index" ||
+      r.space === "sensitive" ||
       r.kind === "reflection"
     ) {
       return false;

@@ -8,7 +8,7 @@
 | 层级 | 载体 | 存储内容 | 修改方式 |
 | :--- | :--- | :--- | :--- |
 | **原始账本 + 派生索引** | SQLite (`psyber.sqlite`) | `events`（只追加对话、具身表达与系统事件）、`card_index`（卡片元信息缓存）、`card_embeddings`（分模型向量缓存）、`card_fts`（FTS5 全文）、`card_links`（`[[短标题]]` 与相对路径双向链接缓存）、`recall_traces`、`recall_feedback`、`task_cursors` | 系统程序确定性维护；除 `events` 与 `recall_feedback` 外，其余索引表随时可删可全量重建 |
-| **记忆卡片唯一真相** | 磁盘 Markdown (`memory/`) | 常驻成果（`core/`）、情景时间树与反思（`episodes/`）、跨天内容线（`threads/`）、有条件经验（`lessons/`）、实体档案（`entities/`）、逐字原话收藏（`favorite/`） | **仅由主 AI 通过原生 5 文件工具直接读写**，每次整理任务结束及主对话当轮即时写卡自动 `git commit` 留痕 |
+| **记忆卡片唯一真相** | 磁盘 Markdown (`memory/`) | 常驻成果（`core/`）、情景时间树与反思（`episodes/`）、跨天内容线（`threads/`）、有条件经验（`lessons/`）、实体档案（`entities/`）、逐字原话收藏（`favorite/`）、高敏私密记忆隔离区（`sensitive/`） | **仅由主 AI 通过原生 5 文件工具直接读写**，每次整理任务结束及主对话当轮即时写卡自动 `git commit` 留痕 |
 | **用户自定义系统提示词（规划）** | 配置文件 (`config.json`) | 用户显式设定的硬规则或系统偏好注入槽（独立于 `memory/`） | 由用户在设置中维护，不混入 AI 自主书写的 `memory/` 记忆库 |
 
 - **零双写漂移**：系统绝不在 SQLite 维护另一份需要强双向同步的记忆正文；只要 `memory/` 下文件被 `write`/`edit`（或用户在磁盘外部修改），按文件 `mtime/hash` 增量刷新 `card_index`、`card_fts` 与 `card_embeddings`。
@@ -17,28 +17,31 @@
 
 ## 2. 目录结构、链接引用与 `REGISTRY.yaml`
 
-### 2.1 六大职责单一目录
+### 2.1 七大职责单一目录
 
 ```text
 memory/
-├── core/                         # 常驻前缀（每次醒来无条件读，全部保持极简）
+├── core/                         # 核心档案区（前 7 项常驻前缀；dates.md 每日动态抽取未来 7 天）
 │   ├── self.md                   # 我是谁（frontmatter 含 name / pronoun）
 │   ├── user.md                   # 关于她/他（初始化写入 pronoun 与「关于她/他」标题；frontmatter 含 name / pronoun）
-│   ├── boundaries.md             # 双方处出来的相处边界（双向、可随磨合调整）
+│   ├── boundaries.md             # 双方处出来的相处边界（双向、可随磨合调整；高敏雷区只写脱敏提示+短链）
 │   ├── mirror.md                 # 极度克制的全局自我提醒（单条 ≤ 80 字 + 挂 rf- 链接）
 │   ├── open.md                   # 还开着的承诺、挂念、以及没想完的反思问号（闭环即删）
-│   └── state.md                  # 近期短期状态（每条带 [至 YYYY-MM-DD]，恢复/过期即删）
+│   ├── state.md                  # 近期短期状态（每条带 [至 YYYY-MM-DD]，恢复/过期即删）与长线指针
+│   ├── glossary.md               # 双方专属暗语、外号、内部梗与小仪式（极薄常驻 ≤ 600 字，每条一行）
+│   └── dates.md                  # 周期纪念日、生日、忌日与重大里程碑（不全文常驻；系统每日动态抽取今天+未来7天注入）
 ├── episodes/                     # 情景记忆时间分形树（合并原 daily/ 与 gist/，移除固定 week）
 │   └── 2026/
 │       ├── index.md              # 年梗概（≤ 1000 字）
 │       └── 10/
 │           ├── index.md          # 月梗概（≤ 600 字，按累计条数滚动更新、月末定稿）
 │           └── 11/               # 日期两位补零（01..31）；无互动的日子不建目录
-│               ├── index.md      # 日梗概（150–250 字，上限 300 字）
+│               ├── index.md      # 日梗概（150–250 字，上限 300 字；绝不复述 sensitive/ 细节）
 │               ├── ep-myths.md   # 情景片段（一事一卡、约 500–800 字，用链接串专卡）
 │               └── rf-rhythm.md  # 当天反思（心路历程：看了哪些片段、为何这么想）
-├── threads/                      # 跨天延续的内容线与手账（原 activities/，不常驻）
+├── threads/                      # 跨天延续的内容线与手账（原 activities/，不常驻；lists/ 豁免双次成林）
 │   ├── REGISTRY.yaml             # 内容线注册表（新建前必查重）
+│   ├── lists/                    # 个人心愿单、口味忌口与一次性作品随手记（豁免双次成林）
 │   └── bedtime-stories/
 │       └── greek-myths.md
 ├── lessons/                      # 有使用条件限制的沉淀经验（按场景触发、不衰减、不常驻）
@@ -47,8 +50,10 @@ memory/
 │   ├── REGISTRY.yaml             # 实体注册表（新建前必查重）
 │   └── projects/
 │       └── psyche.md
-└── favorite/                     # 逐字原话收藏（一事一卡，注明说话人与为什么值得留）
-    └── 2026-10-13-memory-belongs-to-you.md
+├── favorite/                     # 逐字原话收藏（一事一卡，注明说话人与为什么值得留）
+│   └── 2026-10-13-memory-belongs-to-you.md
+└── sensitive/                    # 双方共享的高敏私密记忆物理隔离区（亲密、创伤、健康病史、敏感隐痛；单层 .md，必填 when_to_recall）
+    └── health-allergies.md
 ```
 
 ### 2.2 存一份、用链接串起来 & 过程与成果分离
@@ -84,11 +89,12 @@ source: live                      # live | import
 
 | 目录 / 类型 | 衰减策略 | 消费方式 |
 | :--- | :--- | :--- |
-| `core/*` | 永不腐烂 | 常驻 `<self>` / `<user>` / `<core>` 系统前缀；`core/state.md` 注入时按 `[至 YYYY-MM-DD]` 自动过滤已过期条目，睡前整理同步清理 |
+| `core/*` | 永不腐烂 | `self`/`user`/`boundaries`/`mirror`/`open`/`state`/`glossary` 常驻系统前缀（`core/state.md` 注入时按 `[至 YYYY-MM-DD]` 自动过滤已过期条目）；`core/dates.md` 不全文常驻，每日动态筛选「今天 + 未来 7 天」注入 `<upcoming_dates>`（区分喜庆 `celebrate` / 敏感忌日 `gentle` / 里程碑 `milestone` / 一次性 `deadline`） |
 | `episodes/YYYY/**/index.md` | 永不腐烂 | 专供 `<continuity>` 时间骨架，不进入日常 FTS5/向量检索池 |
 | `episodes/YYYY/MM/DD/ep-*.md` | `slow`（默认 30d 半衰） | 参与全局检索与近 72h 闲聊补挂 |
-| `episodes/YYYY/MM/DD/rf-*.md` | 慢衰减 / 可追溯 | 参与检索，供长期复盘与追溯心路 |
-| `threads/*` · `lessons/*` · `entities/*` · `favorite/*` | 永不腐烂 | 按 `threads/REGISTRY.yaml` 触发词、链接 `read` 或语义/FTS5 检索按需浮现 |
+| `episodes/YYYY/MM/DD/rf-*.md` | 慢衰减 / 可追溯 | 不参与自动召回，供长期复盘与追溯心路 |
+| `threads/*` · `lessons/*` · `entities/*` · `favorite/*` | 永不腐烂 | 按 `threads/REGISTRY.yaml` 触发词、链接 `read` 或语义/FTS5 检索按需浮现（`threads/lists/` 豁免双次成林） |
+| `sensitive/*` | 永不腐烂 | **高敏物理隔离区**：明文 Markdown 存于本机；**对外 `memory_mcp` 全工具默认硬屏蔽（大小写与多级 `./` 规范化防绕过）**；默认不发往外部 Embedding 接口与快脑体检雷达（`recall.sensitive.allowExternalEmbedding = false`），未配 Embedding 走全卡直扫时亦先经本地 FTS5 过滤绝不把未命中高敏卡标题外发给云端决策模型；仅走本地 FTS5 命中 + 高门槛精排（默认 `0.55`）按需浮现，严禁被近 72h 闲聊补挂与 1 跳双链自动带出；召回评测默认排除 |
 
 ## 4. 原生 5 文件工具沙箱（Tier 1 常驻核心）
 

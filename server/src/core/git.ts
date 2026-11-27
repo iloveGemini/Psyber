@@ -288,7 +288,7 @@ export function validateSinceFilter(
 /** 只读查询 memory/.git 提交历史（用于 memory_history 工具回溯记忆演变） */
 export async function readMemoryGitLog(
   dataDir: string,
-  opts: { relPath?: string; limit?: number; since?: string } = {},
+  opts: { relPath?: string; excludePaths?: string[]; limit?: number; since?: string } = {},
 ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
   const memoryDir = path.join(dataDir, "memory");
   const head = await getMemoryHeadCommit(dataDir);
@@ -309,8 +309,12 @@ export async function readMemoryGitLog(
   if (opts.since) {
     args.push(`--since=${opts.since}`);
   }
-  if (opts.relPath) {
-    args.push("--", opts.relPath);
+  const excludes = (opts.excludePaths ?? []).filter((p) => p.trim().length > 0);
+  if (opts.relPath || excludes.length > 0) {
+    args.push("--", opts.relPath ?? ".");
+    for (const ex of excludes) {
+      args.push(`:(exclude)${ex}`);
+    }
   }
   const res = await runGit(memoryDir, args);
   if (res.code !== 0) {
@@ -323,7 +327,7 @@ export async function readMemoryGitLog(
 export async function readMemoryGitShow(
   dataDir: string,
   commitRef: string,
-  opts: { relPath?: string } = {},
+  opts: { relPath?: string; excludePaths?: string[] } = {},
 ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
   const memoryDir = path.join(dataDir, "memory");
   const head = await getMemoryHeadCommit(dataDir);
@@ -344,8 +348,12 @@ export async function readMemoryGitShow(
     "--format=commit %h | %ad | %s",
     commitRef,
   ];
-  if (opts.relPath) {
-    args.push("--", opts.relPath);
+  const excludes = (opts.excludePaths ?? []).filter((p) => p.trim().length > 0);
+  if (opts.relPath || excludes.length > 0) {
+    args.push("--", opts.relPath ?? ".");
+    for (const ex of excludes) {
+      args.push(`:(exclude)${ex}`);
+    }
   }
   const res = await runGit(memoryDir, args);
   if (res.code !== 0) {

@@ -30,7 +30,9 @@
    - `realpath` 逃逸检测：落盘路径（若目标尚不存在则取最近已存在祖先目录）经 `realpath` 解析符号链接后，必须严格位于 `<dataDir>/memory/` 之内。**本检查只针对解析后的用户目标路径**；工具内部的原子写暂存路径 `<dataDir>/.tmp/<uuid>.tmp` 是固定内部路径、不接受用户输入，不参与本检查（最终 `rename` 落盘目标仍受本检查约束）。
 3. **目录白名单约束（映射到 `<dataDir>/memory/<relPath>`）**：
    - `grep` 的 `path` 可为文件或子目录前缀；
-   - 写操作（`write` / `edit`）额外受顶级路径、二级结构与扩展名白名单约束：仅允许 `self.md`、`user.md`、`shelf/rules.md`、`shelf/mirror.md`、`shelf/threads.md`、`activities/REGISTRY.yaml`、`entities/REGISTRY.yaml`，或位于 `daily/`、`favorite/` 下的单层 `.md` 文件，或位于 `gist/(days|weeks|months|years)/` 下的 `.md` 文件（严格匹配 `/^gist\/(days|weeks|months|years)\/[a-zA-Z0-9_-]+\.md$/`），或位于 `activities/<slug>/`、`entities/<category>/` 下的 `.md` 文件（拒绝在 `shelf/` 下新建非固定文件名以防既不进 Static Prefix 又不进召回的黑洞文件，拒绝无 `.md` 后缀的路径如 `daily/note` 或直接写在 `activities/foo.md`、`entities/foo.md` 的单层孤儿路径）。
+   - 写操作（`write` / `edit`）额外受顶级路径、二级结构与扩展名白名单约束：仅允许 `core/{self,user,boundaries,mirror,open,state,glossary,dates}.md`、`threads/REGISTRY.yaml`、`entities/REGISTRY.yaml`，或位于 `favorite/`、`lessons/`、`sensitive/` 下的单层 `.md` 文件，或 `episodes/YYYY[/MM[/DD]]/{index,ep-*,rf-*}.md`，或 `threads/<slug>/*.md`、`entities/<category>/*.md`（拒绝在 `core/` 下新建非固定文件名，拒绝无 `.md` 后缀的路径或直接写在 `threads/foo.md`、`entities/foo.md` 的单层孤儿路径）。
+   - **高敏私密隔离区（`sensitive/`）规则**：原生 5 工具允许 Psyber 在本机正常读写 `sensitive/*.md`；但对外 `memory_mcp` 全工具（`memory_search`/`memory_glob`/`memory_grep`/`memory_read`/`memory_write`/`memory_edit`/`memory_history`）默认物理硬屏蔽 `sensitive/`（路径经 `normalizeRelPath` + 大小写归一化，杜绝 macOS 大小写不敏感磁盘绕过）；召回层默认关闭外部 Embedding（`recall.sensitive.allowExternalEmbedding = false`，改走本地 FTS5 命中 + 高门槛精排 `0.55`，未配 Embedding 的全卡直扫同样先经本地 FTS5 过滤再拼入 `<memory_catalog>`，绝不把未命中高敏卡标题外发给云端决策模型），严禁 `daily_recent` 补挂与 `linked_hop` 1 跳自动带出；快脑体检雷达与召回评测默认排除 `sensitive/`。
+   - **周期重要日子（`core/dates.md`）动态注入**：不全文常驻 Static Prefix，由 `server/src/memory/dates.ts` 按当日日期筛选「今天 + 未来 7 天」命中条目（支持 `MM-DD` 每年循环、`YYYY-MM-DD` 周年/一次性日程与 `celebrate`/`gentle`/`milestone`/`deadline` 分类）注入 Dynamic Tail `<upcoming_dates>`。
 4. **`glob` 模式防线（`resolveGlobPattern`）**：同样拦截绝对路径、`..`、`\0`、`.git` 与 `private/`，所有通配符均仅扫描 `<dataDir>/memory/`。
 
 ### 1.2 5 工具精确行为与自救报错契约

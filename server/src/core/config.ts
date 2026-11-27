@@ -48,6 +48,15 @@ export interface RecallMultiHopConfig {
   timeoutMs?: number;
 }
 
+export interface RecallSensitiveConfig {
+  /** 是否允许将 memory/sensitive/ 高敏卡片正文发往外部 Embedding 接口（默认 false：仅走本地 FTS5 关键词 + when_to_recall 按需触发；若部署纯本地向量模型可开启） */
+  allowExternalEmbedding: boolean;
+  /** 高敏卡片通过 Decision / Reranker 精排的最低相关性门槛（0..1，默认 0.55，显著高于普通卡 0.30 以防闲聊撞词误揭私事） */
+  rerankThreshold: number;
+  /** 高敏卡片进入本地 FTS5 候选或降级放行的最低归一化分门槛（0..1，默认 0.45，高于普通卡 0.25） */
+  ftsMinScore: number;
+}
+
 export interface RecallConfig {
   /** 单轮注入记忆卡片的字符总预算（单位：字符，默认 3200；调大可塞入更多历史细节但增加单轮上下文开销，调小更精简但可能截断长卡） */
   charBudget: number;
@@ -79,6 +88,8 @@ export interface RecallConfig {
   rerankTimeoutMs?: number;
   /** 基于 [[短标题]] 与 Markdown 双链的 1 跳扩展及证据充分性早停配置 */
   multiHop?: RecallMultiHopConfig;
+  /** 高敏私密记忆区（memory/sensitive/）的外部向量隔离与高门槛召回策略 */
+  sensitive?: RecallSensitiveConfig;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallConfig = {
@@ -105,6 +116,11 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
     maxNeighbors: 6,
     sufficientThreshold: 0.75,
     timeoutMs: 2500,
+  },
+  sensitive: {
+    allowExternalEmbedding: false,
+    rerankThreshold: 0.55,
+    ftsMinScore: 0.45,
   },
 };
 
@@ -143,6 +159,8 @@ export function mergeRecallConfig(
   const pRerank = isPlainRecord(p?.rerank) ? p!.rerank : undefined;
   const bHop = isPlainRecord(b?.multiHop) ? b!.multiHop : undefined;
   const pHop = isPlainRecord(p?.multiHop) ? p!.multiHop : undefined;
+  const bSens = isPlainRecord(b?.sensitive) ? b!.sensitive : undefined;
+  const pSens = isPlainRecord(p?.sensitive) ? p!.sensitive : undefined;
   const neighborThreshold = pickOptFinite(
     bHop?.neighborThreshold,
     pHop?.neighborThreshold,
@@ -211,6 +229,23 @@ export function mergeRecallConfig(
       ),
       ...(neighborThreshold !== undefined ? { neighborThreshold } : {}),
       timeoutMs: pickFinite(bHop?.timeoutMs, pHop?.timeoutMs, DEFAULT_RECALL_CONFIG.multiHop!.timeoutMs!),
+    },
+    sensitive: {
+      allowExternalEmbedding: pickBool(
+        bSens?.allowExternalEmbedding,
+        pSens?.allowExternalEmbedding,
+        DEFAULT_RECALL_CONFIG.sensitive!.allowExternalEmbedding,
+      ),
+      rerankThreshold: pickFinite(
+        bSens?.rerankThreshold,
+        pSens?.rerankThreshold,
+        DEFAULT_RECALL_CONFIG.sensitive!.rerankThreshold,
+      ),
+      ftsMinScore: pickFinite(
+        bSens?.ftsMinScore,
+        pSens?.ftsMinScore,
+        DEFAULT_RECALL_CONFIG.sensitive!.ftsMinScore,
+      ),
     },
   };
 }

@@ -8,6 +8,7 @@ import { detectSecrets, formatMemorySecretBlockError } from "../core/redact.ts";
 import {
   VALID_CARD_STATUSES,
   effectiveStatus,
+  inferSpace,
   parseCardMarkdown,
   type CardStatus,
 } from "./frontmatter.ts";
@@ -33,11 +34,13 @@ const FIXED_WRITABLE_FILES = new Set([
   "core/mirror.md",
   "core/open.md",
   "core/state.md",
+  "core/glossary.md",
+  "core/dates.md",
   "threads/REGISTRY.yaml",
   "entities/REGISTRY.yaml",
 ]);
 
-const SINGLE_LAYER_MD_DIRS = new Set(["favorite", "lessons"]);
+const SINGLE_LAYER_MD_DIRS = new Set(["favorite", "lessons", "sensitive"]);
 const EPISODE_INDEX_PATH_RE = /^episodes\/\d{4}(?:\/\d{2}(?:\/\d{2})?)?\/index\.md$/;
 const EPISODE_CARD_PATH_RE = /^episodes\/\d{4}\/\d{2}\/\d{2}\/(?:ep|rf)-[a-zA-Z0-9][a-zA-Z0-9_-]*\.md$/;
 const LIVING_DIR_PATH_RE = /^(threads|entities)\/[a-z0-9][a-z0-9_-]{0,31}\/[^/]+\.md$/;
@@ -64,7 +67,8 @@ export function normalizeRelPath(rawPath: string): { ok: true; rel: string } | {
     }
   }
   const rel = segments.join("/");
-  if (rel === "private" || rel.startsWith("private/")) {
+  const lowerRel = rel.toLowerCase();
+  if (lowerRel === "private" || lowerRel.startsWith("private/")) {
     return { ok: false, error: "常规 5 工具仅操作 memory/，私密抽屉请通过独立抽屉工具访问" };
   }
   return { ok: true, rel };
@@ -310,7 +314,7 @@ export class MemoryTools {
     if (!rel || !isAllowedWritePath(rel)) {
       return {
         ok: false,
-        output: `不允许${actionLabel}路径 "${rawPath}"（仅允许 core/{self,user,boundaries,mirror,open,state}.md、REGISTRY.yaml、episodes/YYYY[/MM[/DD]]/{index,ep-*,rf-*}.md 或 threads/lessons/entities/favorite 下的合规 .md 文件）`,
+        output: `不允许${actionLabel}路径 "${rawPath}"（仅允许 core/{self,user,boundaries,mirror,open,state,glossary,dates}.md、REGISTRY.yaml、episodes/YYYY[/MM[/DD]]/{index,ep-*,rf-*}.md 或 threads/lessons/entities/favorite/sensitive 下的合规 .md 文件）`,
       };
     }
     const abs = path.join(this.memoryDir, rel);
@@ -320,7 +324,10 @@ export class MemoryTools {
     return { ok: true, rel, abs };
   }
 
-  async glob(pattern: string): Promise<ToolResult> {
+  async glob(
+    pattern: string,
+    opts?: { excludeSpaces?: ReadonlySet<string> },
+  ): Promise<ToolResult> {
     const norm = normalizeRelPath(pattern);
     if (!norm.ok) return { ok: false, output: norm.error };
     if (!norm.rel) return { ok: false, output: "pattern 不能为空，例如 episodes/**/*.md" };
@@ -328,9 +335,11 @@ export class MemoryTools {
     const re = globToRegex(norm.rel);
     const nowMs = this.clock.now();
     const rows = this.index.listAllRows();
+    const excludeSpaces = opts?.excludeSpaces;
     const matchedLines: string[] = [];
 
     for (const row of rows) {
+      if (excludeSpaces && excludeSpaces.has(row.space)) continue;
       if (re.test(row.path)) {
         const st = effectiveStatus(row, nowMs);
         matchedLines.push(`${row.path} [status=${st} | ${vagueWhen(row.updated_at, nowMs, this.clock.timeZone)}]`);
@@ -357,7 +366,12 @@ export class MemoryTools {
     return { ok: true, output: capped.join("\n") + suffix };
   }
 
-  async grep(pattern: string, subPath?: string, includeArchived = false): Promise<ToolResult> {
+  async grep(
+    pattern: string,
+    subPath?: string,
+    includeArchived = false,
+    opts?: { excludeSpaces?: ReadonlySet<string> },
+  ): Promise<ToolResult> {
     if (!pattern) return { ok: false, output: "检索 pattern 不能为空" };
     let prefix = "";
     if (subPath && subPath.trim()) {
@@ -378,9 +392,11 @@ export class MemoryTools {
 
     const nowMs = this.clock.now();
     const rows = this.index.listAllRows();
+    const excludeSpaces = opts?.excludeSpaces;
     const candidatePaths: string[] = [];
 
     for (const row of rows) {
+      if (excludeSpaces && excludeSpaces.has(row.space)) continue;
       if (prefix && row.path !== prefix && !row.path.startsWith(prefix + "/")) continue;
       const st = effectiveStatus(row, nowMs);
       if (!includeArchived && (st === "resolved" || st === "archived")) continue;
@@ -425,6 +441,7 @@ export class MemoryTools {
   /** 支持按 [[短标题]] 或纯标题解析到 memory/ 相对路径（先精确匹配，再唯一子串匹配） */
   private resolveTitleToPath(
     rawTitle: string,
+    excludeSpaces?: ReadonlySet<string>,
   ): { kind: "exact"; path: string } | { kind: "ambiguous"; candidates: Array<{ path: string; title: string }> } | { kind: "none" } {
     const cleaned = rawTitle
       .trim()
@@ -434,7 +451,9 @@ export class MemoryTools {
       .replace(/\s+/g, " ")
       .toLowerCase();
     if (!cleaned) return { kind: "none" };
-    const rows = this.index.listAllRows();
+    const rows = this.index
+      .listAllRows()
+      .filter((r) => !(excludeSpaces && excludeSpaces.has(r.space)));
 
     const exact = rows.filter(
       (r) => r.title.trim().replace(/\s+/g, " ").toLowerCase() === cleaned,
@@ -462,18 +481,19 @@ export class MemoryTools {
 
   async read(
     rawPath: string,
-    opts: { offset?: number; limit?: number; countAccess?: boolean } = {},
+    opts: { offset?: number; limit?: number; countAccess?: boolean; excludeSpaces?: ReadonlySet<string> } = {},
   ): Promise<ToolResult> {
     const trimmedInput = rawPath.trim();
     const isWikilink = /^\[\[.+\]\]$/.test(trimmedInput);
     const norm = isWikilink ? null : normalizeRelPath(trimmedInput);
     if (norm && !norm.ok) return { ok: false, output: norm.error };
+    const excludeSpaces = opts.excludeSpaces;
 
     let resolvedRel = norm?.rel ?? "";
     let resolvedViaTitle = false;
 
     const tryResolveByTitle = (): ToolResult | null => {
-      const matched = this.resolveTitleToPath(trimmedInput);
+      const matched = this.resolveTitleToPath(trimmedInput, excludeSpaces);
       if (matched.kind === "exact") {
         resolvedRel = matched.path;
         resolvedViaTitle = true;
@@ -499,6 +519,10 @@ export class MemoryTools {
       return { ok: false, output: "read 需要提供相对路径或 [[短标题]]" };
     }
 
+    if (excludeSpaces && excludeSpaces.has(inferSpace(resolvedRel).toLowerCase())) {
+      return { ok: false, output: `当前访问权限禁止读取受保护记忆分区：${resolvedRel}` };
+    }
+
     let abs = path.join(this.memoryDir, resolvedRel);
     if (!(await assertInsideMemoryRoot(this.memoryDir, abs))) {
       return { ok: false, output: `路径逃逸拦截: ${rawPath}` };
@@ -512,6 +536,9 @@ export class MemoryTools {
         const ambigErr = tryResolveByTitle();
         if (ambigErr) return ambigErr;
         if (resolvedViaTitle) {
+          if (excludeSpaces && excludeSpaces.has(inferSpace(resolvedRel).toLowerCase())) {
+            return { ok: false, output: `当前访问权限禁止读取受保护记忆分区：${resolvedRel}` };
+          }
           abs = path.join(this.memoryDir, resolvedRel);
           if (!(await assertInsideMemoryRoot(this.memoryDir, abs))) {
             return { ok: false, output: `路径逃逸拦截: ${rawPath}` };
@@ -520,6 +547,7 @@ export class MemoryTools {
         } else {
           const suggestions = this.index
             .listAllRows()
+            .filter((r) => !(excludeSpaces && excludeSpaces.has(r.space)))
             .map((r) => r.path)
             .filter((p) => p.includes(path.basename(resolvedRel, ".md")))
             .slice(0, 3);
@@ -529,6 +557,7 @@ export class MemoryTools {
       } else {
         const suggestions = this.index
           .listAllRows()
+          .filter((r) => !(excludeSpaces && excludeSpaces.has(r.space)))
           .map((r) => r.path)
           .filter((p) => p.includes(path.basename(resolvedRel, ".md")) || p.startsWith(resolvedRel.split("/")[0]))
           .slice(0, 3);

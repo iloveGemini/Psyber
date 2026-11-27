@@ -222,7 +222,7 @@ export function episodeDateFromPath(relPath: string): string | null {
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
-/** 判断卡片索引行是否满足只读体检雷达的候选条件（排除常驻 core/self/user、日/月/年梗概、私密抽屉、反思卡及已失效状态） */
+/** 判断卡片索引行是否满足只读体检雷达的候选条件（排除常驻 core/self/user、日/月/年梗概、私密抽屉、高敏隔离区 sensitive/、反思卡及已失效状态） */
 export function isEligibleRadarRow(row: CardIndexRow, nowMs: number): boolean {
   if (
     row.space === "self" ||
@@ -230,6 +230,7 @@ export function isEligibleRadarRow(row: CardIndexRow, nowMs: number): boolean {
     row.space === "core" ||
     row.space === "episode_index" ||
     row.space === "private" ||
+    row.space === "sensitive" ||
     row.kind === "reflection"
   ) {
     return false;

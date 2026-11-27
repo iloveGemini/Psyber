@@ -415,9 +415,9 @@ export interface RegisteredTool {
 
 | 文件 | 版本 | 内容 | 载入位置 |
 | :--- | :--- | :--- | :--- |
-| `prompts/main.md` | v9 | 主对话 Static System Prompt（含不记明文凭证规则） | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
-| `prompts/tidy.md` | v12 | 静默整理轮（含目录分工、路径/Frontmatter 规范、不记明文凭证护栏、`<memory_radar>` 线索核实与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
-| `prompts/reflect.md` | v3 | 每日睡前合流反思与周日独立反思（含 `<memory_radar>` 线索核实与 `rf-*.md`/四区沉淀） | memory_task 反思轮（或合流进 `bedtime` Step 2） |
+| `prompts/main.md` | v10 | 主对话 Static System Prompt（含不记明文凭证、`sensitive/`、`core/dates.md`、`core/glossary.md` 与 `workspace/` 分工） | Static Prefix 第二项（紧随置顶 `<self>` 之后） |
+| `prompts/tidy.md` | v13 | 静默整理轮（含目录分工、`sensitive/` 隔离、`core/{dates,glossary}.md`、`threads/lists/` 豁免、不记明文凭证护栏、`<memory_radar>` 线索核实与 3 类任务块） | memory_task 写作轮（紧随 `<self>`/`<user>` 之后） |
+| `prompts/reflect.md` | v4 | 每日睡前合流反思与周日独立反思（含 `<memory_radar>` 线索核实与 `rf-*.md`/四区及 `glossary`/`dates`/`sensitive` 沉淀） | memory_task 反思轮（或合流进 `bedtime` Step 2） |
 | `prompts/review.md` | v3 | C2.7 写后独立复核轮（Ring 1.5 可选非阻塞） | memory_task 复核轮（无历史只读，Ring 1 不调用） |
 | `prompts/revision.md` | v3 | C2.7 Psyber 复核修订轮（Ring 1.5 可选） | memory_task 修订轮（延续写作轮会话，Ring 1 不调用） |
 | `prompts/genesis.md` | v5 | 创世中性开局 | Dynamic Tail（`self.md` `name` 为空时拼入） |

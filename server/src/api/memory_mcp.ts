@@ -26,6 +26,7 @@ import { redactSecrets } from "../core/redact.ts";
 import type { McpReplayRunner } from "../engine/replay_runner.ts";
 import { cosineSimilarity, ensureCardEmbeddings } from "../memory/embeddings.ts";
 import { effectiveStatus, filterActiveStateMarkdown } from "../memory/frontmatter.ts";
+import { renderUpcomingDatesBlock } from "../memory/dates.ts";
 import { buildContinuityBlock } from "../memory/gist.ts";
 import type { CardIndexRow, MemoryIndex } from "../memory/index.ts";
 import { normalizeRelPath, type MemoryTools, type ToolResult } from "../memory/tools.ts";
@@ -338,6 +339,18 @@ function isOriginAllowed(req: Request, allowedOrigins?: string[]): boolean {
  * - 四道防线：enabled 开关 -> 回环 IP 守卫 -> Origin 防跨站 -> 专属 Bearer Token（SHA-256 常量时间比对）
  * - 零新增外部依赖，严禁暴露 private/ 上锁抽屉或直接裸露 events 原始聊天流水。
  */
+const MCP_EXCLUDED_SPACES = new Set(["sensitive"]);
+
+/** 规范化并大小写无关地识别 sensitive/ 路径，防止 macOS APFS 大小写不敏感或 ././sensitive/ 绕过 */
+function isSensitiveRelPath(raw: string): boolean {
+  const norm = normalizeRelPath(raw);
+  const candidate = norm.ok
+    ? norm.rel
+    : raw.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  const lower = candidate.toLowerCase();
+  return lower === "sensitive" || lower.startsWith("sensitive/");
+}
+
 export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): void {
   const sessions = new Map<string, { tokenId: string; createdAt: number }>();
   const lastTouchPersistedAt = new Map<string, number>();
@@ -357,6 +370,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       { rel: "core/mirror.md", label: "全局自省 (core/mirror.md)" },
       { rel: "core/open.md", label: "未完挂念 (core/open.md)" },
       { rel: "core/state.md", label: "近期状态 (core/state.md)" },
+      { rel: "core/glossary.md", label: "专属暗语 (core/glossary.md)" },
     ];
 
     const sections: string[] = [];
@@ -373,6 +387,16 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       } catch {
         // 文件缺失时跳过
       }
+    }
+
+    try {
+      const rawDates = await fs.readFile(path.join(memoryDir, "core/dates.md"), "utf8");
+      const upcoming = renderUpcomingDatesBlock(rawDates, today, 7);
+      if (upcoming) {
+        sections.push(upcoming);
+      }
+    } catch {
+      // core/dates.md 尚未创建时跳过
     }
 
     if (includeContinuity) {
@@ -418,7 +442,8 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
         r.space === "self" ||
         r.space === "user" ||
         r.space === "core" ||
-        r.space === "episode_index"
+        r.space === "episode_index" ||
+        r.space === "sensitive"
       ) {
         continue;
       }
@@ -515,10 +540,12 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
 
     if (includeLinks) {
       const anchorPaths = top.map((t) => t.row.path);
-      const neighbors = deps.memoryIndex.findLinkedNeighbors(anchorPaths, {
-        excludePaths: new Set(anchorPaths),
-        maxResults: 6,
-      });
+      const neighbors = deps.memoryIndex
+        .findLinkedNeighbors(anchorPaths, {
+          excludePaths: new Set(anchorPaths),
+          maxResults: 6,
+        })
+        .filter((nb) => nb.row.space !== "sensitive");
       if (neighbors.length > 0) {
         const linkLines = neighbors.map((nb) => {
           const dir = nb.direction === "out" ? "引用自" : "反向关联";
@@ -541,6 +568,9 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     }
     const pathCheck = normalizeMemoryHistoryPath(args.path);
     if (!pathCheck.ok) return { ok: false, output: pathCheck.reason };
+    if (pathCheck.relPath && isSensitiveRelPath(pathCheck.relPath)) {
+      return { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/）。" };
+    }
     const maxChars = clampInt(args.maxChars, 500, Math.min(20_000, maxOutputChars), Math.min(8_000, maxOutputChars));
 
     if (action === "show") {
@@ -548,6 +578,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
       if (!commitCheck.ok) return { ok: false, output: commitCheck.reason };
       const res = await readMemoryGitShow(deps.dataDir, commitCheck.commit, {
         relPath: pathCheck.relPath,
+        excludePaths: ["sensitive"],
       });
       if (!res.ok) return { ok: false, output: res.error };
       if (!res.stdout) {
@@ -566,6 +597,7 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     const limit = clampInt(args.limit, 1, 50, 10);
     const res = await readMemoryGitLog(deps.dataDir, {
       relPath: pathCheck.relPath,
+      excludePaths: ["sensitive"],
       limit,
       since: sinceCheck.since,
     });
@@ -591,6 +623,9 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     const norm = normalizeRelPath(rawPath);
     if (!norm.ok) return { ok: false, output: norm.error };
     if (!norm.rel) return { ok: false, output: "path 不能为空。" };
+    if (isSensitiveRelPath(norm.rel)) {
+      return { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/），禁止读写。" };
+    }
 
     return deps.gitMutex.runExclusive(async () => {
       // 在 gitMutex 内读取 activeStep 并校验权限，避免与并发 memory_replay(next/abort) 产生竞态
@@ -599,6 +634,8 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
         const allowedReplayCore =
           activeStep !== null &&
           (norm.rel === "core/state.md" ||
+            norm.rel === "core/dates.md" ||
+            norm.rel === "core/glossary.md" ||
             (activeStep.phase === "reflect_weekly" && norm.rel === "core/open.md"));
         if (!allowedReplayCore) {
           return {
@@ -800,24 +837,46 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
           case "memory_search":
             toolRes = await runSearch(args, ctx.maxOutputChars);
             break;
-          case "memory_glob":
-            toolRes = await deps.memoryTools.glob(String(args.pattern ?? ""));
+          case "memory_glob": {
+            const pattern = String(args.pattern ?? "");
+            if (isSensitiveRelPath(pattern)) {
+              toolRes = { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/）。" };
+            } else {
+              toolRes = await deps.memoryTools.glob(pattern, {
+                excludeSpaces: MCP_EXCLUDED_SPACES,
+              });
+            }
             break;
-          case "memory_grep":
-            toolRes = await deps.memoryTools.grep(
-              String(args.pattern ?? ""),
-              typeof args.path === "string" ? args.path : undefined,
-              Boolean(args.include_archived),
-            );
+          }
+          case "memory_grep": {
+            const subPath = typeof args.path === "string" ? args.path : undefined;
+            if (subPath && isSensitiveRelPath(subPath)) {
+              toolRes = { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/）。" };
+            } else {
+              toolRes = await deps.memoryTools.grep(
+                String(args.pattern ?? ""),
+                subPath,
+                Boolean(args.include_archived),
+                { excludeSpaces: MCP_EXCLUDED_SPACES },
+              );
+            }
             break;
-          case "memory_read":
-            toolRes = await deps.memoryTools.read(String(args.path ?? ""), {
-              offset: typeof args.offset === "number" ? args.offset : undefined,
-              limit: typeof args.limit === "number" ? args.limit : undefined,
-              // 外部 MCP 检索/阅读不污染 Psyber 内部卡片访问热度
-              countAccess: false,
-            });
+          }
+          case "memory_read": {
+            const targetPath = String(args.path ?? "");
+            if (isSensitiveRelPath(targetPath)) {
+              toolRes = { ok: false, output: "对外记忆 MCP 默认屏蔽高敏私密区（sensitive/）。" };
+            } else {
+              toolRes = await deps.memoryTools.read(targetPath, {
+                offset: typeof args.offset === "number" ? args.offset : undefined,
+                limit: typeof args.limit === "number" ? args.limit : undefined,
+                // 外部 MCP 检索/阅读不污染 Psyber 内部卡片访问热度，且严禁暴露 sensitive/
+                countAccess: false,
+                excludeSpaces: MCP_EXCLUDED_SPACES,
+              });
+            }
             break;
+          }
           case "memory_history":
             toolRes = await runHistory(args, ctx.maxOutputChars);
             break;

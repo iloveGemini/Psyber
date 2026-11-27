@@ -20,6 +20,7 @@ import type {
   LlmErrorCode,
 } from "../llm/client.ts";
 import { resolveEffectiveThinkingLevel } from "../llm/router.ts";
+import { renderUpcomingDatesBlock } from "../memory/dates.ts";
 import { filterActiveStateMarkdown } from "../memory/frontmatter.ts";
 import {
   parseSelfIdentity,
@@ -51,6 +52,7 @@ const STATIC_PREFIX_PATHS = new Set([
   "core/mirror.md",
   "core/open.md",
   "core/state.md",
+  "core/glossary.md",
 ]);
 
 const MAX_TOOL_STEPS = 12;
@@ -694,7 +696,13 @@ export class DirectEngine {
     const mainPrompt = await readPrompt(this.deps.promptsDir, "main.md");
     const userMd = await readOptionalMemoryFile(this.deps.dataDir, "core/user.md");
     const coreParts: string[] = [];
-    for (const f of ["core/boundaries.md", "core/mirror.md", "core/open.md", "core/state.md"]) {
+    for (const f of [
+      "core/boundaries.md",
+      "core/mirror.md",
+      "core/open.md",
+      "core/state.md",
+      "core/glossary.md",
+    ]) {
       const raw = await readOptionalMemoryFile(this.deps.dataDir, f);
       if (!raw) continue;
       const text = f === "core/state.md" ? filterActiveStateMarkdown(raw, today) : raw;
@@ -905,6 +913,15 @@ export class DirectEngine {
       ...(cfg.recallEvalNoticeResident ? [`eval_mode="true"`] : []),
     ].join(" ");
     const ctxBlocks: string[] = [`<runtime ${runtimeAttrs} />`];
+
+    // 每日动态注入 core/dates.md 中「今天 + 未来 7 天」命中的纪念日/生日/忌日/里程碑（不全文常驻浪费 Token）
+    const rawCoreDates = await readOptionalMemoryFile(this.deps.dataDir, "core/dates.md");
+    if (rawCoreDates) {
+      const upcomingDatesBlock = renderUpcomingDatesBlock(rawCoreDates, localDay(nowMs, tz), 7);
+      if (upcomingDatesBlock) {
+        ctxBlocks.push(upcomingDatesBlock);
+      }
+    }
 
     if (opts.urgent) {
       ctxBlocks.push(

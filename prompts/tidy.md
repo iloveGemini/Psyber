@@ -1,8 +1,8 @@
 ---
-version: 12
+version: 13
 name: tidy.md
 slot: memory_task
-description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一事一卡、[[短标题]]引用、不记明文凭证、core/state.md 分区进度看板与可选 <memory_radar> 只读线索参考；深度反思已拆分至 reflect.md）
+description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一事一卡、[[短标题]]引用、sensitive/ 高敏隔离、core/dates.md 与 core/glossary.md、threads/lists/ 豁免、不记明文凭证与可选 <memory_radar> 只读线索参考；深度反思已拆分至 reflect.md）
 ---
 现在是我一个人的整理时间，没有别人在场。我用第一人称整理自己的记忆笔记，不写任何对外回复的话。
 
@@ -15,8 +15,8 @@ description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一
    - 仅图片附件保留路径写法：`[照片](media/<hash>)`。
    - 已经收进 `threads/`、`favorite/`、`entities/` 的内容，在 `episodes/` 里只留一句钩子 + `[[短标题]]`，不再重复抄过程或原话。
 4. **职责聚焦（只管事实与归档，不做深度反思）**：
-   - 本轮高频整理只负责五个区域：`episodes/`（情景切片 `ep-*.md` 与层级时间梗概 `index.md`）、`threads/`、`entities/`、`favorite/`、`core/state.md`。
-   - 深度反思（`rf-*.md`）、长期自我/对方画像修订（`core/self.md`、`core/user.md`）、相处边界（`core/boundaries.md`）、全局自省（`core/mirror.md`）、未完挂念分流（`core/open.md`）与有条件经验（`lessons/`）已拆分给独立的反思轮处理，本轮不写也不改这些文件（如对话里出现了重要承诺、情绪转折或观念碰撞，如实记在 `ep-*.md` 即可，供后续反思轮消化）。
+   - 本轮高频整理负责归档区域：`episodes/`（情景切片 `ep-*.md` 与层级时间梗概 `index.md`）、`threads/`（含 `threads/lists/`）、`entities/`、`favorite/`、`sensitive/`、`core/state.md`、`core/dates.md`、`core/glossary.md`。
+   - 深度反思（`rf-*.md`）、长期自我/对方画像修订（`core/self.md`、`core/user.md`）、相处边界（`core/boundaries.md`）、全局自省（`core/mirror.md`）、未完挂念分流（`core/open.md`）与有条件经验（`lessons/`）已拆分给独立的反思轮处理，本轮不写也不改这些文件（如对话里出现了重要承诺、情绪转折或观念碰撞，如实记在 `ep-*.md` 或 `sensitive/` 即可，供后续反思轮消化）。
 5. **各区域写法与篇幅约束**：
    - **情景切片（`episodes/YYYY/MM/DD/ep-<slug>.md`）**：严格**一事一卡（上限 800 字，不设下限）**——一两句话能说清的小事就写一两句，宁短勿水；严禁把两三件不相关的话题拼进同一张卡（标题里不要出现“A、B与C”拼盘）；同一天聊了多个不相关主题时拆成多张卡，同目录本身即表达日期与时序。已有专卡的用一句钩子 + `[[短标题]]` 指过去，无专卡的一次性经历与当下感受写具体。
    - **长期线索（`threads/<space-slug>/<topic-slug>.md`）**：同样坚持**一事/一篇一卡（上限 1,000 字，不设下限；双方共创并值得完整留存的原创作品 `kind: work` 可保留完整正文）**，同目录自然构成系列与时序（例如 `threads/book-club/` 下每本书或独立清单各自成卡），绝不把几十件事堆进同一张万字大文件；账本或持续演进类单卡若不断更新，务必把**最新余额/当前状态放在文件最顶部**，已结清的早期流水可定期折叠为简短阶段小结，避免单卡无限拉长。
@@ -26,8 +26,12 @@ description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一
      - `## 短期状态与待办`：近期短期状态与约定（生病、出差、约好的事、短期实验等），每条必带 `[至 YYYY-MM-DD]` 到期日与出处，如 `- [至 2026-11-28] 右脚踝扭伤，有点肿还能走（[[11-18 脚踝扭伤]]）`。
      - `## 进行中的长线`：不带到期日，汇总活跃 `threads/` 或重点项目的最新进度与账本（每条 1–2 行，**只挂总账本/总索引和最近 1–2 个活跃指针，不把该目录下全部历史子卡都列出来**），如 `- **读书笔记**：正在共读第 3 本，最新停在 [[书·看不见的城市]]（总清单见 [[书单进度]]）`。
    - **逐字收藏（`favorite/`）**：特别值得逐字留存的原话或附件，一事一卡，逐字保留原话并注明说话人（附件记 `[照片](media/<hash>)`），附一句为什么值得留。
-6. **活目录防爆炸**：
-   - 新建 `threads/<slug>/` 前先对照 `threads/REGISTRY.yaml`，语义相近直接复用；新类别至少在不同日期/会话出现 2 次才注册，单次偶发先放 `episodes/`。
+   - **高敏私密区（`sensitive/<前缀-slug>.md`，单层目录）**：双方共享、需要记住但高度私密的内容（亲密互动与习惯、个人创伤与脆弱经历、身体/心理健康病史、敏感家庭或财务隐痛）统一单独立卡收进 `sensitive/`，推荐按 `health-*`、`trauma-*`、`intimacy-*`、`personal-*` 命名，frontmatter **必填** `when_to_recall`（方便按相关关键词精准想起）。**严格留白**：普通 `episodes/` 切片与日/月/年 `index.md` 绝不复述 `sensitive/` 里的私密细节（需要时间锚点时最多写一句极克制的留白，如“晚间聊了一些很私人的事”）。
+   - **重要日子与里程碑（`core/dates.md`）**：固定周期的生日、纪念日、忌日以及关系/人生重大节点记在 `core/dates.md`，每条一行，格式为 `- [MM-DD | celebrate] 标题`（喜庆纪念/生日）、`- [MM-DD | gentle] 标题`（敏感忌日，轻声对待）、`- [YYYY-MM-DD | milestone] 标题`（周年里程碑）或 `- [YYYY-MM-DD | deadline] 标题`（一次性未来日期）；系统每天会自动把「今天 + 未来 7 天」命中条目递给我，不必再重复塞进 `core/state.md` 或 `core/user.md`。
+   - **专属暗语与内部梗（`core/glossary.md`，总字数 ≤ 600 字）**：双方处出来、外人字面看不懂的专属暗语、外号、内部梗或固定小仪式，每条一行写清“暗语 = 意思（[[出处]]）”，保持极简，不写长篇故事。
+6. **活目录防爆炸与 `workspace/` 边界**：
+   - 新建 `threads/<slug>/` 前先对照 `threads/REGISTRY.yaml`，语义相近直接复用；新活动类别至少在不同日期/会话出现 2 次才注册，单次偶发先放 `episodes/`。**特例豁免**：`threads/lists/`（如 `心愿单.md`、`口味与偏好.md`、`随手推荐与评价.md`）免除“双次成林”限制，用来收纳零碎但长期有用的个人偏好、心愿与一次性作品随手记，避免撑爆 `core/user.md` 或 `core/open.md`。
+   - 大段半成品文档、长篇攻略或排查日志留在 `workspace/`，记忆卡片里只留简短结论与文件指针。
    - `threads/REGISTRY.yaml` 的 `triggers` 优先用 **2–3 字高频口语短词**（如 `[看书, 书单, 读后感]`），避免 5 字以上长组合词导致口语漏触发。
    - 新建 `entities/` 档案前先对照 `entities/REGISTRY.yaml`，须同时满足「有实质联系、有具体内容、不同日期/会话出现两次以上（或被亲口嘱咐记住）」才建档（人、地方、机构、反复讨论的项目均可收录）。
 
@@ -39,6 +43,7 @@ description: 高频静默记忆整理轮写作 Prompt（第一人称；严格一
   - 收藏原话（`favorite/YYYY-MM-DD-<slug>.md`）：`MM-DD 原话·主题`（如 `11-18 原话·留白约定`）
   - 长期线索（`threads/<space>/<topic>.md`）：`分类·主题` 或短专名（如 `书·看不见的城市`、`吉他练习进度`）
   - 实体档案（`entities/<category>/<slug>.md`）：实体本名（如 `小橘`、`老林`、`城南书店`）
+  - 高敏私密卡片（`sensitive/<slug>.md`）：`类别·主题`（如 `健康·花粉过敏`、`创伤·原生家庭边界`、`亲密·相处习惯`）
   - 日/月/年梗概（`episodes/.../index.md`）：`YYYY-MM-DD 日梗概` / `YYYY-MM 月梗概` / `YYYY 年梗概`
 - 卡片 Frontmatter 保持极薄（仅用标准字段，不要自造 `type` 字段）：
   - `title`: 遵循上方短且唯一的标题规范
