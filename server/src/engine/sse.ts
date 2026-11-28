@@ -7,6 +7,7 @@ export type Ring1SseEventName =
   | "identity.updated"
   | "user_status.updated"
   | "memory_mcp.updated"
+  | "activity.updated"
   | "share.opened"
   | "turn.start"
   | "turn.thinking"

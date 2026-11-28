@@ -11,6 +11,7 @@ import { ulid } from "../core/ulid.ts";
 import type { DirectEngine, TurnCheckpoint } from "../engine/direct.ts";
 import { McpReplayRunner } from "../engine/replay_runner.ts";
 import { formatSseFrame, type SseHub } from "../engine/sse.ts";
+import type { CinemaActivityPlugin } from "../extensions/cinema.ts";
 import type { McpManager } from "../extensions/mcp.ts";
 import type { ModelCatalogService } from "../llm/catalog.ts";
 import type { ChatModelClient } from "../llm/client.ts";
@@ -170,6 +171,7 @@ export interface AppDeps {
   db?: Database;
   memoryIndex?: MemoryIndex;
   memoryTools?: MemoryTools;
+  decisionClient?: import("../engine/reflect.ts").DecisionClient;
   embedding?: EmbeddingClient;
   memoryGitMutex?: AsyncMutex;
   drawer?: DrawerStore;
@@ -178,6 +180,7 @@ export interface AppDeps {
   pairing?: PairingManager;
   media?: MediaStore;
   mcp?: McpManager;
+  cinema?: CinemaActivityPlugin;
   toolRegistry?: ToolRegistry;
   modelCatalog?: ModelCatalogService;
   notifications?: NotificationHub;
@@ -668,12 +671,14 @@ export function createApp(deps: AppDeps): Hono {
     if (voiceClip) metadata.voiceClip = voiceClip;
     if (isUrgentBypass) metadata.urgent = true;
 
+    const activeActivity = deps.cinema?.getActiveSession() ?? null;
     const { event, deduplicated } = deps.events.append({
       sessionId: deps.getActiveSessionId(),
       turnId,
       clientMessageId: body.clientMessageId ?? null,
       role: "user",
       kind,
+      activity: activeActivity?.slug ?? null,
       content,
       metadata: Object.keys(metadata).length > 0 ? metadata : null,
     });
@@ -696,7 +701,10 @@ export function createApp(deps: AppDeps): Hono {
         for (const entry of retryOrigins.values()) {
           entry.checkpoint = undefined;
         }
-        const activityHint = typeof body.activityHint === "string" ? body.activityHint : undefined;
+        const activityHint =
+          typeof body.activityHint === "string" && body.activityHint.trim()
+            ? body.activityHint.trim()
+            : activeActivity?.slug;
         retryOrigins.set(event.turnId, { userEventId: event.id, activityHint });
         dispatchChatTurn({
           turnId: event.turnId,
@@ -1406,6 +1414,206 @@ export function createApp(deps: AppDeps): Hono {
     });
   });
 
+  // Ring 1.5 内置活动插件路由（观影伴看 cinema，支持本地 HTTP /pull 桥接与手动 frame 上报）
+  if (deps.cinema) {
+    const cinema = deps.cinema;
+
+    app.get("/api/v1/activities", async (c) => {
+      const probe = c.req.query("probe") !== "0";
+      const activeSession = cinema.getAnyActiveSession();
+      const bridge = probe ? await cinema.probeBridgeStatus() : undefined;
+      return c.json({
+        activeSession,
+        spaces: [],
+        ...(bridge ? { cinema: bridge } : {}),
+      });
+    });
+
+    app.post("/api/v1/activities/cinema/start", async (c) => {
+      let body: {
+        title?: string;
+        source?: string;
+        season?: number;
+        episode?: number;
+        durationSec?: number;
+        topicHint?: string;
+      } = {};
+      try {
+        const text = await c.req.text();
+        if (text.trim()) {
+          body = JSON.parse(text) as typeof body;
+        }
+      } catch {
+        return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+      }
+
+      const started = await cinema.start({
+        title: typeof body.title === "string" ? body.title : undefined,
+        source: typeof body.source === "string" ? body.source : undefined,
+        season: typeof body.season === "number" && Number.isFinite(body.season) ? body.season : undefined,
+        episode: typeof body.episode === "number" && Number.isFinite(body.episode) ? body.episode : undefined,
+        durationSec:
+          typeof body.durationSec === "number" && Number.isFinite(body.durationSec)
+            ? body.durationSec
+            : undefined,
+        topicHint: typeof body.topicHint === "string" ? body.topicHint : undefined,
+      });
+      if (!started.ok) {
+        return c.json(
+          {
+            error: {
+              code: started.code,
+              message: `已有进行中的活动「${started.activeSession.title}」，请先结束当前活动`,
+            },
+            activeSession: started.activeSession,
+          },
+          409,
+        );
+      }
+      return c.json({ session: started.session, bridge: started.bridge });
+    });
+
+    app.post("/api/v1/activities/cinema/frame", async (c) => {
+      let body: {
+        sessionId?: string;
+        positionSec?: number;
+        playbackState?: string;
+        frameBase64?: string;
+        mediaHash?: string;
+        subtitle?: string;
+        characters?: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }>;
+      };
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+      }
+      const positionSec =
+        typeof body.positionSec === "number" && Number.isFinite(body.positionSec)
+          ? Math.max(0, body.positionSec)
+          : 0;
+      const playbackState = body.playbackState === "paused" ? "paused" : "playing";
+
+      let mediaHash =
+        typeof body.mediaHash === "string" && body.mediaHash.trim() ? body.mediaHash.trim() : undefined;
+      let frameSaved = false;
+      if (typeof body.frameBase64 === "string" && body.frameBase64.trim() && deps.media) {
+        const cleanB64 = body.frameBase64.replace(/^data:[^;,]+;base64,/i, "").replace(/\s+/g, "");
+        const bytes = Buffer.from(cleanB64, "base64");
+        if (bytes.byteLength > 512 * 1024) {
+          return c.json(
+            { error: { code: "PAYLOAD_TOO_LARGE", message: "单帧/四宫格解码体积超过 512 KB 上限" } },
+            413,
+          );
+        }
+        const saved = await deps.media.save({
+          bytes,
+          mimeType: "image/jpeg",
+          origin: "cinema_frame",
+          nowMs: deps.clock.now(),
+          activitySessionId: typeof body.sessionId === "string" ? body.sessionId : cinema.getActiveSession()?.id ?? null,
+          pinned: false,
+        });
+        mediaHash = saved.hash;
+        frameSaved = true;
+      }
+
+      const rec = cinema.recordFrame({
+        sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+        positionSec,
+        playbackState,
+        subtitle: typeof body.subtitle === "string" ? body.subtitle : undefined,
+        mediaHash,
+        characters: Array.isArray(body.characters) ? body.characters : undefined,
+      });
+      if (!rec.ok) {
+        return c.json({ error: { code: "NO_ACTIVE_SESSION", message: rec.error } }, 404);
+      }
+      return c.json({
+        accepted: true,
+        frameSaved,
+        ...(mediaHash ? { mediaHash } : {}),
+        sessionStatus: rec.session.status,
+        session: rec.session,
+      });
+    });
+
+    app.post("/api/v1/activities/cinema/end", async (c) => {
+      let body: { sessionId?: string; reason?: string } = {};
+      try {
+        const text = await c.req.text();
+        if (text.trim()) {
+          body = JSON.parse(text) as typeof body;
+        }
+      } catch {
+        return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+      }
+      const reason =
+        body.reason === "finished" || body.reason === "timeout" ? body.reason : "user_ended";
+      const res = await cinema.end({
+        sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+        reason,
+      });
+      if (!res.ok) {
+        return c.json({ error: { code: "NO_ACTIVE_SESSION", message: res.error } }, 404);
+      }
+      return c.json({ ok: true, sessionId: res.sessionId, endedAt: res.endedAt });
+    });
+
+    app.get("/api/v1/activities/cinema/grid", async (c) => {
+      const img = await cinema.proxyLatestGridImage();
+      if (!img) {
+        return c.json({ error: { code: "GRID_UNAVAILABLE", message: "尚未生成四宫格画面" } }, 404);
+      }
+      return new Response(new Uint8Array(img.bytes), {
+        status: 200,
+        headers: {
+          "content-type": img.mimeType,
+          "cache-control": "no-store",
+        },
+      });
+    });
+
+    app.get("/api/v1/activities/cinema/windows", async (c) => {
+      const windows = await cinema.listBridgeWindows();
+      return c.json({ windows });
+    });
+
+    app.post("/api/v1/activities/cinema/window", async (c) => {
+      let body: { windowId?: number };
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+      }
+      if (typeof body.windowId !== "number" || !Number.isFinite(body.windowId)) {
+        return c.json({ error: { code: "INVALID_WINDOW_ID", message: "windowId 须为整数（0 表示自动识别）" } }, 400);
+      }
+      const res = await cinema.selectBridgeWindow(body.windowId);
+      if (!res.ok) {
+        return c.json({ error: { code: "BRIDGE_ERROR", message: res.error || "切换窗口失败" } }, 502);
+      }
+      return c.json({ ok: true, ...(res.data ?? {}) });
+    });
+
+    app.post("/api/v1/activities/cinema/mode", async (c) => {
+      let body: { mode?: string };
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: { code: "INVALID_JSON", message: "请求体不是合法 JSON" } }, 400);
+      }
+      if (body.mode !== "auto" && body.mode !== "drama" && body.mode !== "variety") {
+        return c.json({ error: { code: "INVALID_MODE", message: "mode 须为 auto / drama / variety" } }, 400);
+      }
+      const res = await cinema.setBridgeMode(body.mode);
+      if (!res.ok) {
+        return c.json({ error: { code: "BRIDGE_ERROR", message: res.error || "切换模式失败" } }, 502);
+      }
+      return c.json({ ok: true, ...(res.data ?? {}) });
+    });
+  }
+
   if (deps.dataDir && deps.db && deps.memoryIndex && deps.memoryTools) {
     const gitMutex = deps.memoryGitMutex ?? new AsyncMutex();
     const replayRunner = new McpReplayRunner({
@@ -1415,6 +1623,8 @@ export function createApp(deps: AppDeps): Hono {
       clock: deps.clock,
       events: deps.events,
       memoryIndex: deps.memoryIndex,
+      decisionClient: deps.decisionClient,
+      embedding: deps.embedding,
       gitMutex,
       getConfig: deps.getConfig,
     });

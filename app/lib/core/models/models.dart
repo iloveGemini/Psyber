@@ -1936,6 +1936,64 @@ class ActivitySessionView {
   }
 }
 
+/// 本地伴看采集桥接状态（如 cowatch serve 127.0.0.1:18765）。
+@immutable
+class CinemaBridgeInfo {
+  const CinemaBridgeInfo({
+    required this.bridgeUrl,
+    required this.configured,
+    required this.reachable,
+    this.activeDrama,
+    this.episodeTitle,
+    this.progress,
+    this.contentMode,
+  });
+
+  final String bridgeUrl;
+  final bool configured;
+  final bool reachable;
+  final String? activeDrama;
+  final String? episodeTitle;
+  final String? progress;
+  final String? contentMode;
+
+  factory CinemaBridgeInfo.fromJson(Map<String, dynamic> json) {
+    final rawHealth = json['health'];
+    final health = rawHealth is Map<String, dynamic> ? rawHealth : const <String, dynamic>{};
+    return CinemaBridgeInfo(
+      bridgeUrl: json['bridgeUrl'] as String? ?? '',
+      configured: json['configured'] == true,
+      reachable: json['reachable'] == true,
+      activeDrama: (health['active_drama'] as String?)?.trim(),
+      episodeTitle: (health['episode_title'] as String?)?.trim(),
+      progress: (health['progress'] as String?)?.trim(),
+      contentMode: (health['content_mode'] as String?)?.trim(),
+    );
+  }
+}
+
+/// 本地可伴看视频窗口条目。
+@immutable
+class CinemaWindowItem {
+  const CinemaWindowItem({
+    required this.windowId,
+    required this.owner,
+    required this.title,
+  });
+
+  final int windowId;
+  final String owner;
+  final String title;
+
+  factory CinemaWindowItem.fromJson(Map<String, dynamic> json) {
+    return CinemaWindowItem(
+      windowId: (json['window_id'] as num?)?.toInt() ?? 0,
+      owner: json['owner'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+    );
+  }
+}
+
 /// Ring 1.5 上锁抽屉清单条目（拆封前绝不含正文）。
 @immutable
 class DrawerEntryView {

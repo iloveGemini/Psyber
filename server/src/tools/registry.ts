@@ -1,10 +1,10 @@
 import type { DoorState } from "../core/config.ts";
 import { redactSecrets } from "../core/redact.ts";
 import type { ExpressionPayload } from "../expression/express.ts";
-import type { ToolResult } from "../memory/tools.ts";
+import type { ToolResult, ToolResultImage } from "../memory/tools.ts";
 import type { StoredEvent } from "../store/events.ts";
 
-export type { ExpressionPayload };
+export type { ExpressionPayload, ToolResult, ToolResultImage };
 
 export type ToolTier = 1 | 2 | 3;
 export type ToolSecurityLevel = "auto" | "guarded" | "confirm";
@@ -89,6 +89,7 @@ export interface ToolCatalogItem {
 
 function resolveToolCategory(tool: RegisteredTool): string {
   if (tool.name.startsWith("mcp.")) return "外部 MCP";
+  if (tool.name.startsWith("cinema.")) return "观影伴看";
   if (tool.tags.includes("memory")) return "记忆读写";
   if (tool.tags.includes("extension")) return "扩展调度";
   if (tool.tags.includes("expression") || tool.tags.includes("door")) return "表达与边界";

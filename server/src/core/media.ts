@@ -69,8 +69,10 @@ export class MediaStore {
   async save(opts: {
     bytes: Uint8Array;
     mimeType: string;
-    origin: "user_upload" | "creative" | "sticker";
+    origin: "user_upload" | "creative" | "sticker" | "cinema_frame";
     nowMs: number;
+    activitySessionId?: string | null;
+    pinned?: boolean;
   }): Promise<SavedMediaAsset> {
     if (opts.bytes.byteLength > MAX_MEDIA_UPLOAD_BYTES) {
       throw new Error("PAYLOAD_TOO_LARGE");
@@ -89,13 +91,23 @@ export class MediaStore {
       await atomicWriteBytes(this.dataDir, targetPath, opts.bytes);
     }
 
+    const pinnedVal = opts.pinned === false ? 0 : 1;
     this.db
       .query(
         `INSERT INTO media_assets (hash, ext, mime_type, size_bytes, origin, activity_session_id, pinned, expired, created_at)
-         VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?)
-         ON CONFLICT(hash) DO UPDATE SET pinned = 1`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+         ON CONFLICT(hash) DO UPDATE SET pinned = MAX(pinned, excluded.pinned)`,
       )
-      .run(hash, ext, mime, opts.bytes.byteLength, opts.origin, opts.nowMs);
+      .run(
+        hash,
+        ext,
+        mime,
+        opts.bytes.byteLength,
+        opts.origin,
+        opts.activitySessionId ?? null,
+        pinnedVal,
+        opts.nowMs,
+      );
 
     return {
       hash,

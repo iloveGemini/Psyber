@@ -34,8 +34,11 @@ class ActivityBannerSlot extends StatelessWidget {
     final meta = session.metadata;
     final season = meta['season'];
     final episode = meta['episode'];
+    final progressText = (meta['progress'] as String?)?.trim();
     final posSec = meta['positionSec'] as num?;
     final playbackState = meta['playbackState'] as String?;
+    final isPaused = meta['isPaused'] == true || playbackState == 'paused';
+    final bridgeConnected = meta['bridgeConnected'];
     final frameUrl = meta['latestFrameUrl'] as String?;
 
     final subtitleParts = <String>[];
@@ -44,11 +47,16 @@ class ActivityBannerSlot extends StatelessWidget {
         '${season != null ? 'S$season' : ''}${episode != null ? 'E$episode' : ''}',
       );
     }
-    if (posSec != null) {
+    if (progressText != null && progressText.isNotEmpty) {
+      subtitleParts.add(progressText);
+    } else if (posSec != null) {
       subtitleParts.add(_formatPosition(posSec));
     }
-    if (playbackState == 'paused') {
+    if (isPaused) {
       subtitleParts.add('已暂停');
+    }
+    if (bridgeConnected == false) {
+      subtitleParts.add('采集服务未连');
     }
 
     return Container(

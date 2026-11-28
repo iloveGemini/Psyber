@@ -136,6 +136,12 @@ const CHAT_TOOL_LABELS: Record<string, string> = {
   drawer_read: "翻看了上锁抽屉",
   drawer_write: "往抽屉里封存了一篇日记",
   view_media: "重新查看了历史图片",
+  "cinema.status": "看了看观影进度",
+  "cinema.save_character": "记下了角色定妆档案",
+  "cinema.rename_character": "归并更新了角色名字",
+  "cinema.get_frame_at": "回看了刚才的画面",
+  "cinema.switch_window": "调整了伴看视频窗口",
+  "cinema.set_mode": "切换了伴看识别模式",
 };
 
 const WAKE_TOOL_LABELS: Record<string, string> = {
@@ -154,6 +160,12 @@ const WAKE_TOOL_LABELS: Record<string, string> = {
   drawer_read: "趁你不在，翻看了上锁抽屉",
   drawer_write: "趁你不在，往抽屉里封存了一篇日记",
   view_media: "趁你不在，查看了一张历史图片",
+  "cinema.status": "看了看观影进度",
+  "cinema.save_character": "记下了角色定妆档案",
+  "cinema.rename_character": "归并更新了角色名字",
+  "cinema.get_frame_at": "回看了刚才的画面",
+  "cinema.switch_window": "调整了伴看视频窗口",
+  "cinema.set_mode": "切换了伴看识别模式",
 };
 
 export function formatToolActionLabel(toolName: string, mode: "chat" | "wake"): string {
@@ -238,6 +250,25 @@ export interface RolloverResult {
   error?: string;
 }
 
+/** 活跃活动插件向 DirectEngine 提供的结构化上下文（结构化类型解耦，避免 engine 反向依赖具体扩展） */
+export interface ActiveActivityTurnContext {
+  sessionId: string;
+  slug: string;
+  title: string;
+  activityHint: string;
+  topicHint: string;
+  promptBlock: string;
+  images?: ChatImageContent[];
+}
+
+export interface ActiveActivityProvider {
+  getActiveTurnContext(opts: {
+    mode: "chat" | "wake";
+    consume: boolean;
+    signal?: AbortSignal;
+  }): Promise<ActiveActivityTurnContext | null>;
+}
+
 export interface DirectEngineDeps {
   dataDir: string;
   promptsDir: string;
@@ -259,6 +290,8 @@ export interface DirectEngineDeps {
   decisionClient?: DecisionClient;
   /** 可选附件摘要模型客户端（仅当配置了 llm.slots.digest 或 forceDigestModel=true 时并行触发） */
   digestModel?: ChatModelClient;
+  /** 可选活跃活动提供者（如内置 cinema 观影插件，用于在 Dynamic Tail 零延迟注入实时画面与时间轴） */
+  activityProvider?: ActiveActivityProvider;
   /** 单次附件摘要超时（毫秒，默认 15000） */
   digestTimeoutMs?: number;
   /** 测试注入 digestModel 时强制启用并行摘要（无需额外配置 slots.digest） */
@@ -1005,6 +1038,17 @@ export class DirectEngine {
       ctxBlocks.push(`<prefix_delta>\n${deltas.join("\n\n")}\n</prefix_delta>`);
     }
 
+    // 若存在活跃活动（如观影伴看 cinema），在 Dynamic Tail 零延迟拉取最新画面与时间轴（跨轮不落盘 base64）
+    const activeActivityCtx = this.deps.activityProvider
+      ? await this.deps.activityProvider
+          .getActiveTurnContext({
+            mode: opts.mode,
+            consume: opts.mode === "chat",
+          })
+          .catch(() => null)
+      : null;
+    const effectiveActivityHint = opts.activityHint ?? activeActivityCtx?.activityHint;
+
     // Ring 1 极简 3 步召回注入（chat 模式且非空文本输入；查询先脱敏，绝不把明文凭证写入 recall_traces 或发往外部向量/决策接口）
     const recallQuery = redactSecrets(opts.userText).text.trim();
     let recallCount = 0;
@@ -1019,7 +1063,7 @@ export class DirectEngine {
           turnId: opts.turnId,
           query: recallQuery,
           recentTurns: opts.recentTurns,
-          activityHint: opts.activityHint,
+          activityHint: effectiveActivityHint,
           embedding: this.deps.embedding,
           reranker: this.deps.reranker,
           decisionClient: this.deps.decisionClient,
@@ -1042,6 +1086,10 @@ export class DirectEngine {
           );
         }
       }
+    }
+
+    if (activeActivityCtx?.promptBlock) {
+      ctxBlocks.push(activeActivityCtx.promptBlock);
     }
 
     // 条件模式提示
@@ -1077,6 +1125,9 @@ export class DirectEngine {
           mimeType: asset.mimeType,
         });
       }
+    }
+    if (activeActivityCtx?.images && activeActivityCtx.images.length > 0) {
+      imageBlocks.push(...activeActivityCtx.images);
     }
 
     const textWithVoice = this.formatUserTextWithVoice(opts.userText, opts.voiceClip);

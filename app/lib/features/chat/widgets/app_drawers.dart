@@ -477,7 +477,7 @@ class LeftArchiveSidebar extends StatelessWidget {
 }
 
 /// 常用活动卡片主体：复用于窄屏右抽屉与桌面端就近弹出的轻量 Popover。
-class ActivityCardBody extends StatelessWidget {
+class ActivityCardBody extends StatefulWidget {
   const ActivityCardBody({
     super.key,
     required this.controller,
@@ -488,94 +488,316 @@ class ActivityCardBody extends StatelessWidget {
   final VoidCallback onAfterEnd;
 
   @override
+  State<ActivityCardBody> createState() => _ActivityCardBodyState();
+}
+
+class _ActivityCardBodyState extends State<ActivityCardBody> {
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.controller.refreshCinemaBridgeStatus());
+  }
+
+  Future<void> _handleStart() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.controller.startCinemaActivity();
+      if (mounted) {
+        widget.onAfterEnd();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = '开启失败：$e');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _handleEnd() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.controller.endActiveCinema();
+      if (mounted) {
+        widget.onAfterEnd();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = '结束失败：$e');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _showWindowPicker() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    List<CinemaWindowItem> windows = const [];
+    try {
+      windows = await widget.controller.listCinemaWindows();
+    } catch (e) {
+      if (mounted) setState(() => _error = '获取窗口列表失败：$e');
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+
+    final selected = await showDialog<int>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('选择伴看视频窗口', style: TextStyle(fontSize: 16)),
+          content: SizedBox(
+            width: 340,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                ListTile(
+                  dense: true,
+                  leading: const Icon(PhosphorIconsLight.magicWand, size: 18),
+                  title: const Text('自动识别播放器窗口', style: TextStyle(fontSize: 13.5)),
+                  onTap: () => Navigator.of(ctx).pop(0),
+                ),
+                const Divider(height: 1),
+                if (windows.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Text(
+                      '暂未检测到打开的视频窗口，请确认本地采集服务（cowatch serve）已运行。',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
+                  )
+                else
+                  for (final w in windows)
+                    ListTile(
+                      dense: true,
+                      title: Text(
+                        w.title.isEmpty ? w.owner : w.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      subtitle: Text(w.owner, style: const TextStyle(fontSize: 11.5)),
+                      onTap: () => Navigator.of(ctx).pop(w.windowId),
+                    ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+          ],
+        );
+      },
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.controller.selectCinemaWindow(selected);
+    } catch (e) {
+      if (mounted) setState(() => _error = '切换窗口失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     return ValueListenableBuilder<ActivitySessionView?>(
-      valueListenable: controller.activeActivityNotifier,
+      valueListenable: widget.controller.activeActivityNotifier,
       builder: (context, activity, _) {
-        final isActive = activity != null;
-        return Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: isActive ? colors.celadonWash : colors.mineralCanvas,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: isActive ? colors.accentBorder : colors.hairline,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        return ValueListenableBuilder<CinemaBridgeInfo?>(
+          valueListenable: widget.controller.cinemaBridgeNotifier,
+          builder: (context, bridge, _) {
+            final isActive = activity != null;
+            final bridgeReachable = bridge?.reachable == true;
+            final detectedTitle = (bridge?.activeDrama?.isNotEmpty == true)
+                ? bridge!.activeDrama!
+                : (bridge?.episodeTitle?.isNotEmpty == true ? bridge!.episodeTitle! : null);
+            final statusBadge = isActive
+                ? '伴看进行中'
+                : (bridgeReachable ? '采集就绪' : '待启动');
+            final activeProgress = (activity?.metadata['progress'] as String?)?.trim();
+            final mode = (activity?.metadata['contentMode'] as String?) ?? bridge?.contentMode ?? 'auto';
+
+            String subtitle;
+            if (isActive) {
+              final title = activity.title.isEmpty ? '伴看视频' : activity.title;
+              subtitle = activeProgress != null && activeProgress.isNotEmpty
+                  ? '正在一起看：$title · $activeProgress'
+                  : '正在一起看：$title';
+            } else if (bridgeReachable) {
+              subtitle = detectedTitle != null
+                  ? '已检测到《$detectedTitle》${bridge?.progress?.isNotEmpty == true ? ' · ${bridge!.progress}' : ''}，开启后发消息会自动附带四宫格与台词。'
+                  : '本地伴看服务已连通，开启后发消息会自动附带最新四宫格与台词。';
+            } else {
+              subtitle = '先在终端运行 cowatch serve，再点「开始一起看」，发消息时会自动附带实时画面与字幕。';
+            }
+
+            return Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: isActive ? colors.celadonWash : colors.mineralCanvas,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: isActive ? colors.accentBorder : colors.hairline,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      '放映伴看',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                  Row(
+                    children: [
+                      Icon(PhosphorIconsLight.filmStrip, size: 18, color: colors.inkDeep),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          '放映伴看',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
                       ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: (isActive || bridgeReachable)
+                              ? colors.statusSuccessSoft
+                              : colors.letterSurface,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: colors.hairline),
+                        ),
+                        child: Text(
+                          statusBadge,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: (isActive || bridgeReachable)
+                                ? colors.statusSuccess
+                                : colors.inkQuiet,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.inkQuiet,
+                      height: 1.45,
                     ),
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 2,
+                  if (_error != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      _error!,
+                      style: TextStyle(fontSize: 11.5, color: colors.thresholdAmber),
                     ),
-                    decoration: BoxDecoration(
-                      color: isActive ? colors.statusSuccessSoft : colors.letterSurface,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: colors.hairline),
-                    ),
-                    child: Text(
-                      isActive ? '伴看进行中' : '已就绪',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        color: isActive ? colors.statusSuccess : colors.inkQuiet,
-                      ),
-                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      if (bridgeReachable || isActive)
+                        TextButton.icon(
+                          onPressed: _busy ? null : _showWindowPicker,
+                          icon: const Icon(PhosphorIconsLight.appWindow, size: 14),
+                          label: const Text('选窗口', style: TextStyle(fontSize: 12)),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                      if (isActive) ...[
+                        const SizedBox(width: 4),
+                        TextButton(
+                          onPressed: _busy
+                              ? null
+                              : () async {
+                                  final next = mode == 'variety' ? 'drama' : 'variety';
+                                  setState(() => _busy = true);
+                                  try {
+                                    await widget.controller.setCinemaMode(next);
+                                  } catch (e) {
+                                    if (mounted) setState(() => _error = '切换模式失败：$e');
+                                  } finally {
+                                    if (mounted) setState(() => _busy = false);
+                                  }
+                                },
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: Text(
+                            mode == 'variety' ? '综艺模式' : '影视模式',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ],
+                      const Spacer(),
+                      if (isActive)
+                        FilledButton(
+                          key: const Key('end_activity_button'),
+                          onPressed: _busy ? null : _handleEnd,
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            minimumSize: Size.zero,
+                          ),
+                          child: const Text('结束伴看', style: TextStyle(fontSize: 12)),
+                        )
+                      else
+                        FilledButton(
+                          key: const Key('start_activity_button'),
+                          onPressed: _busy ? null : _handleStart,
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            minimumSize: Size.zero,
+                          ),
+                          child: Text(
+                            _busy ? '开启中…' : '开始一起看',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              Text(
-                isActive
-                    ? '正在一起看：${activity.title.isEmpty ? '伴看视频' : activity.title}'
-                    : '播放视频时可在一旁同步观看并轻声交流。',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: colors.inkQuiet,
-                  height: 1.45,
-                ),
-              ),
-              if (isActive) ...[
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    key: const Key('end_activity_button'),
-                    onPressed: () async {
-                      await controller.endActiveCinema();
-                      if (context.mounted) {
-                        onAfterEnd();
-                      }
-                    },
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('结束伴看', style: TextStyle(fontSize: 12)),
-                  ),
-                ),
-              ],
-            ],
-          ),
+            );
+          },
         );
       },
     );

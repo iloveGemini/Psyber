@@ -5,11 +5,13 @@ import {
   DEFAULT_CIRCADIAN_CONFIG,
   DEFAULT_NOTIFICATIONS_CONFIG,
   DEFAULT_RECALL_CONFIG,
+  mergeCinemaConfig,
   mergeMemoryMcpConfig,
   mergeRadarConfig,
   mergeRecallConfig,
   saveConfig,
   type BashToolConfig,
+  type CinemaConfig,
   type CircadianConfig,
   type LlmConfig,
   type McpServerConfig,
@@ -178,6 +180,7 @@ function sanitizeSettings(
     },
     mcpServers,
     memoryMcp,
+    cinema: mergeCinemaConfig(cfg.cinema),
     tools: deps.toolRegistry?.listAllTools() ?? [],
     disabledTools: cfg.disabledTools ?? [],
     system: {
@@ -844,6 +847,7 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
       };
       credentials?: Record<string, { apiKey?: string }>;
       bash?: Partial<BashToolConfig>;
+      cinema?: Partial<CinemaConfig>;
       mcpServers?: McpServerConfig[];
       mcpSecrets?: Record<string, string>;
       memoryMcp?: Partial<MemoryMcpConfig>;
@@ -895,6 +899,41 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
         return c.json({ error: { code: "INVALID_SETTINGS", message: checked.error } }, 400);
       }
       validatedBash = checked.value;
+    }
+    if (body.cinema !== undefined) {
+      if (!body.cinema || typeof body.cinema !== "object" || Array.isArray(body.cinema)) {
+        return c.json({ error: { code: "INVALID_SETTINGS", message: "cinema 配置必须为对象" } }, 400);
+      }
+      if (body.cinema.bridgeUrl !== undefined) {
+        if (typeof body.cinema.bridgeUrl !== "string") {
+          return c.json({ error: { code: "INVALID_SETTINGS", message: "cinema.bridgeUrl 必须为字符串" } }, 400);
+        }
+        const trimmedUrl = body.cinema.bridgeUrl.trim();
+        if (trimmedUrl && !isValidHttpUrl(trimmedUrl)) {
+          return c.json(
+            { error: { code: "INVALID_SETTINGS", message: "cinema.bridgeUrl 必须为合法 http/https 地址或空字符串" } },
+            400,
+          );
+        }
+      }
+      if (
+        body.cinema.timeoutMs !== undefined &&
+        (typeof body.cinema.timeoutMs !== "number" ||
+          !Number.isFinite(body.cinema.timeoutMs) ||
+          body.cinema.timeoutMs < 500 ||
+          body.cinema.timeoutMs > 15_000)
+      ) {
+        return c.json(
+          { error: { code: "INVALID_SETTINGS", message: "cinema.timeoutMs 须为 500..15000 的数值" } },
+          400,
+        );
+      }
+      if (body.cinema.syncPauseResume !== undefined && typeof body.cinema.syncPauseResume !== "boolean") {
+        return c.json(
+          { error: { code: "INVALID_SETTINGS", message: "cinema.syncPauseResume 须为布尔值" } },
+          400,
+        );
+      }
     }
     let validatedMcpServers: McpServerConfig[] | null = null;
     if (body.mcpServers !== undefined) {
@@ -1032,6 +1071,9 @@ export function registerAdminRoutes(app: Hono, deps: AppDeps): void {
     if (body.memoryMcp && typeof body.memoryMcp === "object" && !Array.isArray(body.memoryMcp)) {
       const { tokens: _ignoredTokens, ...patchWithoutTokens } = body.memoryMcp;
       cfg.memoryMcp = mergeMemoryMcpConfig(cfg.memoryMcp, patchWithoutTokens);
+    }
+    if (body.cinema && typeof body.cinema === "object" && !Array.isArray(body.cinema)) {
+      cfg.cinema = mergeCinemaConfig(cfg.cinema, body.cinema);
     }
     if (Array.isArray(body.disabledTools)) {
       const sanitizedDisabled = body.disabledTools

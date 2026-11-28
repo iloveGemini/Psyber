@@ -1,11 +1,17 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-27（提交 P0 源头凭证过滤 `eafe7d7`，并落地 P1 高敏隔离区 `memory/sensitive/`、周期重要日子 `core/dates.md`、专属暗语 `core/glossary.md` 与 `threads/lists/` 规范）。
+> 最后更新：2026-11-28（落地内置观影伴看插件 `cinema` 及本地 HTTP `/pull` 零延迟桥接，补齐外部 MCP 桥接图片块透传；前期已完成 P0 源头凭证过滤与 P1 高敏隔离区）。
 
 ## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、源头凭证过滤（P0）、高敏隔离区与记忆补齐（P1）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **内置观影伴看插件（`cinema` · 本地 HTTP `/pull` 桥接，`docs/` + `server/` + `app/`，2026-11-28）**：
+  - 契约、配置与存储：更新 [docs/spec/03-boundaries-expression-activities.md](docs/spec/03-boundaries-expression-activities.md) §4.3 与 [docs/API.md](docs/API.md) §3；`core/config.ts` 新增 `cinema` 配置（`bridgeUrl` 默认 `http://127.0.0.1:18765`、`timeoutMs=2500`、`syncPauseResume=true`）与 `/settings` 校验；`core/db.ts` 新增迁移 v3 `activity_sessions` 表；`core/media.ts` 扩展 `cinema_frame` 来源与 `pinned` 控制；`engine/sse.ts` 新增 `activity.updated` 事件类型。
+  - 插件、工具与零延迟注入：新增 `server/src/extensions/cinema.ts`（`CinemaActivityPlugin`），负责单活跃会话持久化、开/关联动采集源 `/resume` & `/pause`、心跳 30m `stale`/4h 软结束防误结束巡检，并注册 6 个 Tier 2 观影工具（`cinema.status` / `save_character` / `rename_character` / `get_frame_at` 临时带图 / `switch_window` / `set_mode`，不污染 Tier 1 Static Prefix）；`engine/direct.ts` 接入 `activityProvider`，聊天前自动拉取 `/pull?clear=1` 与 `/api/grid.jpg` 注入 Dynamic Tail `<active_activity>` 与当轮临时四宫格图（跨轮不落盘 base64，采集离线自动降级）；`api/app.ts` 挂载 `/api/v1/activities*` 路由与 `/cinema/grid` 鉴权代理并自动标记消息 `activity='cinema'`；新增 `server/tests/cinema_activity.test.ts`（2 组全离线集成用例）。
+  - Flutter 伴看交互：`models.dart` / `api_client.dart` / `app_controller.dart` 新增 `CinemaBridgeInfo` / `CinemaWindowItem` 与启停/选窗口/切模式接口；`app_drawers.dart`（`ActivityCardBody`）补齐采集探测状态、一键「开始一起看」、选窗口弹窗与影视/综艺切换；`activity_banner_slot.dart` 兼容 `progress` 文本、暂停态与采集掉线提示。
+- **外部 MCP 图片块透传（`docs/spec/` + `server/`，2026-11-28）**：
+  - `extensions/mcp.ts` 升级 `formatMcpCallResult` 支持标准 `image` 内容块与 `resource` 嵌入图片 blob（支持 JPEG/PNG/WebP/GIF、`image/jpg` 与 `data:` URI 归一、单次上限 4 张与 3.5 MB 单图拦截、音频/非图二进制占位防 base64 泄漏进文本），经 `tools/registry.ts` 透传为当轮临时 `ToolResult.images` 送入模型，跨轮自动回收不落盘 SQLite；同步更新 `docs/spec/03-boundaries-expression-activities.md` §5.2 与 `tests/mcp_bridge.test.ts`（新增单测 + 端到端集成用例）。
 - **P1 高敏私密隔离区与记忆补齐（`docs/` + `prompts/` + `server/`，2026-11-27）**：
   - 契约与提示词：更新 [docs/MEMORY.md](docs/MEMORY.md)（升级为七大目录）、[docs/spec/01-engine-tools-prompts.md](docs/spec/01-engine-tools-prompts.md) §5 与 [docs/spec/02-memory-execution.md](docs/spec/02-memory-execution.md) §1.1；升级 `prompts/main.md`（v10）、`prompts/tidy.md`（v13）与 `prompts/reflect.md`（v4），补齐 `sensitive/` 留白约定、`core/dates.md`、`core/glossary.md`、`threads/lists/` 免“双次成林”与 `workspace/` 边界。
   - `memory/sensitive/` 物理隔离与高门槛召回：`frontmatter.ts` 与 `memory/tools.ts` 大小写归一化识别 `sensitive`/`private` 分区并支持 `excludeSpaces` 防 macOS APFS 大小写与多级 `./` 绕过；`core/config.ts` 与 `api/admin_routes.ts` 新增 `recall.sensitive` 配置（`allowExternalEmbedding=false`、`rerankThreshold=0.55`、`ftsMinScore=0.45`）；`memory/recall.ts` 默认不外发 `sensitive/` 到外部 Embedding、未配 Embedding 全卡直扫亦先经本地 FTS5 过滤绝不把未命中高敏卡标题外发给云端决策模型，统一小语料库（`<10` 卡）混合/纯向量 FTS 豁免，高门槛精排并标注 `[敏感记录·按需轻声对待]`、严禁 1 跳双链带出；`memory/radar.ts` 与 `memory/recall_eval.ts` 默认排除 `sensitive/`；`api/memory_mcp.ts` 与 `core/git.ts`（`excludePaths`）在全部对外 MCP 工具中硬屏蔽 `sensitive/`，并在 `memory_replay` 搬家步骤放行 `core/{dates,glossary}.md`。
@@ -78,8 +84,8 @@
 - 随内置 `browser`（Ring 2）一起落地安全凭证储存库（复用 `0600` `credentials.json`，域名强绑定 + 盲填工具，AI 读不到密码但能用）。
 - 按需拓展：Flutter 设置页补齐 `memoryMcp` 开关与令牌管理 UI；如需全自动挂机批量搬家，可在 `memory_replay` 之上薄包一层 CLI 循环驱动脚本。
 - 语音下一期：不看屏幕 / 戴耳机场景下的「回复自动朗读（TTS / 系统语音）」开关与可选云端 STT 槽位。
-- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影伴看（`cinema`）插件。
+- 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影结束自动派发 `activity:cinema` 专题整理轮。
 
 ## 2. 验证结果
-- **`server/`（2026-11-27）**：`bun run typecheck` 零错误；`bun test`（30 文件 / 136 用例，含 `tests/memory_p1_zones.test.ts` 4 用例 / 97 断言）全部通过。
-- **`app/`（2026-11-26）**：本轮未改动 Flutter 客户端；宿主机终端可按需复跑 `cd app && flutter analyze && flutter test`。
+- **`server/`（2026-11-28）**：`bun run typecheck` 零错误；`bun test`（31 文件 / 143 用例 / 2114 断言，含 `tests/cinema_activity.test.ts` 2 用例与 `tests/mcp_bridge.test.ts` 5 用例）全部通过。
+- **`app/`（2026-11-28）**：`flutter analyze` 零问题；`flutter test`（31 用例）全部通过。

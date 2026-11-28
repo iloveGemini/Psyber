@@ -198,9 +198,12 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
 ### 4.3 首个内置扩展：观影伴看（`cinema` · `server/src/extensions/cinema/`）
 
 #### 端点与状态流转（对齐 `API.md` §3）
-- **`POST /api/v1/activities/cinema/start`**：接收 `{ title, source?, season?, episode?, durationSec?, topicHint? }`。若 `topicHint` 未传，由服务端对 `title` + `season` 做确定性 slug 归一化（保留小写字母/数字/中文短词并用 `-` 连接，最大 48 字符）；写入 `events (role='system', kind='activity_event', activity='cinema')` 与 `activity_sessions (status='active')`，广播 SSE `activity.updated`；
+- **`POST /api/v1/activities/cinema/start`**：接收 `{ title?, source?, season?, episode?, durationSec?, topicHint? }`。若配置了本地伴看采集源（`config.json` `cinema.bridgeUrl`，默认 `http://127.0.0.1:18765`，兼容 `cowatch serve` HTTP Hook），开启时按 `cinema.syncPauseResume` 最佳努力唤醒 `/resume` 并探测 `/health` 自动补全剧名/集数/进度；若 `topicHint` 未传，由服务端对 `title` + `season` 做确定性 slug 归一化（保留小写字母/数字/中文短词并用 `-` 连接，最大 48 字符）；写入 `events (role='system', kind='activity_event', activity='cinema')` 与 `activity_sessions (status='active')`，广播 SSE `activity.updated`；
 - **`POST /api/v1/activities/cinema/frame`**：接收 `{ sessionId?, positionSec, playbackState: "playing" | "paused", frameBase64?, frameMode?: "single" | "grid_2x2", mediaHash?, subtitle?, characters?: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }> }`（`sessionId` 可选，缺省自动命中当前唯一活跃 `cinema` 会话；支持单帧或 **2×2 四宫格分镜图**以单张图片 Token 承载连续动作，并同步维护防脸盲角色定妆小抄）。更新 `last_heartbeat_at = Clock.now()` 与 `metadata`（若原为 `stale`，自动恢复为 `active`），按下方控量规则决定是否落盘新帧，并广播 `activity.updated`；
-- **`POST /api/v1/activities/cinema/end`**：接收 `{ sessionId?, reason?: "user_ended" | "finished" }`（`sessionId` 可选，缺省命中当前活跃 `cinema` 会话）。将 `status` 置为 `ended`、写入 `ended_at` 与 `end_event_id`、写结束 `activity_event`、广播 `activity.updated` 并触发 `onActivityEnded`。
+- **`POST /api/v1/activities/cinema/end`**：接收 `{ sessionId?, reason?: "user_ended" | "finished" }`（`sessionId` 可选，缺省命中当前活跃 `cinema` 会话）。若启用了 `cinema.syncPauseResume`，最佳努力通知采集源 `/pause` 休眠省电；将 `status` 置为 `ended`、写入 `ended_at` 与 `end_event_id`、写结束 `activity_event`、广播 `activity.updated` 并触发 `onActivityEnded`；
+- **本地 HTTP `/pull` 零延迟前置桥接与辅助端点**：
+  - 观影活跃期间，用户每次发送消息时 `DirectEngine` 自动请求 `<bridgeUrl>/pull?clear=1`（超时默认 `2500ms`，异常自动降级不阻塞聊天），将 `<video_cowatch_context>` 图文时间轴注入 Dynamic Tail，并经 `<bridgeUrl>/api/grid.jpg` 拉取最新 2×2 四宫格作为**仅当轮可见的临时多模态图片块**（绝不落盘 base64 进 `events`，下一轮自动回收保护 Prompt Cache），同时自动同步剧名切换与进度到 `activity_sessions`；
+  - 配套只读/控制路由：`GET /api/v1/activities/cinema/grid`（带鉴权代理四宫格缩略图供跨端 Flutter 预览）、`GET /api/v1/activities/cinema/windows`、`POST /api/v1/activities/cinema/window`、`POST /api/v1/activities/cinema/mode`。
 
 #### 抽帧控量与上下文预算护栏（防磁盘与视觉 Token 爆炸）
 - **最小落盘间隔**：`MIN_FRAME_INTERVAL_SEC = 15`（可配置）。距上一张已落盘帧不足 15 秒，或 `playbackState === "paused"` 且 `positionSec` 未变化超过 3 秒时，**仅更新进度元数据，不重复落盘图片**；
@@ -215,9 +218,11 @@ CREATE INDEX idx_stickers_recent ON stickers(last_used_at DESC, use_count DESC);
   2. **停更 `≥ 4 小时`**（或已进入 `bedtime` 睡眠窗且停更 `≥ 1 小时`）：服务端自动执行软结束（`reason: "timeout"`），置 `ended_at` 并派发 `activity:cinema` 整理轮，防止僵尸活动永久锁死 `daily_wrapup` 门禁。
 
 #### 观影专属 Tier 2 工具（观影活跃时在 Dynamic Tail 暴露，经 `call_tool` 执行）
-- **`cinema.status`**（`security: "auto"`）：返回当前片名、集数、精确进度（`mm:ss / mm:ss`）、播放/暂停态、已登记角色小抄与本场已收藏帧数；
-- **`cinema.bookmark`**（`security: "auto"`，参数 `{ note?: string }`）：将当前最新抽帧的 `media_assets.pinned` 置为 `1`（永久免淘汰）并在 `activity_sessions.metadata.bookmarks` 记录时间戳与简短备注，返回 `media/<hash>` 供Psyber写进卡片或收藏；
-- **`cinema.characters`**（`security: "auto"`，参数 `{ upsert: Array<{ name: string; aliases?: string; outfit?: string; relation?: string }> }`）：维护本片「角色定妆小抄（防脸盲档案）」，同步展示在客户端折叠观影卡中。
+- **`cinema.status`**（`security: "auto"`）：返回当前片名、集数、精确进度、播放/暂停态、内容模式与采集源状态；
+- **`cinema.save_character`**（`security: "auto"`）：登记或更新当前剧集的角色定妆小抄（桥接本地采集源时支持指定 `panel_progress` 或 `from_panel` `1~4` 自动抠取人脸定妆照，防脸盲与换装认错人）；
+- **`cinema.rename_character`**（`security: "auto"`）：将前期外观暂代称呼归并为真实姓名并自动保留别名与迁移定妆照；
+- **`cinema.get_frame_at`**（`security: "auto"`，参数 `{ progress?, seconds_ago?, count? }`）：按进度时间或相对秒数回看本地环形缓存中的历史关键帧，并以当轮临时图片块返回模型（跨轮自动回收）；
+- **`cinema.switch_window` / `cinema.set_mode`**（`security: "auto"`）：列出/切换当前伴看锁定的播放器窗口（传 `0` 恢复自动识别）或切换 `auto` / `drama` / `variety` 内容模式。
 
 ---
 
@@ -253,7 +258,7 @@ export interface McpServerConfig {
 3. **非阻塞启动与故障隔离**：
    - 后端启动时**异步**连接各已启用 MCP 服务器（单服握手超时 `10s`）；任意外部 MCP 不可达、进程崩溃或协议异常仅记录结构化告警并标记该服为 `degraded`，**绝不阻塞 Psyber 启动或影响主对话**；
    - `stdio` 子进程意外退出时采用指数退避重连（`2s → 10s → 30s`，最多 3 次；仍失败暂停重连，待用户通过设置热重载或手动重连恢复）；
-4. **输出截断与超时保护**：单次工具调用受 `AbortSignal.timeout(timeoutMs)` 严格保护；返回文本超过 **`8000` 字符**时截断末尾并附 `[外部工具输出已截断，原始长度 N 字符]`，避免外部 MCP 返回巨型 JSON 击穿单轮上下文；
+4. **输出截断、图片透传与超时保护**：单次工具调用受 `AbortSignal.timeout(timeoutMs)` 严格保护；返回文本超过 **`8000` 字符**时截断末尾并附 `[外部工具输出已截断，原始长度 N 字符]`，避免外部 MCP 返回巨型 JSON 击穿单轮上下文；返回的 `image` 内容块（及 `resource` 中的 `image/*` blob，支持 `image/jpeg`、`image/png`、`image/webp`、`image/gif`，单次最多 `4` 张、单图 ≤ `3.5 MB`）透传为当轮临时 `ToolResult.images` 送给模型，跨轮不落盘 base64、不写入 `events` 文本，杜绝 base64 串进输出或污染后续 Prompt Cache；
 5. **热重载清理与生态预设**：`PATCH /api/v1/settings` 修改 `mcpServers` 后，先优雅关闭已移除或变更的子进程（`SIGTERM`，3s 后 `SIGKILL`），注销旧工具并重新发现注册新工具；客户端设置页提供常用开源 MCP 生态预设模板（一键填入命令/参数框架与环境变量占位符），降低非程序员配置门槛。
 
 ---

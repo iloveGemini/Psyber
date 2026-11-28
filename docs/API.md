@@ -102,9 +102,11 @@
 ## 3. 观影扩展子路由（Ring 1.5 首个 `ActivityPlugin`: `cinema`）
 
 挂载于 `/api/v1/activities/cinema/*`，完全隔离在扩展模块内：
-- `POST /api/v1/activities/cinema/start` — 开启观影会话（片名/来源/集数），激活 `activityHint: "cinema"`
-- `POST /api/v1/activities/cinema/frame` — 上报当前进度、可选字幕、单帧或 **2×2 四宫格分镜图**（存 `media/` 返回 hash）及可选角色定妆小抄同步
-- `POST /api/v1/activities/cinema/end` — 结束观影，自动触发 `activities/cinema/` 独立整理任务
+- `POST /api/v1/activities/cinema/start` — 开启观影会话（支持自动探测本地 `cinema.bridgeUrl` 如 `cowatch serve` 补全剧名/集数/进度，或手传片名/来源/集数），激活 `activityHint: "cinema"`
+- `POST /api/v1/activities/cinema/frame` — 手动上报当前进度、可选字幕、单帧或 **2×2 四宫格分镜图**（存 `media/` 返回 hash）及可选角色定妆小抄同步
+- `POST /api/v1/activities/cinema/end` — 结束观影（按配置联动采集源 `/pause` 休眠），触发活动收尾回调
+- `GET /api/v1/activities/cinema/grid` — 带 Bearer 鉴权代理本地采集源的最新 2×2 四宫格缩略图（供跨端 Flutter 顶栏预览）
+- `GET /api/v1/activities/cinema/windows` / `POST /api/v1/activities/cinema/window` / `POST /api/v1/activities/cinema/mode` — 列出或切换伴看窗口、切换 `auto` / `drama` / `variety` 内容模式
 
 ---
 

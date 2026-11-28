@@ -658,6 +658,50 @@ export function mergeMemoryMcpConfig(
 }
 
 /**
+ * 内置观影伴看插件（cinema）桥接配置（集中维护于 <dataDir>/config.json 的 cinema 节点）。
+ */
+export interface CinemaConfig {
+  /** 本地伴看采集服务基础地址（如 cowatch serve 的 http://127.0.0.1:18765）；留空表示不主动拉取外部采集源 */
+  bridgeUrl: string;
+  /** 单次向采集服务拉取 /pull 或转发工具的超时阈值（单位：毫秒，默认 2500；调小更快降级为纯文字聊天，调大容忍首次四宫格拼图） */
+  timeoutMs: number;
+  /** 在 Psyber 开启/结束观影时是否自动联动采集服务的 /resume 与 /pause 休眠采集（默认 true） */
+  syncPauseResume: boolean;
+}
+
+export const DEFAULT_CINEMA_CONFIG: CinemaConfig = {
+  bridgeUrl: "http://127.0.0.1:18765",
+  timeoutMs: 2500,
+  syncPauseResume: true,
+};
+
+export function mergeCinemaConfig(
+  base?: Partial<CinemaConfig>,
+  patch?: Partial<CinemaConfig>,
+): CinemaConfig {
+  const b = isPlainRecord(base) ? (base as Partial<CinemaConfig>) : undefined;
+  const p = isPlainRecord(patch) ? (patch as Partial<CinemaConfig>) : undefined;
+  const rawUrl =
+    typeof p?.bridgeUrl === "string"
+      ? p.bridgeUrl.trim()
+      : typeof b?.bridgeUrl === "string"
+        ? b.bridgeUrl.trim()
+        : DEFAULT_CINEMA_CONFIG.bridgeUrl;
+  const bridgeUrl = rawUrl.replace(/\/+$/, "");
+  const rawTimeout = pickFinite(b?.timeoutMs, p?.timeoutMs, DEFAULT_CINEMA_CONFIG.timeoutMs);
+  const timeoutMs = Math.max(500, Math.min(15_000, Math.floor(rawTimeout)));
+  return {
+    bridgeUrl,
+    timeoutMs,
+    syncPauseResume: pickBool(
+      b?.syncPauseResume,
+      p?.syncPauseResume,
+      DEFAULT_CINEMA_CONFIG.syncPauseResume,
+    ),
+  };
+}
+
+/**
  * 单 Psyber 实例核心配置（存盘于 <dataDir>/config.json，绝不含明文密钥）。
  */
 /** 用户主动挂出的双人状态签（心绪短句 + 勿扰开关，绝非系统偷窥猜测） */
@@ -710,6 +754,8 @@ export interface PsyberConfig {
   memoryMcp?: MemoryMcpConfig;
   /** 内置 bash 工具安全边界配置（允许目录、超时与输出上限） */
   bash?: BashToolConfig;
+  /** 内置观影伴看（cinema）本地采集桥接配置（如 cowatch HTTP /pull） */
+  cinema?: CinemaConfig;
   /** 用户手动停用的非核心扩展工具名列表（Tier 1 元工具不可停用） */
   disabledTools?: string[];
   /** 是否已完成初生引导 */
@@ -815,6 +861,7 @@ export async function loadOrCreateConfig(
       circadian: { ...DEFAULT_CIRCADIAN_CONFIG },
       notifications: { ...DEFAULT_NOTIFICATIONS_CONFIG },
       memoryMcp: mergeMemoryMcpConfig(),
+      cinema: mergeCinemaConfig(),
       genesisCompleted: false,
     };
     await saveConfig(dataDir, cfg);
@@ -877,6 +924,7 @@ export async function loadOrCreateConfig(
     llm: cfg.llm,
     mcpServers: Array.isArray(cfg.mcpServers) ? cfg.mcpServers : [],
     memoryMcp: mergeMemoryMcpConfig(cfg.memoryMcp),
+    cinema: mergeCinemaConfig(cfg.cinema),
     bash: cfg.bash
       ? {
           ...(Array.isArray(cfg.bash.allowedDirs)

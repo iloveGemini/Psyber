@@ -129,6 +129,8 @@ class AppController {
       ValueNotifier<SettingsSnapshot?>(null);
   final ValueNotifier<ActivitySessionView?> activeActivityNotifier =
       ValueNotifier<ActivitySessionView?>(null);
+  final ValueNotifier<CinemaBridgeInfo?> cinemaBridgeNotifier =
+      ValueNotifier<CinemaBridgeInfo?>(null);
 
   /// NG-4：召回评测浮条默认关闭，仅在用户主动开启评测模式后呈现。
   final ValueNotifier<bool> recallEvalModeNotifier = ValueNotifier<bool>(false);
@@ -547,6 +549,7 @@ class AppController {
     pendingModelSwitchNotifier.value = null;
     settingsNotifier.value = null;
     activeActivityNotifier.value = null;
+    cinemaBridgeNotifier.value = null;
     pendingApprovalNotifier.value = null;
     _hasLoadedOlder = false;
     _hasMoreHistory = false;
@@ -1063,6 +1066,50 @@ class AppController {
     if (activated.id.isNotEmpty) {
       _replaceGroupAndUpsertTimelineItem(activated);
     }
+  }
+
+  Future<CinemaBridgeInfo?> refreshCinemaBridgeStatus() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    try {
+      final info = await _api.getCinemaBridgeStatus(profile);
+      if (!_disposed) {
+        cinemaBridgeNotifier.value = info;
+      }
+      return info;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ActivitySessionView?> startCinemaActivity({String? title}) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return null;
+    final session = await _api.startCinemaActivity(profile, title: title);
+    if (!_disposed) {
+      activeActivityNotifier.value = session;
+    }
+    return session;
+  }
+
+  Future<List<CinemaWindowItem>> listCinemaWindows() async {
+    final profile = profileNotifier.value;
+    if (profile == null) return const <CinemaWindowItem>[];
+    return _api.listCinemaWindows(profile);
+  }
+
+  Future<void> selectCinemaWindow(int windowId) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    await _api.selectCinemaWindow(profile, windowId);
+    await refreshCinemaBridgeStatus();
+  }
+
+  Future<void> setCinemaMode(String mode) async {
+    final profile = profileNotifier.value;
+    if (profile == null) return;
+    await _api.setCinemaMode(profile, mode);
+    await refreshCinemaBridgeStatus();
   }
 
   Future<void> endActiveCinema() async {
@@ -1789,6 +1836,7 @@ class AppController {
     pendingModelSwitchNotifier.dispose();
     settingsNotifier.dispose();
     activeActivityNotifier.dispose();
+    cinemaBridgeNotifier.dispose();
     recallEvalModeNotifier.dispose();
     themeModeNotifier.dispose();
     lightPaletteNotifier.dispose();

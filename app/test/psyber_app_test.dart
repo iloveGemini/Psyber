@@ -619,6 +619,51 @@ class FakePsyberApiClient implements PsyberApiClient {
   }
 
   @override
+  Future<CinemaBridgeInfo?> getCinemaBridgeStatus(ConnectionProfile profile) async {
+    return const CinemaBridgeInfo(
+      bridgeUrl: 'http://127.0.0.1:18765',
+      configured: true,
+      reachable: true,
+      activeDrama: '测试剧集',
+      progress: '12:03 / 45:00',
+      contentMode: 'drama',
+    );
+  }
+
+  @override
+  Future<ActivitySessionView> startCinemaActivity(
+    ConnectionProfile profile, {
+    String? title,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = ActivitySessionView(
+      id: 'act-started',
+      slug: 'cinema',
+      title: (title != null && title.isNotEmpty) ? title : '测试剧集',
+      topicHint: '测试剧集',
+      status: 'active',
+      startedAt: now,
+      lastHeartbeatAt: now,
+      metadata: const {'progress': '12:03 / 45:00', 'bridgeConnected': true},
+    );
+    activeActivity = session;
+    return session;
+  }
+
+  @override
+  Future<List<CinemaWindowItem>> listCinemaWindows(ConnectionProfile profile) async {
+    return const [
+      CinemaWindowItem(windowId: 101, owner: 'IINA', title: '测试剧集 第1集'),
+    ];
+  }
+
+  @override
+  Future<void> selectCinemaWindow(ConnectionProfile profile, int windowId) async {}
+
+  @override
+  Future<void> setCinemaMode(ConnectionProfile profile, String mode) async {}
+
+  @override
   Future<void> endCinemaActivity(
     ConnectionProfile profile, {
     String? sessionId,

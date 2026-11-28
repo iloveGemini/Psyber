@@ -1,14 +1,26 @@
 import type { McpServerConfig, McpTransport, McpTrustLevel } from "../core/config.ts";
 import type { StoredCredentials } from "../core/credentials.ts";
-import type { ToolRegistry } from "../tools/registry.ts";
+import { DEFAULT_LLM_IMAGE_HARD_BYTES } from "../core/image_compress.ts";
+import type { ToolRegistry, ToolResult, ToolResultImage } from "../tools/registry.ts";
 
 export const MCP_SERVER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const MAX_MCP_OUTPUT_CHARS = 8000;
+export const MAX_MCP_IMAGES = 4;
+export const MAX_MCP_IMAGE_BYTES = DEFAULT_LLM_IMAGE_HARD_BYTES;
 export const DEFAULT_MCP_TIMEOUT_MS = 30_000;
 export const MAX_MCP_TIMEOUT_MS = 120_000;
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 export const DEFAULT_RECONNECT_DELAYS_MS = [2_000, 10_000, 30_000];
 export const DEFAULT_KILL_GRACE_MS = 3_000;
+
+const MCP_SUPPORTED_IMAGE_MIMES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+const DATA_URI_IMAGE_RE = /^data:([^;,]+);base64,([\s\S]+)$/i;
+const BASE64_BODY_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
 export type McpServerStatus = "connected" | "degraded" | "disabled";
 
@@ -667,11 +679,119 @@ export interface McpManagerDeps {
   ) => McpTransportClient;
 }
 
-function formatMcpCallResult(res: McpToolCallResult): { ok: boolean; output: string } {
+function normalizeMcpImageMime(raw?: string): string {
+  const clean = (raw ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (clean === "image/jpg") return "image/jpeg";
+  return clean;
+}
+
+function estimateBase64DecodedBytes(b64: string): number {
+  const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
+function parseMcpImagePayload(
+  rawData: unknown,
+  rawMime: unknown,
+): { ok: true; image: ToolResultImage } | { ok: false; reason: string } {
+  if (typeof rawData !== "string" || !rawData.trim()) {
+    return { ok: false, reason: "图片数据为空" };
+  }
+  let dataStr = rawData.trim();
+  let mimeStr = typeof rawMime === "string" ? rawMime : "";
+  const dataUriMatch = DATA_URI_IMAGE_RE.exec(dataStr);
+  if (dataUriMatch) {
+    if (!mimeStr) mimeStr = dataUriMatch[1] ?? "";
+    dataStr = dataUriMatch[2] ?? "";
+  }
+  const cleanB64 = dataStr.replace(/\s+/g, "");
+  if (!cleanB64 || cleanB64.length % 4 === 1 || !BASE64_BODY_RE.test(cleanB64)) {
+    return { ok: false, reason: "图片 base64 格式无效" };
+  }
+  const mimeType = normalizeMcpImageMime(mimeStr);
+  if (!MCP_SUPPORTED_IMAGE_MIMES.has(mimeType)) {
+    return { ok: false, reason: `暂不支持格式 ${mimeType || "unknown"}` };
+  }
+  const approxBytes = estimateBase64DecodedBytes(cleanB64);
+  if (approxBytes === 0) {
+    return { ok: false, reason: "图片数据为空" };
+  }
+  if (approxBytes > MAX_MCP_IMAGE_BYTES) {
+    const mb = (approxBytes / (1024 * 1024)).toFixed(2);
+    const limitMb = (MAX_MCP_IMAGE_BYTES / (1024 * 1024)).toFixed(2);
+    return { ok: false, reason: `体积约 ${mb} MB，超过单图上限 ${limitMb} MB` };
+  }
+  return {
+    ok: true,
+    image: {
+      type: "image",
+      data: cleanB64,
+      mimeType,
+    },
+  };
+}
+
+/**
+ * 格式化外部 MCP 工具调用结果（Spec 03 §5.2）：
+ * - 文本块截断至 MAX_MCP_OUTPUT_CHARS；
+ * - 图片块（`type: "image"` 或 `type: "resource"` 中 `image/*` blob）透传为当轮临时 `ToolResult.images`，
+ *   仅在当轮工具循环送给模型，跨轮不落盘 base64，绝不把 base64 原文混进文本 output。
+ */
+export function formatMcpCallResult(res: McpToolCallResult): ToolResult {
   const parts: string[] = [];
+  const images: ToolResultImage[] = [];
+  let totalImageBlocks = 0;
+  let skippedByCount = 0;
+
+  const tryPushImage = (rawData: unknown, rawMime: unknown): void => {
+    totalImageBlocks += 1;
+    if (images.length >= MAX_MCP_IMAGES) {
+      skippedByCount += 1;
+      return;
+    }
+    const parsed = parseMcpImagePayload(rawData, rawMime);
+    if (parsed.ok) {
+      images.push(parsed.image);
+    } else {
+      parts.push(`[外部工具图片已跳过：${parsed.reason}]`);
+    }
+  };
+
   if (Array.isArray(res.content)) {
     for (const block of res.content) {
       if (!block || typeof block !== "object") continue;
+      if (block.type === "image") {
+        tryPushImage(block.data, block.mimeType ?? block.mime_type);
+        continue;
+      }
+      if (block.type === "audio") {
+        const mime = typeof block.mimeType === "string" ? block.mimeType : "audio";
+        parts.push(`[外部工具返回音频块（${mime}），当前暂不支持直接透传]`);
+        continue;
+      }
+      if (block.type === "resource" && block.resource && typeof block.resource === "object") {
+        const resource = block.resource as Record<string, unknown>;
+        if (typeof resource.blob === "string") {
+          const rMime = normalizeMcpImageMime(
+            typeof resource.mimeType === "string"
+              ? resource.mimeType
+              : typeof resource.mime_type === "string"
+                ? resource.mime_type
+                : "",
+          );
+          if (rMime.startsWith("image/")) {
+            tryPushImage(resource.blob, rMime);
+          } else {
+            const uri = typeof resource.uri === "string" ? ` ${resource.uri}` : "";
+            parts.push(`[外部工具返回二进制资源${uri}（${rMime || "binary"}），当前暂不支持直接透传]`);
+          }
+          continue;
+        }
+        if (typeof resource.text === "string") {
+          parts.push(resource.text);
+          continue;
+        }
+      }
       if (typeof block.text === "string") {
         parts.push(block.text);
       } else {
@@ -679,10 +799,24 @@ function formatMcpCallResult(res: McpToolCallResult): { ok: boolean; output: str
       }
     }
   }
-  const rawText = parts.length > 0 ? parts.join("\n") : JSON.stringify(res ?? {});
+
+  if (skippedByCount > 0) {
+    parts.push(`[外部工具共返回 ${totalImageBlocks} 张图片，已仅载入前 ${MAX_MCP_IMAGES} 张]`);
+  }
+
+  let rawText: string;
+  if (parts.length > 0) {
+    rawText = parts.join("\n");
+  } else if (images.length > 0) {
+    rawText = `[外部工具返回了 ${images.length} 张图片（仅本轮可见，下轮将自动回收）]`;
+  } else {
+    rawText = JSON.stringify(res ?? {});
+  }
+
   return {
     ok: !res.isError,
     output: truncateMcpOutput(rawText, MAX_MCP_OUTPUT_CHARS),
+    ...(images.length > 0 ? { images } : {}),
   };
 }
 

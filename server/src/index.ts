@@ -49,6 +49,7 @@ import {
 } from "./engine/tidy.ts";
 import { syncStaticStickers } from "./expression/stickers.ts";
 import { registerBashTool } from "./extensions/bash.ts";
+import { CinemaActivityPlugin } from "./extensions/cinema.ts";
 import { registerFsTools } from "./extensions/fs_tools.ts";
 import { registerMemoryHistoryTool } from "./extensions/memory_history.ts";
 import { registerViewMediaTool } from "./extensions/view_media.ts";
@@ -153,6 +154,7 @@ export interface PsyberRuntime {
   drawer: DrawerStore;
   media: MediaStore;
   mcp: McpManager;
+  cinema: CinemaActivityPlugin;
   pairing: PairingManager;
   sse: SseHub;
   notifications: NotificationHub;
@@ -293,6 +295,19 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   }
 
   const sse = new SseHub();
+  const cinema = new CinemaActivityPlugin({
+    db,
+    events,
+    clock,
+    getConfig: () => config,
+    getActiveSessionId: () => engineRef?.getActiveSessionId() ?? events.getActiveSessionState()?.sessionId ?? ulid(clock.now()),
+    fetchImpl: opts.fetchImpl,
+    onSessionUpdated: (session) => {
+      sse.emit("activity.updated", { session });
+    },
+  });
+  cinema.registerTools(registry);
+  registry.setDisabledTools(config.disabledTools ?? []);
   const notifications = new NotificationHub({
     clock,
     getConfig: () => config,
@@ -745,6 +760,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     decisionClient: bedtimeDecisionClient,
     digestModel,
     forceDigestModel: Boolean(opts.digestModel),
+    activityProvider: cinema,
     onAttachmentDigestUpdated: (ev) => {
       sse.emit("message.updated", {
         action: "digest",
@@ -855,6 +871,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
       const nowMs = clock.now();
       const today = localDay(nowMs, config.timezone);
       const sleepStatus = getSleepWindowStatus(nowMs, config.timezone, config.circadian);
+      await cinema.checkIdleStatus(sleepStatus.inSleepWindow).catch(() => {});
       const coverage = await resolveBedtimeCoverage(today);
       const unsettledPriorNightDate = sleepStatus.inSleepWindow
         ? null
@@ -898,7 +915,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
           cutoffSeq = row?.max_seq ?? null;
         }
         void enqueueTidy("bedtime", decision.nightDate, cutoffSeq);
-      } else if (decision.action === "proactive") {
+      } else if (decision.action === "proactive" && !cinema.getActiveSession()) {
         lastWakeMs = clock.now();
 
         const wakeTurnId = ulid(clock.now());
@@ -1046,6 +1063,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     db,
     memoryIndex,
     memoryTools,
+    decisionClient: bedtimeDecisionClient,
     embedding: embeddingClient,
     memoryGitMutex,
     drawer,
@@ -1054,6 +1072,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     pairing,
     media,
     mcp,
+    cinema,
     toolRegistry: registry,
     modelCatalog,
     notifications,
@@ -1138,6 +1157,7 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
     drawer,
     media,
     mcp,
+    cinema,
     pairing,
     sse,
     notifications,

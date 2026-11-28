@@ -222,6 +222,24 @@ abstract class PsyberApiClient {
   /// Ring 1.5：拉取活跃活动会话（Ring 1 服务端未挂载时返回 null）。
   Future<ActivitySessionView?> getActiveActivity(ConnectionProfile profile);
 
+  /// Ring 1.5：探测本地伴看采集服务状态（如 cowatch serve）。
+  Future<CinemaBridgeInfo?> getCinemaBridgeStatus(ConnectionProfile profile);
+
+  /// Ring 1.5：开启观影伴看活动（支持自动从本地采集服务探测剧名）。
+  Future<ActivitySessionView> startCinemaActivity(
+    ConnectionProfile profile, {
+    String? title,
+  });
+
+  /// Ring 1.5：列出本地可伴看视频窗口。
+  Future<List<CinemaWindowItem>> listCinemaWindows(ConnectionProfile profile);
+
+  /// Ring 1.5：切换伴看锁定窗口（windowId=0 恢复自动识别）。
+  Future<void> selectCinemaWindow(ConnectionProfile profile, int windowId);
+
+  /// Ring 1.5：切换伴看内容识别模式（auto / drama / variety）。
+  Future<void> setCinemaMode(ConnectionProfile profile, String mode);
+
   /// Ring 1.5：结束观影伴看活动。
   Future<void> endCinemaActivity(
     ConnectionProfile profile, {
@@ -1021,7 +1039,7 @@ class HttpPsyberApiClient implements PsyberApiClient {
 
   @override
   Future<ActivitySessionView?> getActiveActivity(ConnectionProfile profile) async {
-    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities');
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities?probe=0');
     try {
       final json = await _requestJson(
         method: 'GET',
@@ -1037,6 +1055,98 @@ class HttpPsyberApiClient implements PsyberApiClient {
       if (e.isEndpointUnavailable) return null;
       rethrow;
     }
+  }
+
+  @override
+  Future<CinemaBridgeInfo?> getCinemaBridgeStatus(ConnectionProfile profile) async {
+    final uri = Uri.parse('${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities');
+    try {
+      final json = await _requestJson(
+        method: 'GET',
+        uri: uri,
+        bearerToken: profile.token,
+      );
+      final rawCinema = json['cinema'];
+      if (rawCinema is Map<String, dynamic>) {
+        return CinemaBridgeInfo.fromJson(rawCinema);
+      }
+      return null;
+    } on ApiException catch (e) {
+      if (e.isEndpointUnavailable) return null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<ActivitySessionView> startCinemaActivity(
+    ConnectionProfile profile, {
+    String? title,
+  }) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities/cinema/start',
+    );
+    final json = await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {
+        if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
+      },
+    );
+    final raw = json['session'];
+    if (raw is Map<String, dynamic>) {
+      return ActivitySessionView.fromJson(raw);
+    }
+    throw const ApiException(
+      statusCode: 500,
+      code: 'INVALID_RESPONSE',
+      message: '启动伴看返回格式异常',
+    );
+  }
+
+  @override
+  Future<List<CinemaWindowItem>> listCinemaWindows(ConnectionProfile profile) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities/cinema/windows',
+    );
+    final json = await _requestJson(
+      method: 'GET',
+      uri: uri,
+      bearerToken: profile.token,
+    );
+    final raw = json['windows'];
+    if (raw is! List<dynamic>) return const <CinemaWindowItem>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(CinemaWindowItem.fromJson)
+        .where((w) => w.windowId > 0)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> selectCinemaWindow(ConnectionProfile profile, int windowId) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities/cinema/window',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {'windowId': windowId},
+    );
+  }
+
+  @override
+  Future<void> setCinemaMode(ConnectionProfile profile, String mode) async {
+    final uri = Uri.parse(
+      '${normalizeBaseUrl(profile.baseUrl)}/api/v1/activities/cinema/mode',
+    );
+    await _requestJson(
+      method: 'POST',
+      uri: uri,
+      bearerToken: profile.token,
+      body: {'mode': mode},
+    );
   }
 
   @override

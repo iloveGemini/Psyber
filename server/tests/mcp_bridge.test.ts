@@ -5,7 +5,12 @@ import path from "node:path";
 import { hashBearerToken } from "../src/api/app.ts";
 import { VirtualClock } from "../src/core/clock.ts";
 import { saveConfig } from "../src/core/config.ts";
-import { MAX_MCP_OUTPUT_CHARS } from "../src/extensions/mcp.ts";
+import {
+  formatMcpCallResult,
+  MAX_MCP_IMAGE_BYTES,
+  MAX_MCP_IMAGES,
+  MAX_MCP_OUTPUT_CHARS,
+} from "../src/extensions/mcp.ts";
 import { bootPsyberRuntime } from "../src/index.ts";
 import type { ChatModelClient, ChatStreamChunk, ChatStreamRequest } from "../src/llm/client.ts";
 
@@ -406,6 +411,167 @@ describe("Ring 1.5 外部 MCP 桥接（Tier 3 隔离、凭证分离、confirm �
       });
       expect(reloadRes.status).toBe(200);
       expect(rt.mcp.getStatusList()).toEqual([]);
+    } finally {
+      await rt.stop();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("formatMcpCallResult 图片透传、纯图结果、格式归一、数量上限与防 base64 泄漏", () => {
+    const sampleB64 = Buffer.from("fake-jpeg-bytes").toString("base64");
+
+    // 1. 文本 + 标准 image 块 + data URI / image/jpg 归一 + resource 嵌入图
+    const mixed = formatMcpCallResult({
+      content: [
+        { type: "text", text: "<video_cowatch_context>进度 12:03</video_cowatch_context>" },
+        { type: "image", data: `data:image/jpg;base64,${sampleB64}\n`, mimeType: "" },
+        {
+          type: "resource",
+          resource: { uri: "file:///frame.png", mimeType: "image/png", blob: sampleB64 },
+        },
+      ],
+    });
+    expect(mixed.ok).toBe(true);
+    expect(mixed.output).toBe("<video_cowatch_context>进度 12:03</video_cowatch_context>");
+    expect(mixed.output).not.toContain(sampleB64);
+    expect(mixed.images).toEqual([
+      { type: "image", data: sampleB64, mimeType: "image/jpeg" },
+      { type: "image", data: sampleB64, mimeType: "image/png" },
+    ]);
+
+    // 2. 纯图片响应：绝不把 JSON.stringify(res) 的 base64 倒进 output
+    const imageOnly = formatMcpCallResult({
+      content: [{ type: "image", data: sampleB64, mimeType: "image/webp" }],
+    });
+    expect(imageOnly.ok).toBe(true);
+    expect(imageOnly.output).toContain("1 张图片");
+    expect(imageOnly.output).not.toContain(sampleB64);
+    expect(imageOnly.images).toEqual([{ type: "image", data: sampleB64, mimeType: "image/webp" }]);
+
+    // 3. 超过 MAX_MCP_IMAGES 截断 + 不支持格式 + 超体积拦截，均不泄漏 base64
+    const oversizedB64 = "A".repeat(Math.ceil(((MAX_MCP_IMAGE_BYTES + 1024) * 4) / 3));
+    const guarded = formatMcpCallResult({
+      content: [
+        { type: "image", data: sampleB64, mimeType: "image/svg+xml" },
+        { type: "image", data: oversizedB64, mimeType: "image/png" },
+        ...Array.from({ length: MAX_MCP_IMAGES + 2 }, () => ({
+          type: "image",
+          data: sampleB64,
+          mimeType: "image/jpeg",
+        })),
+      ],
+    });
+    expect(guarded.ok).toBe(true);
+    expect(guarded.images?.length).toBe(MAX_MCP_IMAGES);
+    expect(guarded.output).toContain("暂不支持格式 image/svg+xml");
+    expect(guarded.output).toContain("超过单图上限");
+    expect(guarded.output).toContain(`仅载入前 ${MAX_MCP_IMAGES} 张`);
+    expect(guarded.output).not.toContain(sampleB64);
+    expect(guarded.output).not.toContain("AAAA".repeat(20));
+  });
+
+  test("端到端 MCP 图片透传：经 call_tool 送入当轮模型 toolResult.images，跨轮不落盘 base64", async () => {
+    const dataDir = await makeTempDir("psyber-mcp-image-e2e-");
+    const clock = new VirtualClock(Date.parse("2026-11-28T01:30:00Z"), "Asia/Shanghai");
+    const gridB64 = Buffer.from("mock-2x2-grid-jpeg-payload").toString("base64");
+    const observedToolImagesPerCall: Array<Array<{ mimeType: string; data: string }>> = [];
+
+    let step = 0;
+    const mockModel: ChatModelClient = {
+      modelId: "mock-vision-chat",
+      contextWindow: 100_000,
+      async *stream(req: ChatStreamRequest): AsyncIterable<ChatStreamChunk> {
+        step += 1;
+        const toolResults = req.messages.filter((m) => m.role === "toolResult");
+        const latestImages = toolResults.flatMap((m) =>
+          m.role === "toolResult" && m.images ? m.images.map((i) => ({ mimeType: i.mimeType, data: i.data })) : [],
+        );
+        observedToolImagesPerCall.push(latestImages);
+
+        if (step === 1) {
+          yield {
+            type: "tool_call",
+            id: "tc_cowatch",
+            name: "call_tool",
+            args: { name: "mcp.cowatch.get_recent_video_context", arguments: { clear_subtitles: true } },
+          };
+          return;
+        }
+        if (step === 2) {
+          yield { type: "text_delta", delta: `看到了四宫格（共 ${latestImages.length} 张图）` };
+          return;
+        }
+        // 第二轮普通聊天：确认历史消息里绝不残留上一轮 MCP 图片 base64
+        const hasLeakedBase64 = JSON.stringify(req.messages).includes(gridB64);
+        yield { type: "text_delta", delta: hasLeakedBase64 ? "LEAKED" : "第二轮干净" };
+      },
+    };
+
+    const rt = await bootPsyberRuntime({
+      dataDir,
+      clock,
+      chatModel: mockModel,
+      startHeartbeatTimer: false,
+      mcpClientFactory: () => ({
+        async initialize() {},
+        async listTools() {
+          return [{ name: "get_recent_video_context", description: "获取观影四宫格与字幕时间轴" }];
+        },
+        async callTool() {
+          return {
+            content: [
+              { type: "text", text: "[12:03] 台词：这一幕也太帅了" },
+              { type: "image", data: gridB64, mimeType: "image/jpeg" },
+            ],
+          };
+        },
+        async close() {},
+      }),
+    });
+
+    try {
+      const token = "psb_mcp_img_1";
+      rt.config.auth.devices.push({
+        deviceId: "dev-1",
+        tokenHash: hashBearerToken(token),
+        deviceName: "Mac",
+        platform: "macos",
+        createdAt: clock.now(),
+        lastSeenAt: clock.now(),
+      });
+      await saveConfig(dataDir, rt.config);
+
+      const patchRes = await rt.app.request("/api/v1/settings", {
+        method: "PATCH",
+        headers: { ...makeAuthHeader(token), "content-type": "application/json" },
+        body: JSON.stringify({
+          mcpServers: [
+            {
+              id: "cowatch",
+              enabled: true,
+              transport: "streamable_http",
+              url: "https://cowatch.example.test/mcp",
+              trustLevel: "auto",
+            },
+          ],
+        }),
+      });
+      expect(patchRes.status).toBe(200);
+
+      // 第一轮：调用 MCP 获取图文并验证模型真实收到 image 块
+      const turn1 = await rt.engine.runTurn({ mode: "chat", userText: "看看刚才那段画面" });
+      expect(turn1.error).toBeUndefined();
+      expect(turn1.text).toContain("看到了四宫格（共 1 张图）");
+      expect(observedToolImagesPerCall[1]).toEqual([{ mimeType: "image/jpeg", data: gridB64 }]);
+
+      // 验证 SQLite events 绝未落盘 base64
+      const history = rt.events.listHistory({ limit: 20 }).items;
+      expect(JSON.stringify(history)).not.toContain(gridB64);
+
+      // 第二轮：确认跨轮自动回收，不再携带旧图 base64
+      const turn2 = await rt.engine.runTurn({ mode: "chat", userText: "接着聊别的" });
+      expect(turn2.error).toBeUndefined();
+      expect(turn2.text).toBe("第二轮干净");
     } finally {
       await rt.stop();
       await fs.rm(dataDir, { recursive: true, force: true });

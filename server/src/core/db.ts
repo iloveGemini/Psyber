@@ -147,6 +147,25 @@ CREATE INDEX IF NOT EXISTS idx_card_links_src    ON card_links(src_path);
 CREATE INDEX IF NOT EXISTS idx_card_links_target ON card_links(link_kind, target_ref);
 `;
 
+const MIGRATION_003_ACTIVITIES = `
+-- 10. 活动会话生命周期表（对齐 Spec 03 §4.1，供 ActivityPlugin / cinema 伴看持久化与防误结束巡检）
+CREATE TABLE IF NOT EXISTS activity_sessions (
+  id                TEXT PRIMARY KEY,
+  slug              TEXT NOT NULL,
+  title             TEXT NOT NULL,
+  topic_hint        TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'active',
+  start_event_id    TEXT NOT NULL,
+  end_event_id      TEXT,
+  started_at        INTEGER NOT NULL,
+  ended_at          INTEGER,
+  last_heartbeat_at INTEGER NOT NULL,
+  metadata          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_sessions_status ON activity_sessions(status, slug);
+CREATE INDEX IF NOT EXISTS idx_activity_sessions_ended  ON activity_sessions(status, ended_at) WHERE status = 'ended';
+`;
+
 /**
  * 打开 SQLite 数据库并启用 WAL + 外键 + 忙等待，保证单进程并发读写稳定。
  */
@@ -169,5 +188,10 @@ export function runMigrations(db: Database, nowMs: number): void {
   const v2 = db.query("SELECT 1 FROM _migrations WHERE version = 2").get();
   if (!v2) {
     db.query("INSERT INTO _migrations (version, applied_at) VALUES (2, ?)").run(nowMs);
+  }
+  db.exec(MIGRATION_003_ACTIVITIES);
+  const v3 = db.query("SELECT 1 FROM _migrations WHERE version = 3").get();
+  if (!v3) {
+    db.query("INSERT INTO _migrations (version, applied_at) VALUES (3, ?)").run(nowMs);
   }
 }
