@@ -1,11 +1,14 @@
 # Psyber 当前状态
 
 > 开发交接用，不替代 `docs/` 中的架构与契约；全文保持精简（≲ 100 行）。
-> 最后更新：2026-11-28（落地内置观影伴看插件 `cinema` 及本地 HTTP `/pull` 零延迟桥接，补齐外部 MCP 桥接图片块透传；前期已完成 P0 源头凭证过滤与 P1 高敏隔离区）。
+> 最后更新：2026-11-28（落地双层记忆淡出机制与 MCP replay 质量对齐；前期已完成观影伴看 `cinema`、外部 MCP 图片透传、P0 源头凭证过滤与 P1 高敏隔离区）。
 
-## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、源头凭证过滤（P0）、高敏隔离区与记忆补齐（P1）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
+## 1. 当前阶段：Ring 1.5 外部 MCP 桥接、对外记忆 MCP 工具层（第一、二阶段）、双层记忆淡出、源头凭证过滤（P0）、高敏隔离区与记忆补齐（P1）、Tier 3 工具集、记忆反思、向量+Decision 召回/体检、双端异步语音条与附件并行摘要已落地
 
 ### 已完成
+- **双层记忆淡出机制（`docs/` + `prompts/` + `server/`，2026-11-28）**：
+  - `episodes/` 索引层软淡出：数据库迁移 v4 为 `card_index` 增加 `pinned` 列；`config.ts` / `admin_routes.ts` 新增 `recall.episodeFadeDays`（默认 90 天，`0` 禁用，范围 `0..3650`）；`MemoryIndex.computeSoftFadedEpisodePaths` 对超期、未 `pinned` 且无 `core/`/`favorite/`/`lessons/` 有效入链的 `ep-*.md` 在索引层自动软淡出，退出主召回（含 1 跳扩展）、对外 `memory_search`（含 1 跳邻居）与体检雷达，绝不改盘且 `read` 可直接读回；`recallMemories` 确认命中落库 `recall_traces` 时同步刷新 `access_count` / `last_accessed` 实现召回保活；`MemoryTools.read` 按 `kind === 'state'` 区分「已过短期 TTL」与「已自然淡出」文案。
+  - `threads/` 周反思久未更新只读雷达：`memory/radar.ts` 新增 0-LLM 本地扫描 `scanStaleThreadFindings`（按 `threads/REGISTRY.yaml` `decay` 阈值 `short` ≥ 30d / `slow` ≥ 90d，豁免 `decay: none`/`thread:lists`/`kind: work`，活跃度取 `max(updated_at, last_accessed, 最新入链 updated_at)`，单次上限 5 条）并渲染至 `<memory_radar>` 的 `[久未更新 / 可考虑淡出]`；`runMemoryRadar` 在 `weekly` 模式下兼容无 `decisionClient` 与无新卡场景，`reflect.ts`/`replay_runner.ts`/`tidy.ts` 统一透传 `episodeFadeDays`；同步更新 `prompts/_memory-schema.md`、`prompts/reflect.md`、`docs/MEMORY.md` 并新增 `tests/memory_fading.test.ts`。
 - **内置观影伴看插件（`cinema` · 本地 HTTP `/pull` 桥接，`docs/` + `server/` + `app/`，2026-11-28）**：
   - 契约、配置与存储：更新 [docs/spec/03-boundaries-expression-activities.md](docs/spec/03-boundaries-expression-activities.md) §4.3 与 [docs/API.md](docs/API.md) §3；`core/config.ts` 新增 `cinema` 配置（`bridgeUrl` 默认 `http://127.0.0.1:18765`、`timeoutMs=2500`、`syncPauseResume=true`）与 `/settings` 校验；`core/db.ts` 新增迁移 v3 `activity_sessions` 表；`core/media.ts` 扩展 `cinema_frame` 来源与 `pinned` 控制；`engine/sse.ts` 新增 `activity.updated` 事件类型。
   - 插件、工具与零延迟注入：新增 `server/src/extensions/cinema.ts`（`CinemaActivityPlugin`），负责单活跃会话持久化、开/关联动采集源 `/resume` & `/pause`、心跳 30m `stale`/4h 软结束防误结束巡检，并注册 6 个 Tier 2 观影工具（`cinema.status` / `save_character` / `rename_character` / `get_frame_at` 临时带图 / `switch_window` / `set_mode`，不污染 Tier 1 Static Prefix）；`engine/direct.ts` 接入 `activityProvider`，聊天前自动拉取 `/pull?clear=1` 与 `/api/grid.jpg` 注入 Dynamic Tail `<active_activity>` 与当轮临时四宫格图（跨轮不落盘 base64，采集离线自动降级）；`api/app.ts` 挂载 `/api/v1/activities*` 路由与 `/cinema/grid` 鉴权代理并自动标记消息 `activity='cinema'`；新增 `server/tests/cinema_activity.test.ts`（2 组全离线集成用例）。
@@ -87,5 +90,5 @@
 - 按需推进 Ring 1.5 剩余项：多端点竞速、GFS 三级备份与 `export`/`restore` CLI、观影结束自动派发 `activity:cinema` 专题整理轮。
 
 ## 2. 验证结果
-- **`server/`（2026-11-28）**：`bun run typecheck` 零错误；`bun test`（31 文件 / 143 用例 / 2114 断言，含 `tests/cinema_activity.test.ts` 2 用例与 `tests/mcp_bridge.test.ts` 5 用例）全部通过。
+- **`server/`（2026-11-28）**：`bun run typecheck` 零错误；`bun test`（32 文件 / 148 用例 / 2191 断言，含 `tests/memory_fading.test.ts` 3 用例）全部通过。
 - **`app/`（2026-11-28）**：`flutter analyze` 零问题；`flutter test`（31 用例）全部通过。

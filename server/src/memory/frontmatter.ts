@@ -35,6 +35,7 @@ export interface ParsedCard {
   dateKind: DateKind;
   ttlDays: number | null;
   expiresAt: number | null;
+  pinned: boolean;
   createdAt: number;
   updatedAt: number;
   body: string;
@@ -236,6 +237,8 @@ export function parseCardMarkdown(
     }
   }
 
+  const pinned = raw.pinned === true;
+
   return {
     relPath,
     space,
@@ -247,6 +250,7 @@ export function parseCardMarkdown(
     dateKind,
     ttlDays,
     expiresAt,
+    pinned,
     createdAt,
     updatedAt,
     body,

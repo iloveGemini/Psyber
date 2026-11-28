@@ -575,7 +575,10 @@ export class MemoryTools {
     if (row) {
       const st = effectiveStatus(row, this.clock.now());
       if (st === "faded") {
-        prefix += "[索引状态: faded（已过短期 TTL）]\n";
+        prefix +=
+          row.kind === "state"
+            ? "[索引状态: faded（已过短期 TTL）]\n"
+            : "[索引状态: faded（已自然淡出）]\n";
       }
       if (opts.countAccess && offset === 0) {
         this.index.incrementAccess(resolvedRel);

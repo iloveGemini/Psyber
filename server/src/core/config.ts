@@ -90,6 +90,8 @@ export interface RecallConfig {
   multiHop?: RecallMultiHopConfig;
   /** 高敏私密记忆区（memory/sensitive/）的外部向量隔离与高门槛召回策略 */
   sensitive?: RecallSensitiveConfig;
+  /** 普通情景切片（episodes/ ep-*.md）无 core/favorite/lessons 入链且未 pinned 时，超过此天数未更新且未被召回即在索引层自动软淡出召回（单位：天，默认 90；设为 0 禁用） */
+  episodeFadeDays?: number;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallConfig = {
@@ -122,6 +124,7 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
     rerankThreshold: 0.55,
     ftsMinScore: 0.45,
   },
+  episodeFadeDays: 90,
 };
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
@@ -247,6 +250,16 @@ export function mergeRecallConfig(
         DEFAULT_RECALL_CONFIG.sensitive!.ftsMinScore,
       ),
     },
+    episodeFadeDays: Math.max(
+      0,
+      Math.floor(
+        pickFinite(
+          b?.episodeFadeDays,
+          p?.episodeFadeDays,
+          DEFAULT_RECALL_CONFIG.episodeFadeDays!,
+        ),
+      ),
+    ),
   };
 }
 

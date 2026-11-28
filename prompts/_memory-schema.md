@@ -19,7 +19,9 @@ description: 记忆整理与深度反思共用的硬规范底座（[[短标题]]
 - **卡片 Frontmatter 保持极薄**（仅用标准字段，不自造 `type` 字段）：
   - `title`: 遵循上方短且唯一的标题规范
   - `kind`: `episode` | `reflection` | `lesson` | `work` | `serial` | `note`（`index.md` 统一填 `note`）
-  - `status`: `active` | `resolved` | `disputed` | `archived`
+  - `status`: `active` | `resolved` | `disputed` | `faded` | `archived`
+    - `faded` 表示话题自然淡出、不再主动挂在召回里（仍可 `read` / `grep` 翻阅）；`archived` 表示主动完结或封存（若旧认识被新卡取代，设为 `archived` 并在正文写一句「已被 `[[新卡]]` 取代」）
+  - `pinned`: 可选布尔（仅极少数值得长期保活、不被自动软淡出的情景切片 `ep-*.md` 填 `pinned: true`；被 `core/`、`favorite/` 或 `lessons/` 引用的切片会自动保活，无需手动标）
   - `created` / `updated`: `YYYY-MM-DD`
   - `covered_until`: 仅 `episodes/YYYY/MM/index.md`（`YYYY-MM-DD`）与 `episodes/YYYY/index.md`（`YYYY-MM`）必填，标明已滚动覆盖的截止位置
   - `when_to_recall`: 一句话触发提示（`lessons/` 与 `sensitive/` 必填，其余可选）

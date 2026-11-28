@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS card_index (
   when_to_recall TEXT,
   date_kind      TEXT NOT NULL DEFAULT 'ordinary',
   expires_at     INTEGER,
+  pinned         INTEGER NOT NULL DEFAULT 0,
   access_count   INTEGER NOT NULL DEFAULT 0,
   last_accessed  INTEGER,
   content_hash   TEXT NOT NULL,
@@ -193,5 +194,15 @@ export function runMigrations(db: Database, nowMs: number): void {
   const v3 = db.query("SELECT 1 FROM _migrations WHERE version = 3").get();
   if (!v3) {
     db.query("INSERT INTO _migrations (version, applied_at) VALUES (3, ?)").run(nowMs);
+  }
+  const v4 = db.query("SELECT 1 FROM _migrations WHERE version = 4").get();
+  if (!v4) {
+    const hasPinned = db
+      .query("SELECT 1 FROM pragma_table_info('card_index') WHERE name = 'pinned'")
+      .get();
+    if (!hasPinned) {
+      db.exec("ALTER TABLE card_index ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;");
+    }
+    db.query("INSERT INTO _migrations (version, applied_at) VALUES (4, ?)").run(nowMs);
   }
 }

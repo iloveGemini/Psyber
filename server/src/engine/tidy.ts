@@ -1101,6 +1101,7 @@ export async function runMemoryTidyTask(
       targetDay,
       newCardPaths: recentCards.map((c) => c.path),
       radarConfig: deps.getConfig?.()?.radar,
+      episodeFadeDays: deps.getConfig?.()?.recall?.episodeFadeDays,
       includeOpenBoardInBlock: false,
       signal: opts.signal,
     });

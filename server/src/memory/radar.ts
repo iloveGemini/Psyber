@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
+import YAML from "yaml";
 import type { Clock } from "../core/clock.ts";
 import { localDay } from "../core/clock.ts";
 import { mergeRadarConfig, type RadarConfig, type RadarThresholdsConfig } from "../core/config.ts";
@@ -23,12 +24,13 @@ export type RadarFindingKind =
   | "promote"
   | "merge"
   | "redundant"
-  | "link";
+  | "link"
+  | "stale";
 
 export interface RadarFinding {
   kind: RadarFindingKind;
   score: number;
-  source: "board" | "pair";
+  source: "board" | "pair" | "stale";
   /** 涉及的新卡路径与短标题（看板巡检时省略或指向最近变动批次） */
   newCardPath?: string;
   newCardTitle?: string;
@@ -209,6 +211,7 @@ const FINDING_PRIORITY: Record<RadarFindingKind, number> = {
   merge: 4,
   redundant: 5,
   link: 6,
+  stale: 7,
 };
 
 /** 判断路径是否为情景切片（episodes/YYYY/MM/DD/ep-*.md） */
@@ -647,6 +650,109 @@ function selectPairFindings(opts: {
  * - 严守 `prompts/README.md`「判断禁用我」：用系统客观口吻说明可能误报且未改任何文件，处置权完全归 Psyber；
  * - 无命中时返回 `null`（零注入、零打扰）。
  */
+/**
+ * 纯本地 SQLite + threads/REGISTRY.yaml 扫描久未更新的 threads/ 活跃卡片（0 LLM 调用，绝不改盘）：
+ * - 豁免：decay: none、space === 'thread:lists'、kind === 'work'；
+ * - 阈值：decay: short >= 30 天，decay: slow（或未登记）>= 90 天；
+ * - 活跃度时间取 max(updated_at, last_accessed ?? 0, latestInboundLinkUpdatedAt)，兼顾历史导入卡与实时对话卡；
+ * - 每次周反思最多返回 5 条最久未活跃线索，避免刷屏。
+ */
+export async function scanStaleThreadFindings(opts: {
+  db: Database;
+  dataDir: string;
+  memoryIndex: MemoryIndex;
+  nowMs: number;
+  maxItems?: number;
+}): Promise<RadarFinding[]> {
+  const { db, dataDir, memoryIndex, nowMs } = opts;
+  const maxItems = Math.max(0, Math.floor(opts.maxItems ?? 5));
+  if (maxItems <= 0) return [];
+
+  const decayBySlug = new Map<string, "none" | "slow" | "short">();
+  try {
+    const regPath = path.join(dataDir, "memory", "threads", "REGISTRY.yaml");
+    const rawYaml = await fs.readFile(regPath, "utf8");
+    const parsed = YAML.parse(rawYaml) as { spaces?: Record<string, { decay?: string }> } | null;
+    if (parsed?.spaces && typeof parsed.spaces === "object") {
+      for (const [slug, cfg] of Object.entries(parsed.spaces)) {
+        const d = cfg?.decay;
+        if (d === "none" || d === "slow" || d === "short") {
+          decayBySlug.set(slug, d);
+        }
+      }
+    }
+  } catch {
+    // 无 REGISTRY.yaml 或解析失败时按默认 slow(90 天) 处理
+  }
+
+  const threadRows = memoryIndex.listAllRows().filter((r) => {
+    if (!r.space.startsWith("thread:")) return false;
+    if (r.space === "thread:lists") return false;
+    if (r.kind === "work") return false;
+    const slug = r.space.slice("thread:".length);
+    if (decayBySlug.get(slug) === "none") return false;
+    return effectiveStatus(r, nowMs) === "active";
+  });
+  if (threadRows.length === 0) return [];
+
+  const maxInboundByPath = new Map<string, number>();
+  const maxInboundByWiki = new Map<string, number>();
+  try {
+    const edges = db
+      .query(
+        `SELECT l.src_path, l.link_kind, l.target_ref, s.updated_at
+         FROM card_links l
+         JOIN card_index s ON s.path = l.src_path
+         WHERE s.status NOT IN ('resolved', 'archived', 'faded')`,
+      )
+      .all() as Array<{ src_path: string; link_kind: string; target_ref: string; updated_at: number }>;
+    for (const e of edges) {
+      if (e.link_kind === "path") {
+        if (e.src_path === e.target_ref) continue;
+        const prev = maxInboundByPath.get(e.target_ref) ?? 0;
+        if (e.updated_at > prev) maxInboundByPath.set(e.target_ref, e.updated_at);
+      } else if (e.link_kind === "wiki") {
+        const prev = maxInboundByWiki.get(e.target_ref) ?? 0;
+        if (e.updated_at > prev) maxInboundByWiki.set(e.target_ref, e.updated_at);
+      }
+    }
+  } catch {
+    // 忽略链接查询异常
+  }
+
+  const staleEntries: Array<{ row: CardIndexRow; idleDays: number; decay: "slow" | "short"; thresholdDays: number }> = [];
+  for (const row of threadRows) {
+    const slug = row.space.slice("thread:".length);
+    const decay = decayBySlug.get(slug) === "short" ? "short" : "slow";
+    const thresholdDays = decay === "short" ? 30 : 90;
+    const normTitle = normalizeWikiTitle(row.title);
+    const inboundPathAt = maxInboundByPath.get(row.path) ?? 0;
+    const inboundWikiAt = normTitle ? (maxInboundByWiki.get(normTitle) ?? 0) : 0;
+    const lastActivityAt = Math.max(row.updated_at, row.last_accessed ?? 0, inboundPathAt, inboundWikiAt);
+    const idleDays = Math.floor((nowMs - lastActivityAt) / 86_400_000);
+    if (idleDays >= thresholdDays) {
+      staleEntries.push({ row, idleDays, decay, thresholdDays });
+    }
+  }
+
+  staleEntries.sort((a, b) => b.idleDays - a.idleDays || a.row.path.localeCompare(b.row.path));
+  return staleEntries.slice(0, maxItems).map((item) => {
+    const recallNote =
+      item.row.access_count === 0
+        ? "（尚未被召回，历史导入属正常）"
+        : `（累计召回 ${item.row.access_count} 次）`;
+    const score = Math.min(0.99, 0.5 + (item.idleDays - item.thresholdDays) / (item.thresholdDays * 4));
+    return {
+      kind: "stale" as const,
+      score,
+      source: "stale" as const,
+      targetPath: item.row.path,
+      targetTitle: item.row.title,
+      detail: `已 ${item.idleDays} 天无更新、无入链提及且未被召回（decay=${item.decay}，阈值 ${item.thresholdDays} 天）${recallNote}；若话题已自然淡出可考虑改为 status: faded，若仍长期有效可保持 active 或调整对应空间 decay: none`,
+    };
+  });
+}
+
 export function renderMemoryRadarBlock(
   findings: readonly RadarFinding[],
   opts: {
@@ -657,6 +763,7 @@ export function renderMemoryRadarBlock(
 ): string | null {
   const filtered = findings.filter((f) => {
     if (opts.scope === "weekly" && f.kind === "link") return false;
+    if (opts.scope === "bedtime" && f.kind === "stale") return false;
     if (!opts.includeOpenBoard && f.source === "board" && f.targetPath === "core/open.md") {
       return false;
     }
@@ -677,11 +784,12 @@ export function renderMemoryRadarBlock(
     { kinds: ["promote"], header: "[跨天反复出现 / 可考虑提炼]" },
     { kinds: ["merge", "redundant"], header: "[疑似重复专卡 / 可考虑整理]" },
     { kinds: ["link"], header: "[可考虑补双链]" },
+    { kinds: ["stale"], header: "[久未更新 / 可考虑淡出]" },
   ];
 
   const lines: string[] = [
     "<memory_radar>",
-    "说明：以下为系统只读比对扫出的疑似记忆线索（基于相似度与轻量分类器初筛，可能存在误报），系统未修改任何文件；是否需要查阅原文、修改卡片、补链或忽略，完全由你自己决定。",
+    "说明：以下为系统只读比对扫出的疑似记忆线索（基于相似度、活跃度与轻量分类器初筛，可能存在误报），系统未修改任何文件；是否需要查阅原文、修改卡片、调整状态、补链或忽略，完全由你自己决定。",
   ];
 
   for (const sec of sectionMeta) {
@@ -698,6 +806,9 @@ export function renderMemoryRadarBlock(
           : f.detail;
       if (f.source === "board") {
         lines.push(`- 看板 \`${f.targetPath}\` 条目：「${f.targetTitle}」`);
+        lines.push(`  信号：${detailText}`);
+      } else if (f.source === "stale") {
+        lines.push(`- 长期线索 \`${f.targetPath}\`（[[${f.targetTitle}]]）`);
         lines.push(`  信号：${detailText}`);
       } else {
         const newLabel = f.newCardPath
@@ -754,6 +865,8 @@ export interface RunMemoryRadarOptions {
   /** 本周期新增或修改的记忆相对路径（如今日新卡或本周 Git diff 实质路径） */
   newCardPaths: readonly string[];
   radarConfig?: Partial<RadarConfig>;
+  /** 普通情景切片软淡出天数（默认 90，0 禁用） */
+  episodeFadeDays?: number;
   /** bedtime 未合并日反思时不把 core/open.md 渲染进 <memory_radar>（默认 weekly=true, bedtime=false） */
   includeOpenBoardInBlock?: boolean;
   /** 是否收集各看板条目与卡片对的原始打分明细（仅离线干跑与调参使用） */
@@ -781,17 +894,48 @@ export async function runMemoryRadar(opts: RunMemoryRadarOptions): Promise<Memor
   if (!cfg.enabled) {
     return empty("disabled");
   }
-  if (!opts.decisionClient) {
-    return empty("no_decision_client");
-  }
 
   const nowMs = opts.clock.now();
   const targetDay = opts.targetDay ?? localDay(nowMs, opts.clock.timeZone);
   const memoryDir = path.join(opts.dataDir, "memory");
 
+  if (!opts.decisionClient) {
+    if (scope === "weekly") {
+      const staleFindings = await scanStaleThreadFindings({
+        db: opts.db,
+        dataDir: opts.dataDir,
+        memoryIndex: opts.memoryIndex,
+        nowMs,
+      }).catch(() => []);
+      if (staleFindings.length > 0) {
+        const renderedBlock = renderMemoryRadarBlock(staleFindings, {
+          scope: "weekly",
+          includeOpenBoard: opts.includeOpenBoardInBlock ?? true,
+          maxItems: cfg.maxFindingsWeekly,
+        });
+        return {
+          executed: true,
+          scope,
+          boardItemsChecked: 0,
+          pairsEvaluated: 0,
+          findings: staleFindings,
+          renderedBlock,
+          reflectGateHint: null,
+        };
+      }
+    }
+    return empty("no_decision_client");
+  }
+
   try {
+    const softFadedEpisodes = opts.memoryIndex.computeSoftFadedEpisodePaths({
+      fadeAfterDays: opts.episodeFadeDays ?? 90,
+      nowMs,
+    });
     const allRows = opts.memoryIndex.listAllRows();
-    const eligibleRows = allRows.filter((r) => isEligibleRadarRow(r, nowMs));
+    const eligibleRows = allRows.filter(
+      (r) => isEligibleRadarRow(r, nowMs) && !softFadedEpisodes.has(r.path),
+    );
     const eligibleByPath = new Map<string, CardIndexRow>();
     for (const r of eligibleRows) eligibleByPath.set(r.path, r);
 
@@ -812,6 +956,30 @@ export async function runMemoryRadar(opts: RunMemoryRadarOptions): Promise<Memor
     ].slice(0, maxNewCards);
 
     if (newCards.length === 0) {
+      if (scope === "weekly") {
+        const staleFindings = await scanStaleThreadFindings({
+          db: opts.db,
+          dataDir: opts.dataDir,
+          memoryIndex: opts.memoryIndex,
+          nowMs,
+        }).catch(() => []);
+        if (staleFindings.length > 0) {
+          const renderedBlock = renderMemoryRadarBlock(staleFindings, {
+            scope: "weekly",
+            includeOpenBoard: opts.includeOpenBoardInBlock ?? true,
+            maxItems: cfg.maxFindingsWeekly,
+          });
+          return {
+            executed: true,
+            scope,
+            boardItemsChecked: 0,
+            pairsEvaluated: 0,
+            findings: staleFindings,
+            renderedBlock,
+            reflectGateHint: null,
+          };
+        }
+      }
       return empty("no_eligible_new_cards");
     }
 
@@ -1284,6 +1452,16 @@ export async function runMemoryRadar(opts: RunMemoryRadarOptions): Promise<Memor
         timedOut: true,
         error: "Aborted",
       };
+    }
+
+    if (scope === "weekly") {
+      const staleFindings = await scanStaleThreadFindings({
+        db: opts.db,
+        dataDir: opts.dataDir,
+        memoryIndex: opts.memoryIndex,
+        nowMs,
+      }).catch(() => []);
+      findings.push(...staleFindings);
     }
 
     findings.sort(compareFindings);

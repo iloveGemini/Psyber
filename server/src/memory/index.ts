@@ -18,6 +18,7 @@ export interface CardIndexRow {
   when_to_recall: string | null;
   date_kind: string;
   expires_at: number | null;
+  pinned?: number;
   access_count: number;
   last_accessed: number | null;
   content_hash: string;
@@ -267,9 +268,9 @@ export class MemoryIndex {
         .query(
           `INSERT INTO card_index (
             path, space, title, kind, status, tags, when_to_recall,
-            date_kind, expires_at, access_count, last_accessed,
+            date_kind, expires_at, pinned, access_count, last_accessed,
             content_hash, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(path) DO UPDATE SET
             space = excluded.space,
             title = excluded.title,
@@ -279,6 +280,7 @@ export class MemoryIndex {
             when_to_recall = excluded.when_to_recall,
             date_kind = excluded.date_kind,
             expires_at = excluded.expires_at,
+            pinned = excluded.pinned,
             content_hash = excluded.content_hash,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at`,
@@ -293,6 +295,7 @@ export class MemoryIndex {
           parsed.whenToRecall,
           parsed.dateKind,
           parsed.expiresAt,
+          parsed.pinned ? 1 : 0,
           existing?.access_count ?? 0,
           existing?.last_accessed ?? null,
           contentHash,
@@ -548,6 +551,74 @@ export class MemoryIndex {
 
     const limit = opts.maxResults ?? 24;
     return list.slice(0, limit);
+  }
+
+  /**
+   * 计算索引层软淡出的普通情景切片（episodes/ ep-*.md）集合（绝不改写磁盘 Markdown）：
+   * - 仅作用于 space='episodes' 且 kind='episode' 且 status='active' 的切片；
+   * - 满足以下任一条件则免于淡出：① frontmatter pinned: true；② max(updated_at, last_accessed) 未超过 fadeAfterDays；
+   *   ③ 被 core/（含 self/user）、favorite/ 或 lessons/ 下的有效卡片通过 [[短标题]] 或相对路径引用。
+   * - 软淡出仅退出自动召回与搜索；read 与 grep(include_archived=true) 仍可读，新增保护入链或访问后自动恢复。
+   */
+  computeSoftFadedEpisodePaths(opts: { fadeAfterDays?: number; nowMs?: number } = {}): Set<string> {
+    const fadeAfterDays = opts.fadeAfterDays ?? 90;
+    if (!Number.isFinite(fadeAfterDays) || fadeAfterDays <= 0) {
+      return new Set<string>();
+    }
+    const nowMs = opts.nowMs ?? this.clock.now();
+    const cutoffMs = nowMs - fadeAfterDays * 86_400_000;
+
+    const oldEpisodes = this.db
+      .query(
+        `SELECT path, title, updated_at, last_accessed
+         FROM card_index
+         WHERE space = 'episodes'
+           AND kind = 'episode'
+           AND status = 'active'
+           AND COALESCE(pinned, 0) = 0`,
+      )
+      .all() as Array<{
+      path: string;
+      title: string;
+      updated_at: number;
+      last_accessed: number | null;
+    }>;
+
+    const candidates = oldEpisodes.filter(
+      (r) => Math.max(r.updated_at, r.last_accessed ?? 0) < cutoffMs,
+    );
+    if (candidates.length === 0) {
+      return new Set<string>();
+    }
+
+    const protectedPaths = new Set<string>();
+    const protectedWikiTitles = new Set<string>();
+    const inboundRows = this.db
+      .query(
+        `SELECT l.link_kind, l.target_ref
+         FROM card_links l
+         JOIN card_index s ON s.path = l.src_path
+         WHERE s.space IN ('core', 'self', 'user', 'favorite', 'lessons')
+           AND s.status NOT IN ('resolved', 'archived', 'faded')`,
+      )
+      .all() as Array<{ link_kind: string; target_ref: string }>;
+
+    for (const edge of inboundRows) {
+      if (edge.link_kind === "path") {
+        protectedPaths.add(edge.target_ref);
+      } else if (edge.link_kind === "wiki") {
+        protectedWikiTitles.add(edge.target_ref);
+      }
+    }
+
+    const faded = new Set<string>();
+    for (const c of candidates) {
+      if (protectedPaths.has(c.path)) continue;
+      const normTitle = normalizeWikiTitle(c.title);
+      if (normTitle && protectedWikiTitles.has(normTitle)) continue;
+      faded.add(c.path);
+    }
+    return faded;
   }
 
   /**

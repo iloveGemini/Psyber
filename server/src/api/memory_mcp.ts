@@ -223,7 +223,16 @@ const MCP_MEMORY_TOOL_DEFS: McpToolDefinition[] = [
         min_chars: { type: "integer", description: "低量日攒批顺延阈值（0..40000，默认 5000）" },
         compact_rules: {
           type: "boolean",
-          description: "同会话连续 next 时是否省略重复的 <tidy_rules>/<self>/<user>（默认 false；start 首步、reflect_weekly 周反思与新窗口续接会自动下发完整规则）",
+          description: "同会话连续 next 时是否省略重复的 <tidy_rules>/<self>/<user> 并改发精简硬约束清单（默认 false；start 首步、reflect_weekly 周反思与新窗口续接会自动下发完整规则）",
+        },
+        daily_reflect: {
+          type: "boolean",
+          description: "是否在 bedtime 步骤启用日反思（默认 true：有决策模型时走门控自动判定并合并日反思，无决策模型时仅在显式传 true 且当日有实质改动时合并）",
+        },
+        output_to_file: {
+          type: "boolean",
+          description:
+            "是否将完整任务包写入 dataDir/.tmp/replay_step.md 并仅返回文件路径与元信息指针（默认 false；适合具备本地文件读取能力或受第三方网关策略/超时限制的客户端）",
         },
         rollback: { type: "boolean", description: "action=abort 时是否安全回滚本步修改的卡片（默认 false）" },
         cancel_plan: { type: "boolean", description: "action=abort 时是否同时清除整个计划（默认 true）" },
@@ -437,6 +446,11 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
     const nowMs = deps.clock.now();
     const tz = deps.clock.timeZone;
 
+    const episodeFadeDays = deps.getConfig().recall?.episodeFadeDays ?? 90;
+    const softFadedEpisodes = deps.memoryIndex.computeSoftFadedEpisodePaths({
+      fadeAfterDays: episodeFadeDays,
+      nowMs,
+    });
     const allRows = deps.memoryIndex.listAllRows();
     const searchableRows: CardIndexRow[] = [];
     const rowByPath = new Map<string, CardIndexRow>();
@@ -447,7 +461,8 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
         r.space === "user" ||
         r.space === "core" ||
         r.space === "episode_index" ||
-        r.space === "sensitive"
+        r.space === "sensitive" ||
+        softFadedEpisodes.has(r.path)
       ) {
         continue;
       }
@@ -544,9 +559,11 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
 
     if (includeLinks) {
       const anchorPaths = top.map((t) => t.row.path);
+      const excludePaths = new Set<string>(anchorPaths);
+      for (const p of softFadedEpisodes) excludePaths.add(p);
       const neighbors = deps.memoryIndex
         .findLinkedNeighbors(anchorPaths, {
-          excludePaths: new Set(anchorPaths),
+          excludePaths,
           maxResults: 6,
         })
         .filter((nb) => nb.row.space !== "sensitive");
@@ -670,7 +687,9 @@ export function registerMemoryMcpRoutes(app: Hono, deps: MemoryMcpRouteDeps): vo
           (norm.rel === "core/state.md" ||
             norm.rel === "core/dates.md" ||
             norm.rel === "core/glossary.md" ||
-            (activeStep.phase === "reflect_weekly" && norm.rel === "core/open.md"));
+            ((activeStep.phase === "reflect_weekly" ||
+              (activeStep.phase === "bedtime" && activeStep.includeDailyReflect)) &&
+              norm.rel === "core/open.md"));
         if (!allowedReplayCore) {
           return {
             ok: false,

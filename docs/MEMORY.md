@@ -77,10 +77,11 @@ memory/
 ---
 title: 深夜聊天不瞎猜时间           # 简短标题（缺省取文件名）
 kind: lesson                      # episode | reflection | lesson | work | serial | note
-status: active                    # active | resolved | disputed | faded | archived
+status: active                    # active | resolved | disputed | faded | archived（faded=自然淡出，archived=主动完结/封存）
+pinned: true                      # 可选布尔：仅极少数需长期保活不被软淡出的情景切片 ep-*.md 使用
 created: 2026-10-12
 updated: 2026-10-13
-when_to_recall: "半夜聊天、看到日期跳转或想关心对方困不困时"  # lessons/ 必填，其他可选
+when_to_recall: "半夜聊天、看到日期跳转或想关心对方困不困时"  # lessons/ 与 sensitive/ 必填，其他可选
 date_kind: ordinary               # ordinary | celebrate | gentle | deadline
 tags: [深夜, 时间]                 # 可选
 source: live                      # live | import
@@ -91,9 +92,9 @@ source: live                      # live | import
 | :--- | :--- | :--- |
 | `core/*` | 永不腐烂 | `self`/`user`/`boundaries`/`mirror`/`open`/`state`/`glossary` 常驻系统前缀（`core/state.md` 注入时按 `[至 YYYY-MM-DD]` 自动过滤已过期条目）；`core/dates.md` 不全文常驻，每日动态筛选「今天 + 未来 7 天」注入 `<upcoming_dates>`（区分喜庆 `celebrate` / 敏感忌日 `gentle` / 里程碑 `milestone` / 一次性 `deadline`） |
 | `episodes/YYYY/**/index.md` | 永不腐烂 | 专供 `<continuity>` 时间骨架，不进入日常 FTS5/向量检索池 |
-| `episodes/YYYY/MM/DD/ep-*.md` | `slow`（默认 30d 半衰） | 参与全局检索与近 72h 闲聊补挂 |
+| `episodes/YYYY/MM/DD/ep-*.md` | 索引层 90 天软淡出（`recall.episodeFadeDays`，`0` 禁用） | 参与全局检索与近 72h 闲聊补挂；未标 `pinned: true`、超 90 天无更新/未被召回且无 `core/`/`favorite/`/`lessons/` 入链时自动退出召回/1 跳/搜索（绝不改盘，仍可 `read`，被访问或新增保护入链后自动恢复） |
 | `episodes/YYYY/MM/DD/rf-*.md` | 慢衰减 / 可追溯 | 不参与自动召回，供长期复盘与追溯心路 |
-| `threads/*` · `lessons/*` · `entities/*` · `favorite/*` | 永不腐烂 | 按 `threads/REGISTRY.yaml` 触发词、链接 `read` 或语义/FTS5 检索按需浮现（`threads/lists/` 豁免双次成林） |
+| `threads/*` · `lessons/*` · `entities/*` · `favorite/*` | `lessons`/`entities`/`favorite` 永不腐烂；`threads` 按 `REGISTRY.yaml` `decay` 经周反思只读雷达提示 | 按触发词、链接 `read` 或语义/FTS5 检索按需浮现；周反思纯本地扫描久未活跃的 `threads/`（`short` ≥ 30d、`slow` ≥ 90d，豁免 `decay: none`/`thread:lists`/`kind: work`，单次最多 5 条）送入 `<memory_radar>` 的 `[久未更新 / 可考虑淡出]` 由 Psyber 自主决定是否标为 `status: faded` |
 | `sensitive/*` | 永不腐烂 | **高敏物理隔离区**：明文 Markdown 存于本机；**对外 `memory_mcp` 全工具默认硬屏蔽（大小写与多级 `./` 规范化防绕过）**；默认不发往外部 Embedding 接口与快脑体检雷达（`recall.sensitive.allowExternalEmbedding = false`），未配 Embedding 走全卡直扫时亦先经本地 FTS5 过滤绝不把未命中高敏卡标题外发给云端决策模型；仅走本地 FTS5 命中 + 高门槛精排（默认 `0.55`）按需浮现，严禁被近 72h 闲聊补挂与 1 跳双链自动带出；召回评测默认排除 |
 
 ## 4. 原生 5 文件工具沙箱（Tier 1 常驻核心）

@@ -402,13 +402,18 @@ export async function recallMemories(opts: {
     for (const r of rows) recentPaths.add(r.card_path);
   }
 
+  const softFadedEpisodes = index.computeSoftFadedEpisodePaths({
+    fadeAfterDays: cfg.episodeFadeDays ?? 90,
+    nowMs,
+  });
   const allActive = index.listAllRows().filter((r) => {
     if (
       r.space === "self" ||
       r.space === "user" ||
       r.space === "core" ||
       r.space === "episode_index" ||
-      r.kind === "reflection"
+      r.kind === "reflection" ||
+      softFadedEpisodes.has(r.path)
     ) {
       return false;
     }
@@ -641,7 +646,9 @@ export async function recallMemories(opts: {
       }
       const list: Array<{ row: CardIndexRow; kwScore: number }> = [];
       for (const hit of ftsHits) {
-        if (selectedPaths.has(hit.path) || recentPaths.has(hit.path)) continue;
+        if (selectedPaths.has(hit.path) || recentPaths.has(hit.path) || softFadedEpisodes.has(hit.path)) {
+          continue;
+        }
         const row = index.getRow(hit.path);
         if (!row || row.kind === "reflection") continue;
         const kwScore = Math.min(1, Math.max(0.1, -hit.rank / (-hit.rank + 1.2)));
@@ -1153,6 +1160,7 @@ export async function recallMemories(opts: {
     } else {
       const excludePaths = new Set<string>(recentPaths);
       for (const s of selected) excludePaths.add(s.row.path);
+      for (const p of softFadedEpisodes) excludePaths.add(p);
       const maxNeighbors = Math.max(1, multiHopCfg.maxNeighbors ?? 6);
       const rawNeighbors = index
         .findLinkedNeighbors(anchorPaths, {
@@ -1346,6 +1354,12 @@ export async function recallMemories(opts: {
         track, sem_score, kw_score, rerank_score, final_score, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const touchAccess = db.query(
+      `UPDATE card_index
+       SET access_count = access_count + 1,
+           last_accessed = CASE WHEN last_accessed IS NULL OR last_accessed < ? THEN ? ELSE last_accessed END
+       WHERE path = ?`,
+    );
     const tx = db.transaction(() => {
       for (const item of recalled) {
         insert.run(
@@ -1361,6 +1375,7 @@ export async function recallMemories(opts: {
           item.finalScore,
           nowMs,
         );
+        touchAccess.run(nowMs, nowMs, item.path);
       }
     });
     tx();

@@ -532,11 +532,12 @@ export class McpReplayRunner {
     newCardPaths: string[];
     includeOpenBoardInBlock: boolean;
   }): Promise<MemoryRadarResult | null> {
-    if (!this.deps.decisionClient) return null;
     const cfg = this.deps.getConfig();
     if (cfg.radar?.enabled === false) return null;
     const safePaths = opts.newCardPaths.filter((p) => !p.startsWith("sensitive/"));
-    if (safePaths.length === 0) return null;
+    if (opts.scope !== "weekly" && (!this.deps.decisionClient || safePaths.length === 0)) {
+      return null;
+    }
     const tz = cfg.timezone || this.deps.clock.timeZone;
     try {
       const res = await runMemoryRadar({
@@ -551,6 +552,7 @@ export class McpReplayRunner {
         targetDay: opts.targetDay,
         newCardPaths: safePaths,
         radarConfig: cfg.radar,
+        episodeFadeDays: cfg.recall?.episodeFadeDays,
         includeOpenBoardInBlock: opts.includeOpenBoardInBlock,
       });
       const safeFindings = res.findings.filter(
@@ -736,6 +738,7 @@ export class McpReplayRunner {
             targetDay: step.day,
             changedPaths: step.reflectChangedPaths ?? [],
             dailyRefPaths: step.reflectDailyRefPaths ?? [],
+            isHistoricalReplay: true,
           }),
         );
         if (openMd) {
@@ -846,6 +849,7 @@ export class McpReplayRunner {
           targetDay: step.day,
           changedPaths: step.reflectChangedPaths ?? [],
           dailyRefPaths: step.reflectDailyRefPaths ?? [],
+          isHistoricalReplay: true,
         }),
       );
       if (openMd) {

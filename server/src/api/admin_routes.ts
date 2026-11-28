@@ -364,6 +364,9 @@ function validateRecallPatch(patch: Partial<RecallConfig>): string | null {
       return "recall.sensitive.ftsMinScore 须在 0..1 之间";
     }
   }
+  if (patch.episodeFadeDays !== undefined && !isNumInRange(patch.episodeFadeDays, 0, 3650)) {
+    return "recall.episodeFadeDays 须在 0..3650 之间";
+  }
   return null;
 }
 

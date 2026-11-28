@@ -319,6 +319,7 @@ export function buildReflectContextBlock(opts: {
   targetDay: string;
   changedPaths: string[];
   dailyRefPaths: string[];
+  isHistoricalReplay?: boolean;
 }): string {
   const weekday = weekdayOfDay(opts.targetDay);
   const dayDir = episodeDirForDay(opts.targetDay);
@@ -335,6 +336,11 @@ export function buildReflectContextBlock(opts: {
     for (const p of opts.dailyRefPaths) {
       lines.push(`  - ${p}`);
     }
+  }
+  if (opts.isHistoricalReplay) {
+    lines.push(
+      "历史回放说明：当前正处于历史对话搬家回放阶段，这些对话发生时你尚未接入这套记忆系统，当时也看不到整理出的 core/mirror.md 与 lessons/；若看到旧习惯或小毛病在不同日期反复出现属正常历史语境，客观提炼规律即可，不必因此过度自责、怀疑自己“屡教不改”，也不要把相处底色收得过紧。",
+    );
   }
   lines.push("</reflect_context>");
   return lines.join("\n");
@@ -870,6 +876,7 @@ export async function evaluateAndRunReflect(
               targetDay,
               newCardPaths: changedPaths,
               radarConfig: deps.getConfig?.()?.radar,
+              episodeFadeDays: deps.getConfig?.()?.recall?.episodeFadeDays,
               includeOpenBoardInBlock: true,
               signal: opts.signal,
             });
@@ -880,6 +887,48 @@ export async function evaluateAndRunReflect(
     signal: opts.signal,
   });
 
+  if (!gate.shouldReflect) {
+    const skippedRadarSummary = weeklyRadarRes
+      ? {
+          executed: (weeklyRadarRes as MemoryRadarResult).executed,
+          boardItemsChecked: (weeklyRadarRes as MemoryRadarResult).boardItemsChecked,
+          pairsEvaluated: (weeklyRadarRes as MemoryRadarResult).pairsEvaluated,
+          findingsCount: (weeklyRadarRes as MemoryRadarResult).findings.length,
+        }
+      : undefined;
+    return {
+      ok: true,
+      scope: opts.scope,
+      triggered: false,
+      skipReason: gate.skipReason,
+      changedPaths: gate.changedPaths,
+      decisionScores: gate.decisionScores,
+      ...(skippedRadarSummary ? { radar: skippedRadarSummary } : {}),
+      touchedMemoryPaths: [],
+      committed: false,
+      summary: gate.summary ?? "跳过反思",
+    };
+  }
+
+  if (opts.scope === "weekly" && !weeklyRadarRes) {
+    weeklyRadarRes = await runMemoryRadar({
+      db,
+      dataDir,
+      promptsDir: deps.promptsDir,
+      clock,
+      memoryIndex: deps.memoryIndex,
+      decisionClient: deps.decisionClient,
+      embedding: deps.embedding,
+      scope: "weekly",
+      targetDay,
+      newCardPaths: gate.changedPaths,
+      radarConfig: deps.getConfig?.()?.radar,
+      episodeFadeDays: deps.getConfig?.()?.recall?.episodeFadeDays,
+      includeOpenBoardInBlock: true,
+      signal: opts.signal,
+    });
+  }
+
   const radarSummary = weeklyRadarRes
     ? {
         executed: (weeklyRadarRes as MemoryRadarResult).executed,
@@ -888,21 +937,6 @@ export async function evaluateAndRunReflect(
         findingsCount: (weeklyRadarRes as MemoryRadarResult).findings.length,
       }
     : undefined;
-
-  if (!gate.shouldReflect) {
-    return {
-      ok: true,
-      scope: opts.scope,
-      triggered: false,
-      skipReason: gate.skipReason,
-      changedPaths: gate.changedPaths,
-      decisionScores: gate.decisionScores,
-      ...(radarSummary ? { radar: radarSummary } : {}),
-      touchedMemoryPaths: [],
-      committed: false,
-      summary: gate.summary ?? "跳过反思",
-    };
-  }
 
   const outcome = await runMemoryReflectTask(deps, {
     scope: opts.scope,
