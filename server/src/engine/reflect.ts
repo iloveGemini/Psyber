@@ -270,6 +270,11 @@ function clipExcerpt(text: string, maxChars: number): string {
   return `${cleaned.slice(0, Math.max(20, maxChars - 1))}…`;
 }
 
+function tailSlice(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `…（前文略）\n${text.slice(text.length - maxChars)}`;
+}
+
 function episodeDirForDay(dayStr: string): string {
   const [y, m, d] = dayStr.split("-");
   return `episodes/${y}/${m}/${d}`;
@@ -359,6 +364,7 @@ export async function runMemoryReflectTask(
     readOptional(path.join(memoryDir, "core", "self.md")),
     readOptional(path.join(memoryDir, "core", "user.md")),
     readPrompt(promptsDir, "reflect.md", {
+      SHARED_SCHEMA_BLOCK: "{{> _memory-schema.md}}",
       REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS[opts.scope],
     }),
     readOptional(path.join(memoryDir, "core", "open.md")),
@@ -381,7 +387,7 @@ export async function runMemoryReflectTask(
   if (openMd) {
     const body = stripFrontmatter(openMd).trim();
     if (body) {
-      materialParts.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${clipExcerpt(body, 1500)}`);
+      materialParts.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${tailSlice(body, 1500)}`);
     }
   }
   if (opts.radarBlock) {
@@ -703,7 +709,7 @@ export async function evaluateReflectGate(
       if (openMd) {
         const openBody = stripFrontmatter(openMd).trim();
         if (openBody) {
-          sections.push(`当前未完挂念（core/open.md）：\n${clipExcerpt(openBody, 600)}`);
+          sections.push(`当前未完挂念（core/open.md）：\n${tailSlice(openBody, 600)}`);
         }
       }
     } else if (dailyRefPaths.length > 0) {

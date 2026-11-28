@@ -166,15 +166,35 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
-  daily_wrapup:
-    "我整理游标后的近期对话，只负责事实与归档：① 在 episodes/YYYY/MM/DD/ep-<slug>.md 记录值得留存的情景切片（一事一卡、上限 800 字不设下限；已收进 threads/、favorite/、entities/ 的只留一句钩子 + [[短标题]]）；② 若聊天中出现新的短期状态或长线进度变更，同步更新 core/state.md 看板；③ 若出现值得逐字留存的重要原话或附件，收进 favorite/；④ 若识别出反复出现的跨天内容线或实体，对照 threads/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或注册。本轮不写 index.md 梗概，也不写 rf-*.md 反思或修改 core/mirror.md、core/boundaries.md、core/open.md、lessons/。",
-  bedtime:
-    "我回顾今日已整理的卡片摘要、剩余未整理片段与现行 core/state.md：① 按 <tidy_context> 指定路径直接 write 今日日梗概 episodes/YYYY/MM/DD/index.md（纯正文 ≤ 250 字，上限 300 字，kind: note，只留主题脉络、情绪/关系变化与挂念）；参照 <tidy_context> 中的时间梗概水位，由我自己判断是否需要把较早的日梗概滚入 episodes/YYYY/MM/index.md（≤ 600 字，frontmatter 必填 covered_until: YYYY-MM-DD），或把较早的月梗概滚入 episodes/YYYY/index.md（≤ 1000 字，frontmatter 必填 covered_until: YYYY-MM）；水位接近或达到软提醒线（80%）时优先收拢腾出空间，充裕时想保留最近几天的日梗概可直接留着不滚；② 对照 core/state.md 清理已恢复或 [至 YYYY-MM-DD] 已过期的条目并刷新长线进度；③ 兜底补记值得逐字保留的原话到 favorite/，或补齐遗漏的 threads/、entities/ 归档。本轮不做深度反思，不写 rf-*.md，也不修改 core/mirror.md、core/boundaries.md、core/open.md 或 lessons/。",
+export const STAGE_RULES_BLOCKS: Record<TidyTaskType, string> = {
+  daily_wrapup: [
+    "# 各归档区写法与篇幅约束",
+    "- **情景切片（`episodes/YYYY/MM/DD/ep-<slug>.md`）**：严格**一事一卡（上限 800 字，不设下限）**——一两句话能说清的小事就写一两句，宁短勿水；同一天聊了多个不相关主题时拆成多张卡，同目录本身即表达日期与时序。已有专卡的用一句钩子 + `[[短标题]]` 指过去，无专卡的一次性经历与当下感受写具体。",
+    "- **长期线索（`threads/<space-slug>/<topic-slug>.md`）**：同样坚持**一事/一篇一卡（上限 1,000 字，不设下限；双方共创并值得完整留存的原创作品 `kind: work` 可保留完整正文）**；账本或持续演进类单卡把**最新余额/当前状态放在文件最顶部**，早期已结清流水可定期折叠为简短阶段小结。新建目录前先对照 `threads/REGISTRY.yaml`，语义相近直接复用；新活动类别至少在不同日期/会话出现 2 次才注册（**特例豁免**：`threads/lists/` 可直接收纳零碎但长期有用的个人偏好、心愿与随手记）。",
+    "- **实体档案（`entities/<category>/<entity-slug>.md`）**：只保留**稳定画像、当前阶段与关键里程碑索引**（单卡软上限 ~2,000 字）；按日过程留在 `episodes/` 并用 `[[MM-DD ...]]` 挂短链。新建前先对照 `entities/REGISTRY.yaml`，须满足「有实质联系、有具体内容、不同日期/会话出现两次以上（或被亲口嘱咐记住）」才建档。",
+    "- **逐字收藏（`favorite/`）**：值得以后回头原样重读的原话或附件（如直击关系转折、观念碰撞、彼此坦露心声或共同造词的句子；有这类时刻的日子顺手挑 1–2 句），一事一卡，逐字保留原话并注明说话人（附件记 `[照片](media/<hash>)`），附一句为什么想留着。",
+    "- **高敏私密区（`sensitive/<前缀-slug>.md`，单层目录）**：双方共享、需要记住但高度私密的内容（亲密互动与习惯、个人创伤与脆弱经历、身体/心理健康病史、敏感家庭或财务隐痛）统一单独立卡收进 `sensitive/`，推荐按 `health-*`、`trauma-*`、`intimacy-*`、`personal-*` 命名，frontmatter **必填** `when_to_recall`。",
+    "- **重要日子与里程碑（`core/dates.md`）**：固定周期的生日、纪念日、忌日以及关系/人生重大节点每条一行，格式为 `- [MM-DD | celebrate] 标题`、`- [MM-DD | gentle] 标题`、`- [YYYY-MM-DD | milestone] 标题` 或 `- [YYYY-MM-DD | deadline] 标题`。",
+    "- **专属暗语与内部梗（`core/glossary.md`，总字数 ≤ 600 字）**：双方处出来、外人字面看不懂的专属暗语、外号、内部梗或固定小仪式，每条一行写清“暗语 = 意思（[[出处]]）”。",
+    "- **`workspace/` 边界**：大段半成品文档、长篇攻略或排查日志留在 `workspace/`，记忆卡片里只留简短结论与文件指针。",
+  ].join("\n"),
+  bedtime: [
+    "# 层级时间梗概与睡前兜底规则",
+    "- **层级时间梗概（`episodes/YYYY/MM/DD/index.md`、`episodes/YYYY/MM/index.md`、`episodes/YYYY/index.md`）**：像一个人睡前用自然第一人称写给自己的日记梗概，供换段醒来直接读；只留当天主线、情绪/关系变化与未完挂念，不写报菜名式流水账，也**不用挂 `[[短标题]]`**（想翻某天细节按日期目录即可找到；单日总字数 **≤ 250 字**，上限 300 字；单月 ≤ 600 字；单年 ≤ 1000 字；`kind` 统一填 `note`）。",
+    "- **8,000 字总预算与向上滚动**：所有激活态梗概共享 **8,000 字**总预算（80% 即 6,400 字软提醒），由我按 `<tidy_context>` 中的水位自主决定是否将较早的日梗概滚入 `MM/index.md`（frontmatter 必填 `covered_until: YYYY-MM-DD`），或将较早的月梗概滚入 `YYYY/index.md`（frontmatter 必填 `covered_until: YYYY-MM`），实现零重叠、零断层拼接。",
+    "- **睡前兜底补档**：若回看今日摘要发现遗漏了值得逐字留存的原话（`favorite/`）或跨天长线/实体归档（对照 `threads/REGISTRY.yaml`、`entities/REGISTRY.yaml`），顺手补齐并用 `[[短标题]]` 串好。",
+  ].join("\n"),
 };
 
-const BEDTIME_WITH_DAILY_REFLECT_BLOCK =
-  "今晚合并执行【睡前日梗概 + 深度日反思】，请按以下两步在同一轮内完成：①【深度日反思】依照下方 <daily_reflect_guide> 与 <reflect_context>，自主查阅今日变动及相关旧卡；若有真正值得沉淀的情绪变化、观念转折、相处边界磨合、自我觉察或未完挂念，先在今日目录写 rf-<slug>.md 记录心路历程，再把清晰成果按作用范围精炼分流到 core/（self/user/boundaries/mirror/open）、lessons/、threads/ 或 entities/（引用统一用 [[短标题]]）；②【睡前日梗概与看板对账】按 <tidy_context> 指定路径直接 write 今日日梗概 episodes/YYYY/MM/DD/index.md（纯正文 ≤ 250 字，上限 300 字，kind: note），按时间梗概水位自主决定是否向上滚动月/年梗概，并对账清理 core/state.md 过期项与长线进度。";
+export const TASK_SPECIFIC_BLOCKS: Record<TidyTaskType, string> = {
+  daily_wrapup:
+    "本步聚焦事实整理与归档，**允许改动范围仅限**：`episodes/YYYY/MM/DD/ep-*.md`、`threads/`（含 `threads/lists/` 与 `REGISTRY.yaml`）、`entities/`（含 `REGISTRY.yaml`）、`favorite/`、`sensitive/`、`core/state.md`、`core/dates.md`、`core/glossary.md`。具体执行：① 按一事一卡记录值得留存的情景切片；② 同步刷新 `core/state.md` 短期状态与活跃长线进度；③ 逐字收藏重要原话/附件到 `favorite/`，高敏私密内容单独立卡到 `sensitive/`；④ 对照注册表归档或注册反复出现的跨天长线与实体。",
+  bedtime:
+    "本步聚焦睡前日梗概与看板对账，**允许改动范围仅限**：`episodes/.../index.md`（日/月/年时间梗概）、`core/state.md`，以及兜底补齐的 `favorite/`、`threads/`、`entities/`。具体执行：① 按 `<tidy_context>` 指定路径直接 write 今日日梗概 `episodes/YYYY/MM/DD/index.md`（纯正文 ≤ 250 字，上限 300 字，`kind: note`），并结合时间梗概水位自主决定是否向上滚动月/年梗概（必填 `covered_until`）；② 对照 `core/state.md` 清理已恢复或过期条目并刷新长线进度；③ 兜底补齐当日遗漏的 `favorite/`、`threads/` 或 `entities/` 归档。",
+};
+
+export const BEDTIME_WITH_DAILY_REFLECT_BLOCK =
+  "今晚合并执行【深度日反思 + 睡前日梗概】，**允许改动范围为两阶段并集**：`episodes/YYYY/MM/DD/rf-*.md`、`core/`（`self/user/boundaries/mirror/open/state/dates/glossary`）、`lessons/`、`episodes/.../index.md`，以及兜底补齐的 `favorite/`、`threads/`、`entities/`。请按以下两步在同一轮内完成：①【深度日反思】依照下方 `<daily_reflect_guide>` 与 `<reflect_context>`，自主查阅今日变动及相关旧卡；若有真正值得沉淀的情绪变化、观念转折、相处边界磨合、自我觉察或未完挂念，先在今日目录写 `rf-<slug>.md` 记录心路历程，再把清晰成果精炼分流到 `core/`、`lessons/`、`threads/` 或 `entities/`（引用统一用 `[[短标题]]`）；②【睡前日梗概与看板对账】按 `<tidy_context>` 指定路径直接 write 今日日梗概 `episodes/YYYY/MM/DD/index.md`（纯正文 ≤ 250 字，上限 300 字，`kind: note`），按水位自主决定是否向上滚动月/年梗概，并对账清理 `core/state.md` 过期项与长线进度。";
 
 async function readOptional(absPath: string): Promise<string | null> {
   try {
@@ -389,6 +409,7 @@ async function executeSingleTidyPass(
     cont
       ? Promise.resolve(null)
       : readPrompt(promptsDir, "tidy.md", {
+          STAGE_RULES_BLOCK: STAGE_RULES_BLOCKS[opts.taskType],
           TASK_SPECIFIC_BLOCK: taskSpecificBlock,
         }),
     readOptional(path.join(memoryDir, "threads", "REGISTRY.yaml")),
@@ -406,7 +427,7 @@ async function executeSingleTidyPass(
     // 同会话续接：保持 Step 1 的 systemPrompt 与前序消息逐字节不变，直接复用原话与刚写完的卡片上下文命中 KV Cache
     systemPrompt = cont.systemPrompt;
     const contParts: string[] = [
-      `<bedtime_phase>\n上一阶段（事实切片与归档）已完成并提交。现在进入睡前总结阶段，解除上一阶段「不写 index.md / 不做深度反思」的限制，请直接结合上方原话与刚写好的卡片完成以下目标（不必重复 read 刚才已写的全文）：\n${taskSpecificBlock}\n</bedtime_phase>`,
+      `<bedtime_phase>\n上一阶段（事实切片与归档）已完成并提交。现在切换至睡前阶段，请直接结合上方原话与刚写好的卡片完成以下规则与目标（不必重复 read 刚才已写的全文）：\n\n${STAGE_RULES_BLOCKS.bedtime}\n\n${taskSpecificBlock}\n</bedtime_phase>`,
       buildTidyContextBlock({
         taskType: opts.taskType,
         targetDay,
@@ -1124,6 +1145,7 @@ export async function runMemoryTidyTask(
       }
       const [reflectPrompt, openMd] = await Promise.all([
         readPrompt(deps.promptsDir, "reflect.md", {
+          SHARED_SCHEMA_BLOCK: "",
           REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.daily,
         }),
         readOptional(path.join(memoryDir, "core", "open.md")),
@@ -1140,7 +1162,7 @@ export async function runMemoryTidyTask(
       if (openMd) {
         const openBody = stripFrontmatter(openMd).trim();
         if (openBody) {
-          extraMaterials.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${clipExcerpt(openBody, 1500)}`);
+          extraMaterials.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${tailSlice(openBody, 1500)}`);
         }
       }
     }

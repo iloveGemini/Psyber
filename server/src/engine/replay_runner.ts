@@ -2,7 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { VirtualClock, localDay, weekdayOfDay, type Clock } from "../core/clock.ts";
-import { DEFAULT_CIRCADIAN_CONFIG, atomicWriteFile, type PsyberConfig } from "../core/config.ts";
+import {
+  DEFAULT_CIRCADIAN_CONFIG,
+  atomicWriteFile,
+  mergeRadarConfig,
+  type PsyberConfig,
+} from "../core/config.ts";
+import type { EmbeddingClient } from "../core/embedding.ts";
 import {
   commitMemoryPaths,
   getMemoryHeadCommit,
@@ -19,18 +25,27 @@ import {
   selectActiveGistLayers,
 } from "../memory/gist.ts";
 import type { MemoryIndex } from "../memory/index.ts";
+import {
+  renderMemoryRadarBlock,
+  runMemoryRadar,
+  type MemoryRadarResult,
+} from "../memory/radar.ts";
 import { groupByLogicalNight } from "../mood/circadian.ts";
 import type { EventStore } from "../store/events.ts";
 import {
   REFLECT_SCOPE_BLOCKS,
   buildReflectContextBlock,
+  evaluateReflectGate,
   isReflectionCardPath,
   isSubstantiveReflectPath,
   isWeeklyReflectDue,
   markReflectCursorCompleted,
   readReflectCursor,
+  type DecisionClient,
 } from "./reflect.ts";
 import {
+  BEDTIME_WITH_DAILY_REFLECT_BLOCK,
+  STAGE_RULES_BLOCKS,
   TASK_SPECIFIC_BLOCKS,
   buildTidyContextBlock,
   clipExcerpt,
@@ -42,13 +57,14 @@ import {
 } from "./tidy.ts";
 
 const MCP_REPLAY_CURSOR_KEY = "mcp_replay";
-const DEFAULT_MAX_CHARS = 40_000;
+const DEFAULT_MAX_CHARS = 20_000;
 const MIN_MAX_CHARS = 4_000;
 const MAX_MAX_CHARS = 100_000;
 const DEFAULT_MIN_CHARS = 5_000;
 const MAX_MIN_CHARS = 40_000;
 const MAX_DAYS_PER_PLAN = 365;
 const REPLAY_STATE_FILENAME = "replay_state.json";
+const REPLAY_STEP_TMP_REL = path.join(".tmp", "replay_step.md");
 const ELIGIBLE_CHAT_WHERE =
   "status IN ('active', 'retracted') AND role IN ('user', 'assistant') AND kind IN ('chat', 'wake', 'door_note')";
 
@@ -78,6 +94,10 @@ export interface McpReplayActiveStep {
   charCount?: number;
   dayLastEventId?: string;
   dayLastEventCreatedAt?: number;
+  /** bedtime 步骤是否合并执行深度日反思（对齐脚本版 tidy.ts） */
+  includeDailyReflect?: boolean;
+  /** 只读记忆体检雷达渲染结果（已过滤 sensitive/） */
+  radarBlock?: string | null;
   reflectChangedPaths?: string[];
   reflectDailyRefPaths?: string[];
 }
@@ -89,6 +109,9 @@ export interface McpReplayPlan {
   maxChars: number;
   minChars: number;
   compactRules?: boolean;
+  outputToFile?: boolean;
+  /** undefined=有决策模型时自动按门控触发日反思；true=显式开启；false=显式关闭 */
+  dailyReflect?: boolean;
   untilDay?: string | null;
   createdAtMs: number;
 }
@@ -112,6 +135,10 @@ export interface McpReplayRunnerDeps {
   clock: Clock;
   events: EventStore;
   memoryIndex: MemoryIndex;
+  /** 可选决策模型：用于 bedtime/reflect_weekly 只读体检雷达与日反思门控 */
+  decisionClient?: DecisionClient;
+  /** 可选向量模型：供体检雷达按余弦相似度匹配旧卡（缺失时平滑降级 FTS5） */
+  embedding?: EmbeddingClient;
   gitMutex: AsyncMutex;
   getConfig: () => PsyberConfig;
 }
@@ -191,6 +218,79 @@ async function readOptional(absPath: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** compact_rules 模式下每步附带的精简硬约束清单（正向白名单声明改动范围，防长会话上下文衰减） */
+function buildCompactChecklist(phase: McpReplayPhase, includeDailyReflect?: boolean): string {
+  if (phase === "wrapup") {
+    return [
+      "<compact_checklist>",
+      "- 允许改动范围：仅限 episodes/YYYY/MM/DD/ep-*.md、threads/、entities/、favorite/、sensitive/、core/state.md、core/dates.md、core/glossary.md。",
+      "- 严格一事一卡：ep-*.md 纯正文 ≤ 800 字、标题 ≤ 12 字（MM-DD 核心事件），拆清不同主题、严禁拼盘成「A、B与C」。",
+      "- 长期沉淀：反复出现的跨天长线与人物/项目对照下方 threads/REGISTRY.yaml 与 entities/REGISTRY.yaml 归档或建档；已进专卡的内容在 episodes/ 只留一句钩子 + [[短标题]]。",
+      "- 分区与红线：值得逐字留存的原话进 favorite/；高敏私密内容单独立卡进 sensitive/（必填 when_to_recall），普通切片严格留白；同步更新 core/state.md、core/glossary.md 与 core/dates.md。",
+      "</compact_checklist>",
+    ].join("\n");
+  }
+  if (phase === "bedtime") {
+    const scopeLine = includeDailyReflect
+      ? "- 允许改动范围：episodes/YYYY/MM/DD/rf-*.md、core/（self/user/boundaries/mirror/open/state/dates/glossary）、lessons/、episodes/.../index.md，以及兜底补齐的 favorite/、threads/、entities/。"
+      : "- 允许改动范围：仅限 episodes/.../index.md、core/state.md，以及兜底补齐的 favorite/、threads/、entities/。";
+    const lines = [
+      "<compact_checklist>",
+      scopeLine,
+      "- 日梗概 episodes/YYYY/MM/DD/index.md：总字数 ≤ 250 字（上限 300 字），kind: note，不挂 [[短标题]]，用自然第一人称口吻记录当天主线与心境变化，对 sensitive/ 严格留白。",
+      "- 睡前兜底：对照下方 threads/REGISTRY.yaml、entities/REGISTRY.yaml 补齐遗漏的长线/实体档案，清理 core/state.md 已过期条目并刷新长线进度；梗概水位接近 80% 时向上滚入 MM/index.md（≤ 600 字，必填 covered_until）。",
+    ];
+    if (includeDailyReflect) {
+      lines.push(
+        "- 合并日反思：先写 rf-<slug>.md，再按作用范围精炼分流至 core/（严控篇幅上限，接近上限时合并旧条而非只增不减）与有场景限制的 lessons/（必填 when_to_recall），顺手清理 core/open.md 已闭环项。",
+      );
+    }
+    lines.push("</compact_checklist>");
+    return lines.join("\n");
+  }
+  return "";
+}
+
+/** 统计 core/ 常驻文件篇幅水位，供反思轮及时合并瘦身，避免常驻前缀无限膨胀 */
+async function buildCoreBudgetWatermark(memoryDir: string): Promise<string | null> {
+  const targets: Array<{ rel: string; limit: number; label: string }> = [
+    { rel: "core/self.md", limit: 1800, label: "core/self.md" },
+    { rel: "core/user.md", limit: 1800, label: "core/user.md" },
+    { rel: "core/boundaries.md", limit: 1800, label: "core/boundaries.md" },
+    { rel: "core/glossary.md", limit: 600, label: "core/glossary.md" },
+  ];
+  const lines: string[] = [];
+  for (const t of targets) {
+    const raw = await readOptional(path.join(memoryDir, t.rel));
+    if (!raw) continue;
+    const len = stripFrontmatter(raw).trim().length;
+    const tag =
+      len > t.limit
+        ? " [已超上限，请合并旧阶段描述瘦身]"
+        : len >= Math.floor(t.limit * 0.85)
+          ? " [接近上限，建议瘦身]"
+          : "";
+    lines.push(`- ${t.label}: ${len} / ${t.limit} 字${tag}`);
+  }
+  const mirrorRaw = await readOptional(path.join(memoryDir, "core/mirror.md"));
+  if (mirrorRaw) {
+    const mBody = stripFrontmatter(mirrorRaw).trim();
+    const bullets = mBody.split(/\r?\n/).filter((l) => l.trim().startsWith("- "));
+    const over80 = bullets.filter(
+      (l) => l.trim().slice(2).replace(/（\[\[.*?\]\].*?）$/, "").length > 80,
+    ).length;
+    const mTag =
+      bullets.length > 10 || over80 > 0
+        ? " [条数偏多或单条超 80 字，请合并同类提醒并将场景化规则下沉至 lessons/]"
+        : "";
+    lines.push(
+      `- core/mirror.md: ${mBody.length} 字 / ${bullets.length} 条（单条须 ≤ 80 字，超限 ${over80} 条）${mTag}`,
+    );
+  }
+  if (lines.length === 0) return null;
+  return `# 常驻核心区篇幅水位（供反思瘦身参考）\n${lines.join("\n")}`;
 }
 
 function splitRowsIntoTurnChunks(rows: RawEventRow[], maxChars: number): RawEventRow[][] {
@@ -409,19 +509,89 @@ export class McpReplayRunner {
     await atomicWriteFile(this.deps.dataDir, filePath, JSON.stringify(parsed, null, 2) + "\n");
   }
 
-  private buildProtectionNotice(phase: McpReplayPhase, protectCoreFiles: boolean): string {
+  private buildProtectionNotice(
+    phase: McpReplayPhase,
+    protectCoreFiles: boolean,
+    includeDailyReflect?: boolean,
+  ): string {
     if (!protectCoreFiles) {
       return "核心保护（protectCoreFiles）：已关闭；可按需使用 memory_edit 局部修订 core/*（禁止整篇覆写 core/self.md 与 core/user.md）。";
     }
-    if (phase === "reflect_weekly") {
-      return "核心保护（protectCoreFiles）：已开启（周反思期间允许写入/编辑 core/open.md 与 core/state.md，禁止修改 core/self.md、core/user.md、core/boundaries.md、core/mirror.md）。";
+    if (phase === "reflect_weekly" || (phase === "bedtime" && includeDailyReflect)) {
+      const label = phase === "reflect_weekly" ? "周反思" : "合并日反思";
+      return `核心保护（protectCoreFiles）：已开启（${label}期间允许写入/编辑 core/open.md、core/state.md、core/dates.md、core/glossary.md，禁止修改 core/self.md、core/user.md、core/boundaries.md、core/mirror.md）。`;
     }
-    return "核心保护（protectCoreFiles）：已开启（搬家整理期间允许对账更新 core/state.md，禁止修改 core/self.md、core/user.md、core/boundaries.md、core/mirror.md）。";
+    return "核心保护（protectCoreFiles）：已开启（搬家整理期间允许对账更新 core/state.md、core/dates.md、core/glossary.md，禁止修改 core/self.md、core/user.md、core/boundaries.md、core/mirror.md）。";
+  }
+
+  /** 在 bedtime / reflect_weekly 前运行只读记忆体检雷达（严格屏蔽 sensitive/，异常降级不阻断搬家） */
+  private async runSafeReplayRadar(opts: {
+    scope: "bedtime" | "weekly";
+    targetDay: string;
+    bedtimeAtMs: number;
+    newCardPaths: string[];
+    includeOpenBoardInBlock: boolean;
+  }): Promise<MemoryRadarResult | null> {
+    if (!this.deps.decisionClient) return null;
+    const cfg = this.deps.getConfig();
+    if (cfg.radar?.enabled === false) return null;
+    const safePaths = opts.newCardPaths.filter((p) => !p.startsWith("sensitive/"));
+    if (safePaths.length === 0) return null;
+    const tz = cfg.timezone || this.deps.clock.timeZone;
+    try {
+      const res = await runMemoryRadar({
+        db: this.deps.db,
+        dataDir: this.deps.dataDir,
+        promptsDir: this.deps.promptsDir,
+        clock: new VirtualClock(opts.bedtimeAtMs, tz),
+        memoryIndex: this.deps.memoryIndex,
+        decisionClient: this.deps.decisionClient,
+        embedding: this.deps.embedding,
+        scope: opts.scope,
+        targetDay: opts.targetDay,
+        newCardPaths: safePaths,
+        radarConfig: cfg.radar,
+        includeOpenBoardInBlock: opts.includeOpenBoardInBlock,
+      });
+      const safeFindings = res.findings.filter(
+        (f) =>
+          !f.targetPath.startsWith("sensitive/") &&
+          !(f.newCardPath && f.newCardPath.startsWith("sensitive/")),
+      );
+      const maxItems =
+        opts.scope === "weekly"
+          ? mergeRadarConfig(cfg.radar).maxFindingsWeekly
+          : mergeRadarConfig(cfg.radar).maxFindingsDaily;
+      const safeBlock =
+        safeFindings.length > 0
+          ? renderMemoryRadarBlock(safeFindings, {
+              scope: opts.scope,
+              includeOpenBoard: opts.includeOpenBoardInBlock,
+              maxItems,
+            })
+          : null;
+      return {
+        ...res,
+        findings: safeFindings,
+        renderedBlock: safeBlock,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async removeStepTaskFile(): Promise<void> {
+    await fs.rm(path.join(this.deps.dataDir, REPLAY_STEP_TMP_REL), { force: true }).catch(() => {});
   }
 
   private async renderActiveStep(
     state: McpReplayState,
-    opts: { protectCoreFiles: boolean; resumed: boolean; compactRules?: boolean },
+    opts: {
+      protectCoreFiles: boolean;
+      resumed: boolean;
+      compactRules?: boolean;
+      outputToFile?: boolean;
+    },
   ): Promise<McpReplayExecResult> {
     const step = state.activeStep!;
     const plan = state.plan;
@@ -442,12 +612,15 @@ export class McpReplayRunner {
       `phase: ${step.phase}`,
       `day: ${step.day}（${weekday}）`,
       `progress: 第 ${Math.max(1, dayIdx)}/${Math.max(1, totalDays)} 天（计划已完成 ${plan?.completedDays.length ?? 0} 天，低量顺延 ${plan?.deferredDays.length ?? 0} 天）`,
-      this.buildProtectionNotice(step.phase, opts.protectCoreFiles),
+      this.buildProtectionNotice(step.phase, opts.protectCoreFiles, step.includeDailyReflect),
       `日期填写硬约束：本步写入或编辑的所有卡片，其 frontmatter 的 created / updated 与标题 MM-DD 必须严格使用历史日期 ${step.day}（严禁写现实今天日期）。`,
     ];
+    if (step.phase === "bedtime" && step.includeDailyReflect) {
+      headerLines.push("daily_reflect: enabled（本步合并执行【深度日反思 + 睡前日梗概】，请同时写 rf-*.md 分流成果与当日 index.md）");
+    }
     if (useCompactRules) {
       headerLines.push(
-        "规则模式：compact_rules（沿用前文 <tidy_rules>、<self>、<user>；周反思与新窗口续接会自动下发完整规则）。",
+        "规则模式：compact_rules（省略全文 <tidy_rules>/<self>/<user>，下方附 <compact_checklist> 硬约束锚点；周反思与新窗口续接会自动下发完整规则）。",
       );
     }
     if (step.phase === "wrapup" && step.partIndex && step.totalParts) {
@@ -480,6 +653,7 @@ export class McpReplayRunner {
         useCompactRules
           ? Promise.resolve(null)
           : readPrompt(this.deps.promptsDir, "tidy.md", {
+              STAGE_RULES_BLOCK: STAGE_RULES_BLOCKS.daily_wrapup,
               TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.daily_wrapup,
             }),
         readOptional(path.join(memoryDir, "core", "state.md")),
@@ -488,6 +662,8 @@ export class McpReplayRunner {
       ]);
       if (tidyPrompt) {
         sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      } else if (useCompactRules) {
+        sections.push(buildCompactChecklist("wrapup"));
       }
       sections.push(buildTidyContextBlock({ taskType: "daily_wrapup", targetDay: step.day }));
 
@@ -506,14 +682,28 @@ export class McpReplayRunner {
         `# 待整理对话（共 ${rows.length} 条，约 ${step.charCount ?? 0} 字）\n${transcript.join("\n") || "（本段无有效文本消息）"}`,
       );
     } else if (step.phase === "bedtime") {
-      const [tidyPrompt, stateRaw, layers] = await Promise.all([
+      const includeDailyReflect = Boolean(step.includeDailyReflect);
+      const [tidyPrompt, reflectPrompt, stateRaw, openMd, threadReg, entReg, layers, coreWatermark] = await Promise.all([
         useCompactRules
           ? Promise.resolve(null)
           : readPrompt(this.deps.promptsDir, "tidy.md", {
-              TASK_SPECIFIC_BLOCK: TASK_SPECIFIC_BLOCKS.bedtime,
+              STAGE_RULES_BLOCK: STAGE_RULES_BLOCKS.bedtime,
+              TASK_SPECIFIC_BLOCK: includeDailyReflect
+                ? BEDTIME_WITH_DAILY_REFLECT_BLOCK
+                : TASK_SPECIFIC_BLOCKS.bedtime,
             }),
+        includeDailyReflect
+          ? readPrompt(this.deps.promptsDir, "reflect.md", {
+              SHARED_SCHEMA_BLOCK: useCompactRules ? "{{> _memory-schema.md}}" : "",
+              REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.daily,
+            })
+          : Promise.resolve(null),
         readOptional(path.join(memoryDir, "core", "state.md")),
+        includeDailyReflect ? readOptional(path.join(memoryDir, "core", "open.md")) : Promise.resolve(null),
+        readOptional(path.join(memoryDir, "threads", "REGISTRY.yaml")),
+        readOptional(path.join(memoryDir, "entities", "REGISTRY.yaml")),
         selectActiveGistLayers(memoryDir, step.day),
+        includeDailyReflect ? buildCoreBudgetWatermark(memoryDir) : Promise.resolve(null),
       ]);
       const softWarnChars = Math.floor(DEFAULT_GIST_CHAR_BUDGET * GIST_SOFT_WARN_RATIO);
       const gistWatermark: GistWatermarkInfo = {
@@ -525,6 +715,8 @@ export class McpReplayRunner {
 
       if (tidyPrompt) {
         sections.push(`<tidy_rules>\n${stripPromptCompletionSection(tidyPrompt.body)}\n</tidy_rules>`);
+      } else if (useCompactRules) {
+        sections.push(buildCompactChecklist("bedtime", includeDailyReflect));
       }
       sections.push(
         buildTidyContextBlock({
@@ -533,6 +725,32 @@ export class McpReplayRunner {
           gistWatermark,
         }),
       );
+
+      if (includeDailyReflect && reflectPrompt) {
+        sections.push(
+          `<daily_reflect_guide>\n${stripPromptCompletionSection(reflectPrompt.body)}\n</daily_reflect_guide>`,
+        );
+        sections.push(
+          buildReflectContextBlock({
+            scope: "daily",
+            targetDay: step.day,
+            changedPaths: step.reflectChangedPaths ?? [],
+            dailyRefPaths: step.reflectDailyRefPaths ?? [],
+          }),
+        );
+        if (openMd) {
+          const openBody = stripFrontmatter(openMd).trim();
+          if (openBody) {
+            sections.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${tailSlice(openBody, 1500)}`);
+          }
+        }
+        if (coreWatermark) {
+          sections.push(coreWatermark);
+        }
+      }
+      if (step.radarBlock) {
+        sections.push(step.radarBlock);
+      }
 
       // 汇总今日已整理的卡片摘要（由 dayTouchedPaths + 当日目录已有切片组成；严禁把 sensitive/ 正文摘要回流到外部 MCP）
       const dayDir = episodeDirForDay(step.day);
@@ -604,14 +822,18 @@ export class McpReplayRunner {
       if (stateFiltered) {
         sections.push(`# 现行 core/state.md（按 ${step.day} 过滤后，供睡前对账）\n${tailSlice(stateFiltered, 1500)}`);
       }
+      if (threadReg) sections.push(`# threads/REGISTRY.yaml\n${threadReg}`);
+      if (entReg) sections.push(`# entities/REGISTRY.yaml\n${entReg}`);
     } else {
-      const [reflectPrompt, openMd] = await Promise.all([
+      const [reflectPrompt, openMd, coreWatermark] = await Promise.all([
         useCompactRules
           ? Promise.resolve(null)
           : readPrompt(this.deps.promptsDir, "reflect.md", {
+              SHARED_SCHEMA_BLOCK: "{{> _memory-schema.md}}",
               REFLECT_SCOPE_BLOCK: REFLECT_SCOPE_BLOCKS.weekly,
             }),
         readOptional(path.join(memoryDir, "core", "open.md")),
+        buildCoreBudgetWatermark(memoryDir),
       ]);
       if (reflectPrompt) {
         sections.push(
@@ -629,8 +851,14 @@ export class McpReplayRunner {
       if (openMd) {
         const body = stripFrontmatter(openMd).trim();
         if (body) {
-          sections.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${clipExcerpt(body, 1500)}`);
+          sections.push(`# 现行 core/open.md（未完挂念与待观察问号）\n${tailSlice(body, 1500)}`);
         }
+      }
+      if (coreWatermark) {
+        sections.push(coreWatermark);
+      }
+      if (step.radarBlock) {
+        sections.push(step.radarBlock);
       }
     }
 
@@ -640,9 +868,34 @@ export class McpReplayRunner {
         `memory_replay(action="next", step_id="${step.stepId}", summary="15字以内中文摘要")`,
     );
 
+    const fullOutput = sections.join("\n\n");
+    if (opts.outputToFile) {
+      const taskFilePath = path.join(this.deps.dataDir, REPLAY_STEP_TMP_REL);
+      await atomicWriteFile(this.deps.dataDir, taskFilePath, `${fullOutput}\n`);
+      const pointerLines = [
+        `status: step`,
+        `step_id: ${step.stepId}`,
+        `phase: ${step.phase}`,
+        `day: ${step.day}（${weekday}）`,
+        `progress: 第 ${Math.max(1, dayIdx)}/${Math.max(1, totalDays)} 天（计划已完成 ${plan?.completedDays.length ?? 0} 天，低量顺延 ${plan?.deferredDays.length ?? 0} 天）`,
+        `task_file: ${taskFilePath}`,
+        `task_chars: ${fullOutput.length}`,
+      ];
+      if (step.phase === "wrapup" && step.partIndex && step.totalParts) {
+        pointerLines.push(`wrapup_part: ${step.partIndex}/${step.totalParts}`);
+      }
+      if (opts.resumed) {
+        pointerLines.push(`resumed: true`);
+      }
+      return {
+        ok: true,
+        output: pointerLines.join("\n"),
+      };
+    }
+
     return {
       ok: true,
-      output: sections.join("\n\n"),
+      output: fullOutput,
     };
   }
 
@@ -681,7 +934,7 @@ export class McpReplayRunner {
     state: McpReplayState,
     byDay: Map<string, ReplayDayGroup>,
     allGroups: ReplayDayGroup[],
-    opts: { protectCoreFiles: boolean; compactRules?: boolean },
+    opts: { protectCoreFiles: boolean; compactRules?: boolean; outputToFile?: boolean },
   ): Promise<McpReplayExecResult> {
     const plan = state.plan;
     if (!plan) {
@@ -730,6 +983,7 @@ export class McpReplayRunner {
         state.dayProcessedEvents = 0;
         state.dayTouchedPaths = [];
         this.saveState(state);
+        await this.removeStepTaskFile();
         return { ok: true, output: finishedMsg };
       }
 
@@ -825,12 +1079,94 @@ export class McpReplayRunner {
           protectCoreFiles: opts.protectCoreFiles,
           resumed: false,
           compactRules: opts.compactRules,
+          outputToFile: opts.outputToFile ?? Boolean(plan.outputToFile),
         });
       }
 
-      // 该日所有对话已 wrapup 完毕，判断是否需要进入 bedtime
+      // 该日所有对话已 wrapup 完毕，判断是否需要进入 bedtime（对齐脚本版：前置只读体检雷达 + 日反思门控）
       const bedtimeDate = this.deps.events.getBedtimeNightDate();
       if (bedtimeDate === null || nextDay > bedtimeDate) {
+        const dayDir = episodeDirForDay(nextDay);
+        const todaySafePaths = this.deps.memoryIndex
+          .listAllRows()
+          .filter(
+            (r) =>
+              r.kind !== "reflection" &&
+              r.space !== "sensitive" &&
+              !r.path.endsWith("/index.md") &&
+              (state.dayTouchedPaths.includes(r.path) || r.path.startsWith(`${dayDir}/`)),
+          )
+          .map((r) => r.path);
+
+        const radarRes = await this.runSafeReplayRadar({
+          scope: "bedtime",
+          targetDay: nextDay,
+          bedtimeAtMs: group.bedtimeAtMs,
+          newCardPaths: todaySafePaths,
+          includeOpenBoardInBlock: false,
+        });
+
+        let includeDailyReflect = false;
+        let reflectChangedPaths: string[] | undefined;
+        let reflectDailyRefPaths: string[] | undefined;
+        const dailyReflectSetting = plan.dailyReflect;
+        if (dailyReflectSetting !== false) {
+          if (this.deps.decisionClient) {
+            const gate = await evaluateReflectGate(
+              {
+                db: this.deps.db,
+                dataDir: this.deps.dataDir,
+                clock: new VirtualClock(
+                  group.bedtimeAtMs,
+                  this.deps.getConfig().timezone || this.deps.clock.timeZone,
+                ),
+                decisionClient: this.deps.decisionClient,
+              },
+              {
+                scope: "daily",
+                targetDay: nextDay,
+                radarHint: radarRes?.reflectGateHint ?? null,
+              },
+            );
+            if (gate.shouldReflect) {
+              const safeChanged = gate.changedPaths.filter((p) => !p.startsWith("sensitive/"));
+              if (safeChanged.length > 0) {
+                includeDailyReflect = true;
+                reflectChangedPaths = safeChanged;
+                reflectDailyRefPaths = gate.dailyRefPaths;
+              }
+            }
+          } else if (dailyReflectSetting === true) {
+            // 无决策模型但显式开启 daily_reflect=true 时，按 Git 实质变更硬闸放行
+            const dailyCursor = readReflectCursor(this.deps.db, "daily");
+            if (dailyCursor.last_day !== nextDay) {
+              const allChanged = await listChangedMemoryPathsSince(
+                this.deps.dataDir,
+                dailyCursor.last_commit ?? null,
+              );
+              const safeChanged = allChanged.filter(
+                (p) => isSubstantiveReflectPath(p) && !p.startsWith("sensitive/"),
+              );
+              if (safeChanged.length > 0) {
+                includeDailyReflect = true;
+                reflectChangedPaths = safeChanged;
+                reflectDailyRefPaths = allChanged.filter(isReflectionCardPath);
+              }
+            }
+          }
+        }
+
+        const radarBlock =
+          radarRes && radarRes.findings.length > 0
+            ? includeDailyReflect
+              ? renderMemoryRadarBlock(radarRes.findings, {
+                  scope: "bedtime",
+                  includeOpenBoard: true,
+                  maxItems: mergeRadarConfig(this.deps.getConfig().radar).maxFindingsDaily,
+                })
+              : radarRes.renderedBlock
+            : null;
+
         const stepSeq = state.nextStepSeq++;
         state.activeStep = {
           stepId: `${nextDay}:bedtime:1#${stepSeq}`,
@@ -842,16 +1178,21 @@ export class McpReplayRunner {
           touchedPaths: [],
           dayLastEventId: group.lastEventId,
           dayLastEventCreatedAt: group.lastCreatedAt,
+          ...(includeDailyReflect ? { includeDailyReflect: true } : {}),
+          ...(radarBlock ? { radarBlock } : {}),
+          ...(reflectChangedPaths ? { reflectChangedPaths } : {}),
+          ...(reflectDailyRefPaths ? { reflectDailyRefPaths } : {}),
         };
         this.saveState(state);
         return this.renderActiveStep(state, {
           protectCoreFiles: opts.protectCoreFiles,
           resumed: false,
           compactRules: opts.compactRules,
+          outputToFile: opts.outputToFile ?? Boolean(plan.outputToFile),
         });
       }
 
-      // 当日 bedtime 已结算，检查是否应触发周反思（复用 reflect.ts isWeeklyReflectDue + Git 实质变更硬闸）
+      // 当日 bedtime 已结算，检查是否应触发周反思（复用 reflect.ts isWeeklyReflectDue + Git 实质变更硬闸 + 只读雷达）
       const tz = this.deps.getConfig().timezone || this.deps.clock.timeZone;
       const weeklyCursor = readReflectCursor(this.deps.db, "weekly");
       if (weeklyCursor.last_day !== nextDay && isWeeklyReflectDue(this.deps.db, nextDay, tz)) {
@@ -864,6 +1205,13 @@ export class McpReplayRunner {
         );
         const dailyRefs = allChanged.filter(isReflectionCardPath);
         if (substantive.length > 0) {
+          const weeklyRadar = await this.runSafeReplayRadar({
+            scope: "weekly",
+            targetDay: nextDay,
+            bedtimeAtMs: group.bedtimeAtMs,
+            newCardPaths: substantive,
+            includeOpenBoardInBlock: true,
+          });
           const stepSeq = state.nextStepSeq++;
           state.activeStep = {
             stepId: `${nextDay}:reflect_weekly:1#${stepSeq}`,
@@ -875,12 +1223,14 @@ export class McpReplayRunner {
             touchedPaths: [],
             reflectChangedPaths: substantive,
             reflectDailyRefPaths: dailyRefs,
+            ...(weeklyRadar?.renderedBlock ? { radarBlock: weeklyRadar.renderedBlock } : {}),
           };
           this.saveState(state);
           return this.renderActiveStep(state, {
             protectCoreFiles: opts.protectCoreFiles,
             resumed: false,
             compactRules: opts.compactRules,
+            outputToFile: opts.outputToFile ?? Boolean(plan.outputToFile),
           });
         }
         if (baseCommit) {
@@ -924,7 +1274,11 @@ export class McpReplayRunner {
       (existingPaths.length > 0 ? `update ${existingPaths.slice(0, 3).join(", ")}` : "无新增记忆");
 
     const commitTag =
-      step.phase === "reflect_weekly" ? `import-reflect-${step.day}` : `import-${step.day}`;
+      step.phase === "reflect_weekly"
+        ? `import-reflect-${step.day}`
+        : step.phase === "bedtime" && step.includeDailyReflect
+          ? `import-bedtime+reflect-${step.day}`
+          : `import-${step.day}`;
     const committed =
       existingPaths.length > 0
         ? await commitMemoryPaths(
@@ -1077,6 +1431,7 @@ export class McpReplayRunner {
           state.dayTouchedPaths = [];
         }
         this.saveState(state);
+        await this.removeStepTaskFile();
 
         return {
           ok: true,
@@ -1093,9 +1448,18 @@ export class McpReplayRunner {
       if (action === "start") {
         // 防跳步保护：若仍有未提交的在途步骤，直接原样续接，绝不重置或跳过
         if (state.activeStep) {
+          const resumedOutputToFile =
+            typeof args.output_to_file === "boolean"
+              ? args.output_to_file
+              : Boolean(state.plan?.outputToFile);
+          if (typeof args.output_to_file === "boolean" && state.plan) {
+            state.plan.outputToFile = args.output_to_file;
+            this.saveState(state);
+          }
           return this.renderActiveStep(state, {
             protectCoreFiles: opts.protectCoreFiles,
             resumed: true,
+            outputToFile: resumedOutputToFile,
           });
         }
 
@@ -1109,6 +1473,8 @@ export class McpReplayRunner {
         const maxChars = clampInt(args.max_chars, MIN_MAX_CHARS, MAX_MAX_CHARS, DEFAULT_MAX_CHARS);
         const minChars = clampInt(args.min_chars, 0, MAX_MIN_CHARS, DEFAULT_MIN_CHARS);
         const compactRules = args.compact_rules === true;
+        const outputToFile = args.output_to_file === true;
+        const dailyReflect = typeof args.daily_reflect === "boolean" ? args.daily_reflect : undefined;
         const runAll = args.all === true;
         const untilRaw = typeof args.until === "string" ? args.until.trim() : "";
         if (untilRaw && !/^\d{4}-\d{2}-\d{2}$/.test(untilRaw)) {
@@ -1137,6 +1503,8 @@ export class McpReplayRunner {
           maxChars,
           minChars,
           compactRules,
+          outputToFile,
+          ...(dailyReflect !== undefined ? { dailyReflect } : {}),
           untilDay: untilRaw || null,
           createdAtMs: this.deps.clock.now(),
         };
@@ -1150,6 +1518,7 @@ export class McpReplayRunner {
         return this.advanceToNextStep(state, byDay, groups, {
           protectCoreFiles: opts.protectCoreFiles,
           compactRules: false,
+          outputToFile,
         });
       }
 
@@ -1158,6 +1527,13 @@ export class McpReplayRunner {
         typeof args.compact_rules === "boolean"
           ? args.compact_rules
           : Boolean(state.plan?.compactRules);
+      const nextOutputToFile =
+        typeof args.output_to_file === "boolean"
+          ? args.output_to_file
+          : Boolean(state.plan?.outputToFile);
+      if (typeof args.output_to_file === "boolean" && state.plan) {
+        state.plan.outputToFile = args.output_to_file;
+      }
 
       if (state.activeStep) {
         const providedStepId = typeof args.step_id === "string" ? args.step_id.trim() : "";
@@ -1167,6 +1543,7 @@ export class McpReplayRunner {
             protectCoreFiles: opts.protectCoreFiles,
             resumed: true,
             compactRules: false,
+            outputToFile: nextOutputToFile,
           });
         }
 
@@ -1174,6 +1551,7 @@ export class McpReplayRunner {
         return this.advanceToNextStep(state, byDay, groups, {
           protectCoreFiles: opts.protectCoreFiles,
           compactRules: nextCompactRules,
+          outputToFile: nextOutputToFile,
         });
       }
 
@@ -1181,6 +1559,7 @@ export class McpReplayRunner {
         return this.advanceToNextStep(state, byDay, groups, {
           protectCoreFiles: opts.protectCoreFiles,
           compactRules: nextCompactRules,
+          outputToFile: nextOutputToFile,
         });
       }
 

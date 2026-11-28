@@ -1319,4 +1319,323 @@ describe("对外记忆 MCP 第二阶段（单工具 memory_replay 搬家工具�
     expect(blockedAfter.isError).toBe(true);
     expect(blockedAfter.text).toContain("禁止读写");
   });
+
+  test("output_to_file=true 将完整任务包落盘到 .tmp/replay_step.md 并仅返回极简指针，结算完成后自动清理", async () => {
+    const c = (ctx = await createTestContext());
+    const t0 = Date.UTC(2026, 5, 30, 14, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: 1,
+      atMs: t0,
+      role: "user",
+      turnId: "t-file-1",
+      content: "测试落盘模式原始对话：<plan>保留原文不折叠</plan>",
+    });
+    insertHistoricalEvent(c, {
+      seq: 2,
+      atMs: t0 + 10_000,
+      role: "assistant",
+      turnId: "t-file-1",
+      content: "收到，落盘文件应保留完整正文。",
+    });
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: c.clock,
+      getConfig: () => c.config,
+      events: c.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: c.dataDir,
+      promptsDir: PROMPTS_DIR,
+      db: c.db,
+      memoryIndex: c.index,
+      memoryTools: c.tools,
+      memoryGitMutex: new AsyncMutex(),
+    });
+    const authHeaders = { authorization: `Bearer ${c.authToken}`, "content-type": "application/json" };
+    const tokRes = await app.request("/api/v1/memory-mcp/tokens", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ name: "file-client" }),
+    });
+    const mcpToken = ((await tokRes.json()) as { token: string }).token;
+    await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        memoryMcp: { enabled: true, accessMode: "read_write", replayToolsEnabled: true },
+      }),
+    });
+
+    const s1 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "start",
+      days: 1,
+      output_to_file: true,
+    });
+    expect(s1.isError).toBe(false);
+    expect(s1.text).toContain("status: step");
+    expect(s1.text).toContain("task_file:");
+    expect(s1.text).not.toContain("<tidy_rules>");
+    expect(s1.text).not.toContain("保留原文不折叠");
+
+    const fileMatch = /^task_file:\s*(.+)$/m.exec(s1.text);
+    expect(fileMatch).not.toBeNull();
+    const taskFilePath = fileMatch![1]!.trim();
+    const fileContent1 = await fs.readFile(taskFilePath, "utf8");
+    expect(fileContent1).toContain("<tidy_rules>");
+    expect(fileContent1).toContain("<plan>保留原文不折叠</plan>");
+
+    // next 自动继承 output_to_file=true，覆盖同一临时文件并继续返回指针
+    const s2 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s1.text),
+      summary: "06-30切片",
+    });
+    expect(s2.isError).toBe(false);
+    expect(s2.text).toContain("phase: bedtime");
+    expect(s2.text).toContain(`task_file: ${taskFilePath}`);
+    const fileContent2 = await fs.readFile(taskFilePath, "utf8");
+    expect(fileContent2).toContain("phase: bedtime");
+
+    // 计划收尾后自动清理临时文件
+    const sDone = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s2.text),
+      summary: "06-30日梗概",
+    });
+    expect(sDone.isError).toBe(false);
+    expect(sDone.text).toContain("status: finished");
+    await expect(fs.access(taskFilePath)).rejects.toThrow();
+  });
+
+  test("compact_rules 附带硬约束清单、bedtime 补传注册表、合并日反思与核心区水位提示", async () => {
+    const c = (ctx = await createTestContext());
+    await c.tools.write(
+      "core/self.md",
+      "---\ntitle: 关于我\nkind: note\nstatus: active\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\n我是 Roy。",
+    );
+    await c.tools.write(
+      "core/mirror.md",
+      "---\ntitle: 全局自省\nkind: note\nstatus: active\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\n- " +
+        "这是一条故意超过八十字的全局自省提醒用来测试水位提示能否精准识别超限条数与字数并在反思轮提醒合并瘦身。".repeat(2),
+    );
+    await c.tools.write(
+      "threads/REGISTRY.yaml",
+      "spaces:\n  book-club:\n    title: 共读书单\n    triggers: [看书, 书单]\n    decay: none\n    card_style: \"每本书单独立卡\"\n",
+    );
+    await c.tools.write(
+      "entities/REGISTRY.yaml",
+      "entities:\n  xiaoju:\n    name: 小橘\n    aliases: [橘猫]\n    category: pets\n    relation: 楼下橘猫\n    first_seen: 2026-06-01\n",
+    );
+    await commitMemoryPaths(
+      c.dataDir,
+      ["core/self.md", "core/mirror.md", "threads/REGISTRY.yaml", "entities/REGISTRY.yaml"],
+      "memory(genesis): init base",
+    );
+
+    const t0 = Date.UTC(2026, 6, 1, 14, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: 1,
+      atMs: t0,
+      role: "user",
+      turnId: "t-dr-1",
+      content: "今晚认真聊了边界和共读书单，觉得这种坦诚沟通很安心。",
+    });
+    insertHistoricalEvent(c, {
+      seq: 2,
+      atMs: t0 + 10_000,
+      role: "assistant",
+      turnId: "t-dr-1",
+      content: "嗯，我记住这份边界感，也把书单挂进长线。",
+    });
+
+    const mockDecision = {
+      decide: async (req: { questions: Record<string, unknown> }) => {
+        const answers: Record<string, { noul: number }> = {};
+        for (const k of Object.keys(req.questions)) {
+          answers[k] = { noul: 0.9 };
+        }
+        return { answers };
+      },
+    };
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: c.clock,
+      getConfig: () => c.config,
+      events: c.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: c.dataDir,
+      promptsDir: PROMPTS_DIR,
+      db: c.db,
+      memoryIndex: c.index,
+      memoryTools: c.tools,
+      decisionClient: mockDecision,
+      memoryGitMutex: new AsyncMutex(),
+    });
+    const authHeaders = { authorization: `Bearer ${c.authToken}`, "content-type": "application/json" };
+    const tokRes = await app.request("/api/v1/memory-mcp/tokens", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ name: "daily-reflect-client" }),
+    });
+    const mcpToken = ((await tokRes.json()) as { token: string }).token;
+    await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        memoryMcp: {
+          enabled: true,
+          accessMode: "read_write",
+          protectCoreFiles: true,
+          replayToolsEnabled: true,
+        },
+      }),
+    });
+
+    const s1 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "start",
+      days: 1,
+      compact_rules: true,
+    });
+    expect(s1.isError).toBe(false);
+
+    // 写入一张实质切片，触发 bedtime 日反思门控
+    await callMcpTool(app, mcpToken, "memory_write", {
+      path: "episodes/2026/07/01/ep-boundary-talk.md",
+      content:
+        "---\ntitle: 07-01 坦诚聊边界\nkind: episode\nstatus: active\ncreated: 2026-07-01\nupdated: 2026-07-01\n---\n今晚认真聊了边界与共读书单。",
+    });
+
+    const s2 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s1.text),
+      summary: "07-01切片",
+    });
+    expect(s2.isError).toBe(false);
+    expect(s2.text).toContain("phase: bedtime");
+    expect(s2.text).toContain("daily_reflect: enabled");
+    expect(s2.text).toContain("<compact_checklist>");
+    expect(s2.text).toContain("<daily_reflect_guide>");
+    expect(s2.text).toContain("# 常驻核心区篇幅水位");
+    expect(s2.text).toContain("超限 1 条");
+    expect(s2.text).toContain("# threads/REGISTRY.yaml");
+    expect(s2.text).toContain("book-club");
+    expect(s2.text).toContain("# entities/REGISTRY.yaml");
+    expect(s2.text).toContain("xiaoju");
+
+    // 合并日反思的 bedtime 在 protectCoreFiles=true 下应放行 core/open.md
+    const wOpen = await callMcpTool(app, mcpToken, "memory_write", {
+      path: "core/open.md",
+      content:
+        "---\ntitle: 未完挂念\nkind: note\nstatus: active\ncreated: 2026-07-01\nupdated: 2026-07-01\n---\n- 跟进共读书单第一本。\n",
+    });
+    expect(wOpen.isError).toBe(false);
+
+    const sDone = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s2.text),
+      summary: "07-01日梗概与日反思",
+    });
+    expect(sDone.isError).toBe(false);
+    expect(sDone.text).toContain("status: finished");
+
+    const logRes = await readMemoryGitLog(c.dataDir, { limit: 3 });
+    expect(logRes.ok).toBe(true);
+    if (logRes.ok) {
+      expect(logRes.stdout).toContain("import-bedtime+reflect-2026-07-01");
+    }
+  });
+
+  test("回归：core/open.md 保留多行换行，合并日反思零禁令冲突且共享底座不重复，readPrompt 拦截越权 include", async () => {
+    const c = (ctx = await createTestContext());
+    await c.tools.write(
+      "core/open.md",
+      "---\ntitle: 未完挂念\nkind: note\nstatus: active\ncreated: 2026-07-01\nupdated: 2026-07-01\n---\n# 未完挂念\n\n- 挂念一：保留第一行\n- 挂念二：保留第二行\n",
+    );
+    await commitMemoryPaths(c.dataDir, ["core/open.md"], "memory(genesis): init open");
+
+    const t0 = Date.UTC(2026, 6, 2, 14, 0, 0);
+    insertHistoricalEvent(c, {
+      seq: 1,
+      atMs: t0,
+      role: "user",
+      turnId: "t-reg-1",
+      content: "今晚测试合并日反思提示词与 core/open.md 换行保留。",
+    });
+    insertHistoricalEvent(c, {
+      seq: 2,
+      atMs: t0 + 10_000,
+      role: "assistant",
+      turnId: "t-reg-1",
+      content: "好，记下来验证。",
+    });
+
+    const app = createApp({
+      version: "0.1.0",
+      clock: c.clock,
+      getConfig: () => c.config,
+      events: c.events,
+      getActiveSessionId: () => "sess-1",
+      dataDir: c.dataDir,
+      promptsDir: PROMPTS_DIR,
+      db: c.db,
+      memoryIndex: c.index,
+      memoryTools: c.tools,
+      memoryGitMutex: new AsyncMutex(),
+    });
+    const authHeaders = { authorization: `Bearer ${c.authToken}`, "content-type": "application/json" };
+    const tokRes = await app.request("/api/v1/memory-mcp/tokens", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ name: "reg-client" }),
+    });
+    const mcpToken = ((await tokRes.json()) as { token: string }).token;
+    await app.request("/api/v1/settings", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({
+        memoryMcp: { enabled: true, accessMode: "read_write", replayToolsEnabled: true },
+      }),
+    });
+
+    const s1 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "start",
+      days: 1,
+      daily_reflect: true,
+    });
+    expect(s1.isError).toBe(false);
+    // wrapup 正向白名单，不含负向白熊清单
+    expect(s1.text).toContain("允许改动范围仅限");
+    expect(s1.text).not.toContain("本轮不写 index.md");
+
+    await callMcpTool(app, mcpToken, "memory_write", {
+      path: "episodes/2026/07/02/ep-reg.md",
+      content:
+        "---\ntitle: 07-02 回归验证\nkind: episode\nstatus: active\ncreated: 2026-07-02\nupdated: 2026-07-02\n---\n验证提示词拼装。",
+    });
+
+    const s2 = await callMcpTool(app, mcpToken, "memory_replay", {
+      action: "next",
+      step_id: extractStepId(s1.text),
+      summary: "07-02切片",
+    });
+    expect(s2.isError).toBe(false);
+    expect(s2.text).toContain("daily_reflect: enabled");
+    // core/open.md 必须保留原有换行
+    expect(s2.text).toContain("- 挂念一：保留第一行\n- 挂念二：保留第二行");
+    // 合并模式无互相打架禁令，且共享规范底座只出现 1 次
+    expect(s2.text).not.toContain("本轮不写也不改");
+    expect(s2.text).not.toContain("严禁修改 `episodes/` 下已写好的");
+    const schemaCount = s2.text.split("# 共享规范").length - 1;
+    expect(schemaCount).toBe(1);
+
+    // readPrompt 越权 include 拦截
+    const { readPrompt } = await import("../src/core/prompts.ts");
+    await expect(
+      readPrompt(PROMPTS_DIR, "reflect.md", {
+        SHARED_SCHEMA_BLOCK: "{{> ../package.json}}",
+        REFLECT_SCOPE_BLOCK: "test",
+      }),
+    ).rejects.toThrow("escapes promptsDir");
+  });
 });

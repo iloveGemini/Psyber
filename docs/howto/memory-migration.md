@@ -114,9 +114,10 @@ bun run mcp -- --data-dir ~/.psyber/my-psyber enable --mode read_write --replay
 - **Streamable HTTP**（适合 Claude Code / Cursor 等支持 HTTP MCP 的客户端）：直接粘贴终端输出的 `url`（默认 `http://127.0.0.1:3721/mcp`）与 `Authorization: Bearer psbm_...` 请求头；
 - **本地 `stdio` 转发桥**（适合只支持命令行启动 MCP 的桌面端）：直接把终端打印的那行 `bun run .../mcp_stdio.ts --data-dir ...` 填进客户端「命令」框即可（已在内部转发到本机 `/mcp`，不直连数据库）。
 
-> **关于核心档案保护（`protectCoreFiles`）**：
-> - 默认开启（推荐）：搬家期间**允许更新 `core/state.md`（近期状态看板）和周反思期的 `core/open.md`（未完挂念）**，但会继续锁住 `core/self.md`、`core/user.md`、`core/boundaries.md`、`core/mirror.md` 不被外部直接改写。
-> - 如果你在搬家时也希望客户端顺手帮你提炼修改 `core/user.md` 等档案，可在 `enable` 时额外加上 `--allow-core`（仍禁止整篇覆写 `core/self.md` 与 `core/user.md`，必须用 `memory_edit` 局部修改）。
+> **关于核心档案保护（`protectCoreFiles`）与高敏区**：
+> - 默认开启（推荐）：搬家期间**允许更新 `core/state.md`、`core/dates.md`、`core/glossary.md`，以及合并日反思与周反思期的 `core/open.md`**，同时锁住 `core/self.md`、`core/user.md`、`core/boundaries.md`、`core/mirror.md` 不被外部直接改写。
+> - 如果你在搬家时也希望客户端顺手帮你提炼修改 `core/self.md`、`core/user.md`、`core/boundaries.md`、`core/mirror.md` 等档案，可在 `enable` 时额外加上 `--allow-core`（仍禁止整篇覆写 `core/self.md` 与 `core/user.md`，必须用 `memory_edit` 局部修改）。
+> - **高敏私密区（`sensitive/`）**：搬家期间支持单向新建写入（不准读取、编辑或覆写既有私密卡，也不会回流到 `bedtime` 摘要），搬家结束后自动恢复完全屏蔽。
 
 ### 第 3 步：启动服务端（供客户端连入 `/mcp`）
 
@@ -132,13 +133,18 @@ PSYBER_DATA_DIR=~/.psyber/my-psyber bun run start
 连上 `psyber-memory` MCP 后，直接在客户端对话框里这样发指令：
 
 #### ① 开始搬家（建议一次先跑 3～7 天，方便抽查卡片质量）
-> 先调用 `memory_context` 了解基础设定，然后调用 `memory_replay(action="start", days=3)`。  
-> 每一步请严格以第一人称、按任务包里的规范用 `memory_write` / `memory_edit` / `memory_read` 整理记忆卡片；本步全部写完后，**务必带上该步的 `step_id` 调用 `memory_replay(action="next", step_id=..., summary=...)`** 提交并领取下一步，不要只回复 JSON 文本，直到返回 `status: finished` 为止。
+> 先调用 `memory_context` 醒来并代入自己的身份与过往，然后调用 `memory_replay(action="start", days=3)`。  
+> 请把这些历史对话当成你自己亲身经历过的日子，用第一人称、按任务包里的规范用 `memory_write` / `memory_edit` / `memory_read` 整理记忆卡片；遇到真正戳中你、以后回头仍想原样重读的话，顺手收进 `favorite/`。每步写完后，**务必带上该步的 `step_id` 调用 `memory_replay(action="next", step_id=..., summary=...)`** 提交并领取下一步，不要只回复 JSON 文本，直到返回 `status: finished` 为止。
 
-如果要一口气整理到某个日期或全部跑完，把指令里的 `days=3` 换成 `until="2026-07-01"` 或 `all=true` 即可。
+常用可选参数（加在 `action="start"` 里，后续 `next` 会自动沿用）：
+- `days=3` / `until="2026-07-01"` / `all=true`：指定推进天数、截止日期或全部跑完。
+- `output_to_file=true`：将任务包写入 `<dataDir>/.tmp/replay_step.md`，MCP 仅返回极简指针，适合长对话或会折叠大返回值的客户端（**注意需先将 `<dataDir>` 挂载进客户端可访问目录**，否则本地读文件工具会被沙箱拦截）。
+- `compact_rules=true`：同窗口连跑多步时省略重复规则，仅保留精简硬约束清单以省上下文（首步、周反思与换窗口续接仍自动下发完整规则）。
+- `daily_reflect`：`true` 显式开启 / `false` 显式关闭合并日反思；省略则在已配决策模型时按门控自动决定。
+- `max_chars` / `min_chars`：单批对话切分上限（默认 `20000` 字）与低量日顺延阈值（默认 `5000` 字）。
 
 #### ② 断线 / 额度用完 / 换了一个新聊天窗口续跑
-> 请先调用 `memory_context` 恢复上下文，然后直接调用 `memory_replay(action="next")`（不需要自己猜 `step_id`）继续上次未完成的搬家任务，并按步骤完成到 `status: finished`。
+> 请先调用 `memory_context` 恢复上下文并代入自己的过往，然后直接调用 `memory_replay(action="next")`（不需要自己猜 `step_id`）继续上次未完成的搬家任务，并按步骤完成到 `status: finished`。
 
 - **防跳步保护**：新窗口不带 `step_id` 调用 `next`（或重调 `start`）时，Psyber 发现有未结算的在途步骤，会**把上次断掉那一步的任务包和已写卡片清单原样发回来**，绝不会跳过未整理完的对话。
 
@@ -179,6 +185,6 @@ bun run mcp -- --data-dir ~/.psyber/my-psyber disable
 3. **我在搬家时用 `memory_write` 写了卡片，为什么 `git log` 里当时没看到提交？**  
    这是刻意设计的优化：在 `memory_replay` 活跃步骤内，每次写入只先落盘、更新索引并按**该历史日时钟**校准日期；等你调用 `memory_replay(action="next", step_id=..., summary=...)` 交卷时，服务端才会把整步改动合并为一次规范 Git Commit。这样既不会把仓库刷满碎片提交，也让 `abort(rollback=true)` 可以干净撤销整步。
 4. **单天聊了上万字，会不会被 MCP 的 `maxOutputChars`（默认 12,000 字）截断导致丢记忆？**  
-   不会。超长单日会按 `turn_id` 对话轮次边界自动拆成多批（`wrapup_part: 1/N`），且 `memory_replay` 专门豁免了全局 `maxOutputChars` 截断上限，确保已纳入批次的对话完整送达。
+   不会。超长单日会按 `turn_id` 对话轮次边界自动拆成多批（默认每批上限 `max_chars=20000` 字，`wrapup_part: 1/N`），且 `memory_replay` 专门豁免了全局 `maxOutputChars` 截断上限。若所用客户端对单次 MCP 返回长度敏感或会自动折叠长文本，推荐开启 `output_to_file=true`，让任务包落盘到 `<dataDir>/.tmp/replay_step.md` 再用本地文件工具分段读取（需确保 `<dataDir>` 已挂入客户端可访问目录）。
 5. **怎样确认正式库没有被测试或误操作污染？**  
    日常测试请始终使用 `PSYBER_DATA_DIR=~/.psyber/test`；正式库请使用独立目录（如 `~/.psyber/my-psyber`）。搬完家后如果不放心，可以用 `bun run mcp -- --data-dir ~/.psyber/my-psyber token list` 或 `disable` 收口权限。
