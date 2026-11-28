@@ -20,16 +20,16 @@ const MIME_BY_EXT: Record<string, string> = {
 const STICKER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 /**
- * 启动时扫描 <dataDir>/stickers/manifest.json（对齐 Spec 03 §2.2）：
+ * 扫描指定贴纸目录下的 manifest.json（对齐 Spec 03 §2.2）：
  * 将静态贴纸文件按 SHA-256 写入 <dataDir>/media/（origin='sticker', pinned=1）并同步写入 stickers 表。
  * 若目录或 manifest.json 不存在则静默跳过。
  */
-export async function syncStaticStickers(
+export async function syncStickersFromDir(
   db: Database,
   dataDir: string,
+  stickersDir: string,
   clock: Clock,
 ): Promise<number> {
-  const stickersDir = path.join(dataDir, "stickers");
   const manifestPath = path.join(stickersDir, "manifest.json");
 
   let raw: string;
@@ -111,5 +111,26 @@ export async function syncStaticStickers(
     synced += 1;
   }
 
+  return synced;
+}
+
+/**
+ * 启动时同步静态贴纸（对齐 Spec 03 §2.2）：
+ * 若传入 builtinStickersDir，先同步内置贴纸包，再同步 <dataDir>/stickers/（同名 id 以用户目录为准）。
+ */
+export async function syncStaticStickers(
+  db: Database,
+  dataDir: string,
+  clock: Clock,
+  opts?: { builtinStickersDir?: string },
+): Promise<number> {
+  let synced = 0;
+  if (opts?.builtinStickersDir) {
+    synced += await syncStickersFromDir(db, dataDir, opts.builtinStickersDir, clock);
+  }
+  const userStickersDir = path.join(dataDir, "stickers");
+  if (!opts?.builtinStickersDir || path.resolve(opts.builtinStickersDir) !== path.resolve(userStickersDir)) {
+    synced += await syncStickersFromDir(db, dataDir, userStickersDir, clock);
+  }
   return synced;
 }

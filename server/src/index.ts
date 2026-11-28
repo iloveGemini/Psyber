@@ -92,6 +92,7 @@ export { DynamicChatModel } from "./llm/router.ts";
 export interface BootOptions {
   dataDir?: string;
   promptsDir?: string;
+  builtinStickersDir?: string;
   version?: string;
   /** 可注入虚拟时钟，供离线测试快进时间 */
   clock?: Clock;
@@ -184,6 +185,7 @@ export interface PsyberRuntime {
 export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberRuntime> {
   const dataDir = opts.dataDir ?? resolveDataDir();
   const promptsDir = opts.promptsDir ?? path.resolve(import.meta.dir, "../../prompts");
+  const builtinStickersDir = opts.builtinStickersDir ?? path.resolve(import.meta.dir, "../../stickers");
   const version = opts.version ?? "0.1.0";
 
   // Stage 1–5: 目录骨架、崩溃清理、Git 沙箱自愈、配置与 SQLite 迁移
@@ -204,10 +206,10 @@ export async function bootPsyberRuntime(opts: BootOptions = {}): Promise<PsyberR
   const db = openDatabase(path.join(dataDir, "psyber.sqlite"));
   runMigrations(db, clock.now());
 
-  // Stage 6: 记忆索引与静态贴纸同步
+  // Stage 6: 记忆索引与静态贴纸同步（先同步仓库内置贴纸包，再同步用户 dataDir/stickers）
   const memoryIndex = new MemoryIndex(db, dataDir, clock);
   await memoryIndex.reindexAll();
-  await syncStaticStickers(db, dataDir, clock);
+  await syncStaticStickers(db, dataDir, clock, { builtinStickersDir });
 
   // Stage 7: 装配事件仓、媒体仓、配对管理器、记忆工具、SSE 与离线通知中心
   const events = new EventStore(db, clock);

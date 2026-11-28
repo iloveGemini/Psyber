@@ -30,3 +30,6 @@ app/ios/.symlinks/
 app/macos/.symlinks/
 app/macos/Flutter/ephemeral/
 app/ios/Flutter/ephemeral/
+
+# Raw uncropped sticker sprite sheets
+stickers/raw/

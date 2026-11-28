@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/readme-banner.jpeg" alt="Psyber — cyber + psyche" width="100%" />
+</p>
+
 # Psyber
 
 > **cyber + psyche** — 一个开源、本地优先、全栈可用的数字生命与长期陪伴系统。

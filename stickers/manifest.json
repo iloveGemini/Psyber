@@ -1,0 +1,34 @@
+{
+  "items": [
+    { "id": "hi", "label": "嗨", "file": "hi.png", "pack": "日常" },
+    { "id": "good_morning", "label": "早安", "file": "good_morning.png", "pack": "日常" },
+    { "id": "wyd", "label": "在干嘛", "file": "wyd.png", "pack": "日常" },
+    { "id": "goodnight", "label": "晚安", "file": "goodnight.png", "pack": "日常" },
+    { "id": "thumbs_up", "label": "真棒", "file": "thumbs_up.png", "pack": "日常" },
+    { "id": "cheer", "label": "加油", "file": "cheer.png", "pack": "日常" },
+    { "id": "comfort", "label": "抱抱", "file": "comfort.png", "pack": "日常" },
+    { "id": "thinking", "label": "想想看", "file": "thinking.png", "pack": "日常" },
+
+    { "id": "laugh", "label": "哈哈笑死", "file": "laugh.png", "pack": "情绪" },
+    { "id": "snicker", "label": "偷笑", "file": "snicker.png", "pack": "情绪" },
+    { "id": "smirk", "label": "坏笑", "file": "smirk.png", "pack": "情绪" },
+    { "id": "playful", "label": "调皮", "file": "playful.png", "pack": "情绪" },
+    { "id": "wink", "label": "wink", "file": "wink.png", "pack": "情绪" },
+    { "id": "speechless", "label": "无语", "file": "speechless.png", "pack": "情绪" },
+    { "id": "shocked", "label": "震惊", "file": "shocked.png", "pack": "情绪" },
+    { "id": "stare", "label": "盯——", "file": "stare.png", "pack": "情绪" },
+    { "id": "skeptical", "label": "怀疑", "file": "skeptical.png", "pack": "情绪" },
+    { "id": "eyebrow_raise", "label": "挑眉", "file": "eyebrow_raise.png", "pack": "情绪" },
+    { "id": "sigh", "label": "叹气", "file": "sigh.png", "pack": "情绪" },
+    { "id": "melt", "label": "累瘫了", "file": "melt.png", "pack": "情绪" },
+    { "id": "sad_curl", "label": "委屈", "file": "sad_curl.png", "pack": "情绪" },
+    { "id": "cry", "label": "大哭", "file": "cry.png", "pack": "情绪" },
+    { "id": "annoyed", "label": "不爽", "file": "annoyed.png", "pack": "情绪" },
+    { "id": "angry", "label": "生气", "file": "angry.png", "pack": "情绪" },
+
+    { "id": "peek", "label": "探头看看", "file": "peek.png", "pack": "静室" },
+    { "id": "slip_note", "label": "塞张纸条", "file": "slip_note.png", "pack": "静室" },
+    { "id": "remember", "label": "记下来了", "file": "remember.png", "pack": "静室" },
+    { "id": "drawer_hide", "label": "躲进抽屉", "file": "drawer_hide.png", "pack": "静室" }
+  ]
+}
